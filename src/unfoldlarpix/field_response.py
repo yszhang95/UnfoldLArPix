@@ -180,12 +180,13 @@ class FieldResponseProcessor:
         # Apply normalization if needed
         if not self.normalized:
             # Normalize so that np.sum(response[0,0,:]) * time_tick = 1.0
-            current_sum = np.sum(raw_response[0, 0, :]) * time_tick
-            if current_sum == 0:
-                raise ValueError("Cannot normalize response with zero sum")
+            # Since response contains dQ/dt (charge per unit time), multiply
+            # by time_tick to get dQ (charge per time tick)
             raw_response = raw_response * time_tick
 
             # Verify normalization within tolerance
+            # Field response should integrate to 1.0 over time for central pixel
+            # at any given path
             normalized_sum = np.sum(raw_response[0, 0, :])
             if abs(normalized_sum - 1.0) > 1e-6:
                 raise ValueError(
