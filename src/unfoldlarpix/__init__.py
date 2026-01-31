@@ -12,6 +12,7 @@ from .data_containers import (
     ReadoutConfig,
 )
 from .data_loader import DataLoader
+from .field_response import FieldResponseProcessor
 
 __all__ = [
     "DataLoader",
@@ -21,4 +22,5 @@ __all__ = [
     "EventData",
     "Geometry",
     "ReadoutConfig",
+    "FieldResponseProcessor",
 ]
