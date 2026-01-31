@@ -1,7 +1,6 @@
 """Field response processor for kernel loading and preprocessing."""
 
 from pathlib import Path
-from typing import Optional, Union
 
 import numpy as np
 
@@ -14,7 +13,7 @@ class FieldResponseProcessor:
     intra-pixel impact positions.
     """
 
-    def __init__(self, npz_filepath: Union[str, Path], normalized: bool = False) -> None:
+    def __init__(self, npz_filepath: str | Path, normalized: bool = False) -> None:
         """Initialize field response processor.
 
         Args:
@@ -27,8 +26,8 @@ class FieldResponseProcessor:
             raise FileNotFoundError(f"NPZ file not found: {npz_filepath}")
 
         self.normalized = normalized
-        self._data: Optional[dict] = None
-        self._processed_response: Optional[np.ndarray] = None
+        self._data: dict | None = None
+        self._processed_response: np.ndarray | None = None
 
     def _load_data(self) -> dict:
         """Load data from NPZ file."""
@@ -50,7 +49,9 @@ class FieldResponseProcessor:
             Full response plane with all quadrants filled.
         """
         if len(raw.shape) != 3:
-            raise ValueError(f"quadrant_copy operates only on 3D array, got {len(raw.shape)}")
+            raise ValueError(
+                f"quadrant_copy operates only on 3D array, got {len(raw.shape)}"
+            )
 
         # Always work with time axis at last position for simplicity
         if axis != -1:
@@ -59,25 +60,27 @@ class FieldResponseProcessor:
         # Create full array: double spatial dimensions, keep time dimension
         shape = np.array(raw.shape)
         if shape[0] != shape[1]:
-            raise ValueError("Input array must have equal spatial dimensions for quadrant copy.")
+            raise ValueError(
+                "Input array must have equal spatial dimensions for quadrant copy."
+            )
         shape[:2] = shape[:2] * 2  # Double spatial dimensions
         full = np.zeros(shape.astype(int), dtype=raw.dtype)
 
         h0 = raw.shape[0]
         h1 = raw.shape[1]
 
-        # The input `raw` tensor represents a quadrant located in the positive-positive corner.
-        # Shifting the origin to the lower corner of the pixel means the new indices of input
+        # The input `raw` tensor represents a quadrant in the positive-positive corner.
+        # Shifting the origin to the lower corner of the pixel means the new indices
         # must cover a larger positive index range.
 
         # positive-positive quadrant (original): no flip needed
-        full[h0:  , h1:  , :] = raw
+        full[h0:, h1:, :] = raw
         # negative-positive quadrant: flip vertically (axis 0)
-        full[  :h0, h1:  , :] = np.flip(raw, axis=0)
+        full[:h0, h1:, :] = np.flip(raw, axis=0)
         # positive-negative quadrant: flip horizontally (axis 1)
-        full[h0:  ,   :h1, :] = np.flip(raw, axis=1)
+        full[h0:, :h1, :] = np.flip(raw, axis=1)
         # negative-negative quadrant: flip both axes
-        full[  :h0,   :h1, :] = np.flip(raw, axis=(0, 1))
+        full[:h0, :h1, :] = np.flip(raw, axis=(0, 1))
 
         return full
 
@@ -87,7 +90,8 @@ class FieldResponseProcessor:
         """Downsample expanded response by averaging intra-pixel positions.
 
         Args:
-            expanded_response: Full response plane with shape ((2r+1)*npath, (2r+1)*npath, Nt).
+            expanded_response: Full response plane with shape ((2r+1)*npath,
+                              (2r+1)*npath, Nt).
             npath: Number of simulated impact positions per pixel pitch.
 
         Returns:
@@ -98,9 +102,7 @@ class FieldResponseProcessor:
         n_pixels = spatial_shape[0] // npath  # Should be equal for both dimensions
 
         if spatial_shape[0] != spatial_shape[1]:
-            raise ValueError(
-                f"Spatial dimensions must be equal, got {spatial_shape}"
-            )
+            raise ValueError(f"Spatial dimensions must be equal, got {spatial_shape}")
         if spatial_shape[0] % npath != 0:
             raise ValueError(
                 f"Spatial dimensions {spatial_shape} not divisible by npath={npath}"
@@ -116,10 +118,15 @@ class FieldResponseProcessor:
 
         return downsampled
 
-    def _flip_per_pixel(
-            self, expanded_response: np.ndarray, npath: int
+    def _flip_kernel_for_convolution(
+        self, expanded_response: np.ndarray, npath: int
     ) -> np.ndarray:
-        """Flip expanded response per pixel.
+        """Flip expanded response per pixel to convert cross-correlation to convolution
+        kernel.
+
+        This transformation converts the original field response, which acts as a
+        path-wise or channel-wise cross-correlation kernel, into a proper
+        path-wise or channel-wise convolution kernel.
 
         Returns:
             Flipped response array with shape ((2r+1)*npath, (2r+1)*npath, Nt).
@@ -129,9 +136,7 @@ class FieldResponseProcessor:
         n_pixels = spatial_shape[0] // npath  # Should be equal for both dimensions
 
         if spatial_shape[0] != spatial_shape[1]:
-            raise ValueError(
-                f"Spatial dimensions must be equal, got {spatial_shape}"
-            )
+            raise ValueError(f"Spatial dimensions must be equal, got {spatial_shape}")
         if spatial_shape[0] % npath != 0:
             raise ValueError(
                 f"Spatial dimensions {spatial_shape} not divisible by npath={npath}"
@@ -142,9 +147,7 @@ class FieldResponseProcessor:
             n_pixels, npath, n_pixels, npath, expanded_response.shape[2]
         )
         reshaped = np.flip(reshaped, axis=(0, 2)).reshape(
-            n_pixels * npath,
-            n_pixels * npath,
-            expanded_response.shape[2]
+            n_pixels * npath, n_pixels * npath, expanded_response.shape[2]
         )
         return reshaped
 
@@ -152,8 +155,8 @@ class FieldResponseProcessor:
         """Process field response data from NPZ file.
 
         Loads raw response, applies normalization if needed,
-        expands quadrant to full plane, and downsamples by averaging
-        intra-pixel positions.
+        expands quadrant to full plane, flips kernel for convolution,
+        and downsamples by averaging intra-pixel positions.
 
         Returns:
             Processed response array with shape (2r+1, 2r+1, Nt).
@@ -192,8 +195,8 @@ class FieldResponseProcessor:
         # Step 1: Expand quadrant to full plane
         expanded_response = self._quadrant_copy(raw_response)
 
-        # Step 2: Flip per pixel
-        expanded_response = self._flip_per_pixel(expanded_response, npath)
+        # Step 2: Flip kernel for convolution
+        expanded_response = self._flip_kernel_for_convolution(expanded_response, npath)
 
         # Step 3: Downsample by averaging intra-pixel positions
         self._processed_response = self._downsample_by_averaging(
@@ -206,7 +209,8 @@ class FieldResponseProcessor:
         """Get metadata from NPZ file.
 
         Returns:
-            Dictionary containing metadata like drift_length, bin_size, time_tick, npath.
+            Dictionary containing metadata like drift_length, bin_size, time_tick,
+            npath.
         """
         data = self._load_data()
 
@@ -225,7 +229,7 @@ class FieldResponseProcessor:
         return metadata
 
     @property
-    def response(self) -> Optional[np.ndarray]:
+    def response(self) -> np.ndarray | None:
         """Get processed response array."""
         if self._processed_response is None:
             self.process_response()
