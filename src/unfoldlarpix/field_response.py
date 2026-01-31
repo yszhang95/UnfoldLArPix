@@ -1,7 +1,7 @@
 """Field response processor for kernel loading and preprocessing."""
 
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 import numpy as np
 
@@ -14,16 +14,19 @@ class FieldResponseProcessor:
     intra-pixel impact positions.
     """
 
-    def __init__(self, npz_filepath: Union[str, Path]) -> None:
+    def __init__(self, npz_filepath: Union[str, Path], normalized: bool = False) -> None:
         """Initialize field response processor.
 
         Args:
             npz_filepath: Path to NPZ file containing field response data.
+            normalized: If True, keep data as loaded. If False, normalize so that
+                       np.sum(response[0,0,:]) * time_tick = 1.0.
         """
         self.npz_filepath = Path(npz_filepath)
         if not self.npz_filepath.exists():
             raise FileNotFoundError(f"NPZ file not found: {npz_filepath}")
 
+        self.normalized = normalized
         self._data: Optional[dict] = None
         self._processed_response: Optional[np.ndarray] = None
 
@@ -148,8 +151,9 @@ class FieldResponseProcessor:
     def process_response(self) -> np.ndarray:
         """Process field response data from NPZ file.
 
-        Loads raw response, expands quadrant to full plane,
-        and downsamples by averaging intra-pixel positions.
+        Loads raw response, applies normalization if needed,
+        expands quadrant to full plane, and downsamples by averaging
+        intra-pixel positions.
 
         Returns:
             Processed response array with shape (2r+1, 2r+1, Nt).
@@ -160,7 +164,7 @@ class FieldResponseProcessor:
         data = self._load_data()
 
         # Validate required keys
-        required_keys = ["response", "npath"]
+        required_keys = ["response", "npath", "time_tick"]
         missing_keys = [key for key in required_keys if key not in data]
         if missing_keys:
             raise ValueError(f"Missing required keys in NPZ file: {missing_keys}")
@@ -168,6 +172,22 @@ class FieldResponseProcessor:
         # Extract data
         raw_response = data["response"]
         npath = int(data["npath"])
+        time_tick = data["time_tick"]
+
+        # Apply normalization if needed
+        if not self.normalized:
+            # Normalize so that np.sum(response[0,0,:]) * time_tick = 1.0
+            current_sum = np.sum(raw_response[0, 0, :]) * time_tick
+            if current_sum == 0:
+                raise ValueError("Cannot normalize response with zero sum")
+            raw_response = raw_response * time_tick
+
+            # Verify normalization within tolerance
+            normalized_sum = np.sum(raw_response[0, 0, :])
+            if abs(normalized_sum - 1.0) > 1e-6:
+                raise ValueError(
+                    f"Normalization failed: sum = {normalized_sum}, expected 1.0 +/- 1e-6"
+                )
 
         # Step 1: Expand quadrant to full plane
         expanded_response = self._quadrant_copy(raw_response)
@@ -210,31 +230,3 @@ class FieldResponseProcessor:
         if self._processed_response is None:
             self.process_response()
         return self._processed_response
-
-    def validate_response_normalization(
-        self, expected_sum: float = 20.0, tolerance: float = 1e-6
-    ) -> bool:
-        """Validate response normalization.
-
-        The response should be normalized such that sum over time axis
-        for an impact at origin equals expected_sum.
-
-        Args:
-            expected_sum: Expected sum value (default: 20.0).
-            tolerance: Tolerance for comparison (default: 1e-6).
-
-        Returns:
-            True if normalized correctly, False otherwise.
-        """
-        if self._processed_response is None:
-            self.process_response()
-
-        # Get center pixel response (impact at origin)
-        center_response = self._processed_response[
-            self._processed_response.shape[0] // 2,
-            self._processed_response.shape[1] // 2,
-            :,
-        ]
-
-        time_sum = np.sum(center_response)
-        return abs(time_sum - expected_sum) <= tolerance

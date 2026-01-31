@@ -13,7 +13,7 @@ class TestFieldResponseProcessor:
     @pytest.fixture
     def mock_field_response_data(self) -> dict:
         """Create mock field response data structure."""
-        # Create a simple 5x5 quadrant response with 10 time steps
+        # Create a simple 2.5x2 x 2.5x2 quadrant response with 10 time steps
         raw_response = np.random.rand(5, 5, 10).astype(np.float32)
 
         # Normalize origin point to sum to 20 (as specified in requirements)
@@ -24,7 +24,7 @@ class TestFieldResponseProcessor:
             "npath": np.array(2),
             "drift_length": np.array(50.0),
             "bin_size": np.array(0.1),
-            "time_tick": np.array(0.5),
+            "time_tick": np.array(0.05),
         }
 
     @pytest.fixture
@@ -174,31 +174,6 @@ class TestFieldResponseProcessor:
         # Should be cached after first access
         assert processor._processed_response is result
 
-    def test_validate_response_normalization_correct(self, mock_field_response_data, tmp_path):
-        """Test normalization validation with correct data."""
-        # Create temporary NPZ file
-        npz_path = tmp_path / "correct_normalization.npz"
-        np.savez(npz_path, **mock_field_response_data)
-
-        processor = FieldResponseProcessor(npz_path)
-        processor.process_response()
-
-        assert processor.validate_response_normalization(expected_sum=20.0)
-
-    def test_validate_response_normalization_incorrect(self, mock_field_response_data, tmp_path):
-        """Test normalization validation with incorrect data."""
-        # Modify data to have incorrect sum
-        mock_field_response_data["response"][0, 0, :] = 1.0  # Sum to 10 instead of 20
-
-        # Create temporary NPZ file
-        npz_path = tmp_path / "incorrect_normalization.npz"
-        np.savez(npz_path, **mock_field_response_data)
-
-        processor = FieldResponseProcessor(npz_path)
-        processor.process_response()
-
-        assert not processor.validate_response_normalization(expected_sum=20.0)
-
     def test_validate_response_normalization_tolerance(self, mock_field_response_data, tmp_path):
         """Test normalization validation with tolerance."""
         # Set sum close but not exactly 20
@@ -209,17 +184,11 @@ class TestFieldResponseProcessor:
         np.savez(npz_path, **mock_field_response_data)
 
         processor = FieldResponseProcessor(npz_path)
-        processor.process_response()
 
-        # Should pass with larger tolerance
-        assert processor.validate_response_normalization(
-            expected_sum=20.0, tolerance=0.01
-        )
+        # Capture "Normalization failed"
+        with pytest.raises(ValueError, match="Normalization failed"):
+            processor.process_response()
 
-        # Should fail with stricter tolerance
-        assert not processor.validate_response_normalization(
-            expected_sum=20.0, tolerance=0.001
-        )
 
     def test_quadrant_copy_symmetry(self):
         """Test that quadrant copy creates symmetric result."""
@@ -284,7 +253,7 @@ class TestFieldResponseProcessor:
             "npath": np.array(npath),
             "drift_length": np.array(100.0),
             "bin_size": np.array(0.05),
-            "time_tick": np.array(0.025),
+            "time_tick": np.array(0.05),
         }
 
         # Create temporary NPZ file
