@@ -59,7 +59,7 @@ class DataLoader:
             return None
 
         for data_type in ["effq", "current", "hits", "event_id", "global_tref"]:
-            if key.startswith(data_type):
+            if key.startswith(f'{data_type}_tpc'):
                 return data_type
         return None
 
@@ -112,6 +112,7 @@ class DataLoader:
             "adc_down_time",
             "csa_reset_time",
             "one_tick",
+            "nburst",
             "threshold",
             "uncorr_noise",
             "thres_noise",
@@ -128,10 +129,11 @@ class DataLoader:
             adc_down_time=int(data["adc_down_time"]),
             csa_reset_time=int(data["csa_reset_time"]),
             one_tick=int(data["one_tick"]),
+            nburst = int(data["nburst"]),
             threshold=float(data["threshold"]),
-            uncorr_noise=float(data["uncorr_noise"]),
-            thres_noise=float(data["thres_noise"]),
-            reset_noise=float(data["reset_noise"]),
+            uncorr_noise=float(data["uncorr_noise"]) if data["uncorr_noise"] else None,
+            thres_noise=float(data["thres_noise"]) if data["thres_noise"] else None,
+            reset_noise=float(data["reset_noise"]) if data["reset_noise"] else None,
         )
 
         return self._readout_config
@@ -158,8 +160,8 @@ class DataLoader:
             if event_key not in data:
                 continue
 
-            event_id = data[event_key][0]  # Assuming single event per batch
-            group_key = (tpc_id, event_id)
+            event_id = data[event_key]  # Assuming single event per batch
+            group_key = (tpc_id, int(event_id))
 
             if group_key not in grouped:
                 grouped[group_key] = {
@@ -197,7 +199,7 @@ class DataLoader:
                     batch_id = self._extract_batch_id(key)
                     if batch_id is not None:
                         event_key = f"event_id_tpc{tpc_id}_batch{batch_id}"
-                        if event_key in data and data[event_key][0] == event_id:
+                        if event_key in data and data[event_key] == event_id:
                             effq_location_arrays.append(data[key])
 
             if effq_arrays and len(effq_location_arrays) == len(effq_arrays):
@@ -221,7 +223,7 @@ class DataLoader:
                     batch_id = self._extract_batch_id(key)
                     if batch_id is not None:
                         event_key = f"event_id_tpc{tpc_id}_batch{batch_id}"
-                        if event_key in data and data[event_key][0] == event_id:
+                        if event_key in data and data[event_key] == event_id:
                             current_location_arrays.append(data[key])
 
             if current_arrays and len(current_location_arrays) == len(current_arrays):
@@ -245,7 +247,7 @@ class DataLoader:
                     batch_id = self._extract_batch_id(key)
                     if batch_id is not None:
                         event_key = f"event_id_tpc{tpc_id}_batch{batch_id}"
-                        if event_key in data and data[event_key][0] == event_id:
+                        if event_key in data and data[event_key] == event_id:
                             hits_location_arrays.append(data[key])
 
             if hits_arrays and len(hits_location_arrays) == len(hits_arrays):

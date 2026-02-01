@@ -21,7 +21,17 @@ class DataContainer:
             raise TypeError("data must be a numpy array")
         if not isinstance(self.location, np.ndarray):
             raise TypeError("location must be a numpy array")
+        if len(self.data) != len(self.location):
+            raise ValueError(
+                "data and location must have the same number of entries"
+            )
+    def __len__(self) -> int:
+        """Return number of entries in the data container."""
+        return len(self.data)
 
+    @property
+    def nbatches(self) -> int:
+        return len(self)
 
 @dataclass
 class EffectiveCharge(DataContainer):
@@ -130,7 +140,8 @@ class ReadoutConfig:
     adc_down_time: int
     csa_reset_time: int
     one_tick: int
+    nburst: int
     threshold: float
-    uncorr_noise: float
-    thres_noise: float
-    reset_noise: float
+    uncorr_noise: float | None
+    thres_noise: float | None
+    reset_noise: float | None
