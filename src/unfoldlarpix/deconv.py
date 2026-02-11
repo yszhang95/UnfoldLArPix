@@ -5,6 +5,19 @@ deconvolution using FFT
 import numpy as np
 from numpy import fft
 
+def gaussian_filter(n, dt, sigma):
+    """Generate a Gaussian filter in the frequency domain.
+    Args:
+        n: Length of the filter.
+        dt: Time step size.
+        sigma: Standard deviation of the Gaussian in time domain.
+    Returns:
+        Gaussian filter in the frequency domain.
+    """
+    freqs = fft.rfftfreq(n, d=dt)
+    gaussian = np.exp(-0.5 * freqs**2/sigma**2)
+    return gaussian
+
 def deconv_fft(measurement: np.ndarray, kernel: np.ndarray,
                filter_fft: np.ndarray | None = None) -> np.ndarray:
     """Deconvolve measurement with kernel using FFT.
@@ -17,8 +30,12 @@ def deconv_fft(measurement: np.ndarray, kernel: np.ndarray,
     Returns:
         Deconvolved signal array.
     """
-    if filter_fft is not None:
-        raise NotImplementedError("filter_fft is not implemented yet.")
+    # if filter_fft is not None:
+    #     raise NotImplementedError("filter_fft is not implemented yet.")
+    if isinstance(filter_fft, np.ndarray):
+        if len(filter_fft.shape) != 1 or filter_fft.shape[0] != measurement.shape[-1]//2+1:
+            print('filter_fft shape:', filter_fft.shape, 'measurement shape:', measurement.shape)
+            raise ValueError(f"filter_fft shape is assumed to be 1D in time, got {filter_fft.shape}")
     # Determine the shape for FFT
     shape = np.array(measurement.shape)  # Copy to avoid modifying input
     shape[0] = measurement.shape[0] + (kernel.shape[0] - 1)  # spatial dimension
@@ -36,6 +53,8 @@ def deconv_fft(measurement: np.ndarray, kernel: np.ndarray,
 
     # Perform deconvolution in the frequency domain
     signal_fft = measurement_fft / kernel_fft
+    if filter_fft is not None:
+        signal_fft *= filter_fft
 
     # Compute the inverse FFT to get back to the time/spatial domain
     signal = fft.irfftn(signal_fft, s=shape)
