@@ -13,6 +13,11 @@ from .data_containers import (
 )
 from .data_loader import DataLoader
 from .field_response import FieldResponseProcessor
+from .burst_processor import (
+    BurstSequence,
+    BurstSequenceProcessor,
+    MergedSequence,
+)
 
 __all__ = [
     "DataLoader",
@@ -23,4 +28,7 @@ __all__ = [
     "Geometry",
     "ReadoutConfig",
     "FieldResponseProcessor",
+    "BurstSequence",
+    "BurstSequenceProcessor",
+    "MergedSequence",
 ]
