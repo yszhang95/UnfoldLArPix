@@ -35,7 +35,7 @@ def example_manual_sequences():
         pixel_y=0,
         trigger_time_idx=-10,
         t_start=0.0,     # -10 + 10
-        t_end=10.0,      # -10 + 10*2
+        t_last=10.0,      # -10 + 10*2
         charges=np.array([90.0, 100.0]),
         last_adc_latch=0,
         next_integration_start=0,
@@ -48,16 +48,16 @@ def example_manual_sequences():
         pixel_y=0,
         trigger_time_idx=3,
         t_start=13.0,    # 3 + 10
-        t_end=33.0,      # 3 + 10*3
+        t_last=33.0,      # 3 + 10*3
         charges=np.array([130.0, 10.0]),
         last_adc_latch=0,
         next_integration_start=0,
     )
 
-    print(f"\nSequence A: t_start={seq_a.t_start}, t_end={seq_a.t_end}, charges={seq_a.charges}")
-    print(f"Sequence B: t_start={seq_b.t_start}, t_end={seq_b.t_end}, charges={seq_b.charges}")
+    print(f"\nSequence A: t_start={seq_a.t_start}, t_end={seq_a.t_last}, charges={seq_a.charges}")
+    print(f"Sequence B: t_start={seq_b.t_start}, t_end={seq_b.t_last}, charges={seq_b.charges}")
 
-    gap = seq_b.t_start - seq_a.t_end
+    gap = seq_b.t_start - seq_a.t_last
     print(f"\nGap between sequences: {gap} ms")
     print(f"Tau threshold: {tau} ms")
     print(f"Gap <= tau: {gap <= tau} -> Will apply dead-time compensation")
@@ -76,7 +76,7 @@ def example_manual_sequences():
     # Plot cumulative
     ax = axes[0]
     ax.plot(merged.times, merged.cumulative[1:], 'o-', label='Cumulative (after prepended 0)')
-    ax.axvline(seq_a.t_end, color='gray', linestyle='--', alpha=0.5, label='Seq A end')
+    ax.axvline(seq_a.t_last, color='gray', linestyle='--', alpha=0.5, label='Seq A end')
     ax.axvline(seq_b.t_start, color='gray', linestyle=':', alpha=0.5, label='Seq B start')
     ax.set_xlabel('Time (ms)')
     ax.set_ylabel('Cumulative Charge')
@@ -87,7 +87,7 @@ def example_manual_sequences():
     # Plot charges
     ax = axes[1]
     ax.plot(merged.times, merged.charges, 's-', label='Compensated Charges')
-    ax.axvline(seq_a.t_end, color='gray', linestyle='--', alpha=0.5, label='Seq A end')
+    ax.axvline(seq_a.t_last, color='gray', linestyle='--', alpha=0.5, label='Seq A end')
     ax.axvline(seq_b.t_start, color='gray', linestyle=':', alpha=0.5, label='Seq B start')
     ax.set_xlabel('Time (ms)')
     ax.set_ylabel('Charge')
@@ -124,14 +124,14 @@ def example_template_compensation():
     # Create first close pair (will be merged with dead-time compensation)
     seq_a = BurstSequence(
         pixel_x=0, pixel_y=0, trigger_time_idx=-10,
-        t_start=0.0, t_end=10.0,
+        t_start=0.0, t_last=10.0,
         charges=np.array([90.0, 100.0]),
         last_adc_latch=0, next_integration_start=0,
     )
 
     seq_b = BurstSequence(
         pixel_x=0, pixel_y=0, trigger_time_idx=3,
-        t_start=13.0, t_end=33.0,
+        t_start=13.0, t_last=33.0,
         charges=np.array([130.0, 10.0]),
         last_adc_latch=0, next_integration_start=0,
     )
@@ -141,16 +141,16 @@ def example_template_compensation():
     seq_c = BurstSequence(
         pixel_x=0, pixel_y=0, trigger_time_idx=57,
         t_start=67.0,   # 57 + 10
-        t_end=107.0,    # 57 + 10*5
+        t_last=107.0,    # 57 + 10*5
         charges=np.array([40.0, 100.0, 195.0, 10.0]),
         last_adc_latch=0, next_integration_start=0,
     )
 
-    gap_c = seq_c.t_start - (seq_b.t_end + adc_hold_delay)
-    print(f"\nSequence A: t_start={seq_a.t_start}, t_end={seq_a.t_end}")
-    print(f"Sequence B: t_start={seq_b.t_start}, t_end={seq_b.t_end}")
-    print(f"Sequence C: t_start={seq_c.t_start}, t_end={seq_c.t_end}")
-    print(f"\nGap A-B: {seq_b.t_start - seq_a.t_end} ms <= tau -> Dead-time compensation")
+    gap_c = seq_c.t_start - (seq_b.t_last + adc_hold_delay)
+    print(f"\nSequence A: t_start={seq_a.t_start}, t_end={seq_a.t_last}")
+    print(f"Sequence B: t_start={seq_b.t_start}, t_end={seq_b.t_last}")
+    print(f"Sequence C: t_start={seq_c.t_start}, t_end={seq_c.t_last}")
+    print(f"\nGap A-B: {seq_b.t_start - seq_a.t_last} ms <= tau -> Dead-time compensation")
     print(f"Gap B-C: {gap_c} ms > tau -> Template compensation")
 
     # Process all three sequences
@@ -168,9 +168,9 @@ def example_template_compensation():
     # Plot cumulative
     ax = axes[0]
     ax.plot(merged.times, merged.cumulative[1:], 'o-', linewidth=2, markersize=6)
-    ax.axvline(seq_a.t_end, color='red', linestyle='--', alpha=0.5, label='Seq A end')
+    ax.axvline(seq_a.t_last, color='red', linestyle='--', alpha=0.5, label='Seq A end')
     ax.axvline(seq_b.t_start, color='blue', linestyle='--', alpha=0.5, label='Seq B start')
-    ax.axvline(seq_b.t_end + adc_hold_delay, color='green', linestyle='--', alpha=0.5, label='Seq B end')
+    ax.axvline(seq_b.t_last + adc_hold_delay, color='green', linestyle='--', alpha=0.5, label='Seq B end')
     ax.axvline(seq_c.t_start, color='orange', linestyle='--', alpha=0.5, label='Seq C start')
     ax.set_xlabel('Time (ms)')
     ax.set_ylabel('Cumulative Charge')
@@ -181,9 +181,9 @@ def example_template_compensation():
     # Plot charges
     ax = axes[1]
     ax.stem(merged.times, merged.charges, basefmt=' ', linefmt='C0-', markerfmt='C0o')
-    ax.axvline(seq_a.t_end, color='red', linestyle='--', alpha=0.5, label='Seq A end')
+    ax.axvline(seq_a.t_last, color='red', linestyle='--', alpha=0.5, label='Seq A end')
     ax.axvline(seq_b.t_start, color='blue', linestyle='--', alpha=0.5, label='Seq B start')
-    ax.axvline(seq_b.t_end + adc_hold_delay, color='green', linestyle='--', alpha=0.5, label='Seq B end')
+    ax.axvline(seq_b.t_last + adc_hold_delay, color='green', linestyle='--', alpha=0.5, label='Seq B end')
     ax.axvline(seq_c.t_start, color='orange', linestyle='--', alpha=0.5, label='Seq C start')
     ax.set_xlabel('Time (ms)')
     ax.set_ylabel('Charge')

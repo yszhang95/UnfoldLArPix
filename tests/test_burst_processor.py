@@ -21,7 +21,7 @@ class TestBurstSequence:
             pixel_y=1,
             trigger_time_idx=10,
             t_start=20.0,
-            t_end=40.0,
+            t_last=40.0,
             charges=np.array([10.0, 20.0]),
             last_adc_latch=0,
             next_integration_start=0,
@@ -35,7 +35,7 @@ class TestBurstSequence:
         with pytest.raises(ValueError, match="t_end.*must be.*t_start"):
             BurstSequence(
                 pixel_x=0, pixel_y=0, trigger_time_idx=0,
-                t_start=20.0, t_end=10.0,
+                t_start=20.0, t_last=10.0,
                 charges=np.array([10.0]),
                 last_adc_latch=0, next_integration_start=0,
             )
@@ -45,7 +45,7 @@ class TestBurstSequence:
         with pytest.raises(ValueError, match="charges.*cannot be empty"):
             BurstSequence(
                 pixel_x=0, pixel_y=0, trigger_time_idx=0,
-                t_start=0.0, t_end=10.0,
+                t_start=0.0, t_last=10.0,
                 charges=np.array([]),
                 last_adc_latch=0, next_integration_start=0,
             )
@@ -91,7 +91,7 @@ class TestBurstSequenceProcessor:
         # Sequence A: t_start=0, t_end=10, charges=[90, 100]
         seq_a = BurstSequence(
             pixel_x=0, pixel_y=0, trigger_time_idx=-10,
-            t_start=0.0, t_end=10.0,
+            t_start=0.0, t_last=10.0,
             charges=np.array([90.0, 100.0]),
             last_adc_latch=0, next_integration_start=0,
         )
@@ -99,13 +99,13 @@ class TestBurstSequenceProcessor:
         # Sequence B: t_start=13, charges=[130, 10]
         seq_b = BurstSequence(
             pixel_x=0, pixel_y=0, trigger_time_idx=3,
-            t_start=13.0, t_end=33.0,
+            t_start=13.0, t_last=33.0,
             charges=np.array([130.0, 10.0]),
             last_adc_latch=0, next_integration_start=0,
         )
 
         # Gap = 13 - 10 = 3ms
-        gap = seq_b.t_start - seq_a.t_end
+        gap = seq_b.t_start - seq_a.t_last
         assert gap == 3.0
         assert gap <= tau
 
@@ -138,7 +138,7 @@ class TestBurstSequenceProcessor:
 
         seq = BurstSequence(
             pixel_x=0, pixel_y=0, trigger_time_idx=0,
-            t_start=10.0, t_end=30.0,
+            t_start=10.0, t_last=30.0,
             charges=np.array([10.0, 20.0]),
             last_adc_latch=0, next_integration_start=0,
         )
@@ -244,7 +244,7 @@ class TestBurstSequenceProcessor:
         # Create two sequences with large gap
         seq_a = BurstSequence(
             pixel_x=0, pixel_y=0, trigger_time_idx=0,
-            t_start=10.0, t_end=20.0,
+            t_start=10.0, t_last=20.0,
             charges=np.array([100.0]),
             last_adc_latch=0, next_integration_start=0,
         )
@@ -252,12 +252,12 @@ class TestBurstSequenceProcessor:
         # Large gap: seq_b starts at 50, gap = 50 - 20 = 30 > tau
         seq_b = BurstSequence(
             pixel_x=0, pixel_y=0, trigger_time_idx=40,
-            t_start=50.0, t_end=60.0,
+            t_start=50.0, t_last=60.0,
             charges=np.array([50.0]),
             last_adc_latch=0, next_integration_start=0,
         )
 
-        gap = seq_b.t_start - (seq_a.t_end + adc_hold_delay)
+        gap = seq_b.t_start - (seq_a.t_last + adc_hold_delay)
         assert gap > tau, "Gap should be larger than tau for template compensation"
 
         # Process sequences

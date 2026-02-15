@@ -14,16 +14,16 @@ class BurstSequence:
     pixel_x: int
     pixel_y: int
     trigger_time_idx: int
-    t_start: float  # trigger_time_idx + adc_hold_delay
-    t_end: float    # trigger_time_idx + adc_hold_delay * nburst
+    t_first: float  # trigger_time_idx + adc_hold_delay
+    t_last: float    # trigger_time_idx + adc_hold_delay * nburst
     charges: np.ndarray  # Array of charge values for each burst
     last_adc_latch: int
     next_integration_start: int
 
     def __post_init__(self):
         """Validate sequence data."""
-        if self.t_end <= self.t_start:
-            raise ValueError(f"t_end ({self.t_end}) must be > t_start ({self.t_start})")
+        if self.t_last <= self.t_first:
+            raise ValueError(f"t_end ({self.t_last}) must be > t_start ({self.t_first})")
         if len(self.charges) == 0:
             raise ValueError("charges array cannot be empty")
 
@@ -113,8 +113,8 @@ class BurstSequenceProcessor:
                 pixel_x=pixel_x,
                 pixel_y=pixel_y,
                 trigger_time_idx=trigger_time_idx,
-                t_start=t_start,
-                t_end=t_end,
+                t_first=t_start,
+                t_last=t_end,
                 charges=charges,
                 last_adc_latch=last_adc_latch,
                 next_integration_start=next_integration_start,
@@ -139,10 +139,10 @@ class BurstSequenceProcessor:
             for j in range(1, len(sequences[pixel_key])):
                 prev_seq = sequences[pixel_key][j-1]
                 curr_seq = sequences[pixel_key][j]
-                if curr_seq.t_start < prev_seq.t_end:
+                if curr_seq.t_first < prev_seq.t_last:
                     raise ValueError(
                         f"Invalid sequence ordering for pixel {pixel_key}: "
-                        f"sequence {j} starts at {curr_seq.t_start} but previous ends at {prev_seq.t_end}"
+                        f"sequence {j} starts at {curr_seq.t_first} but previous ends at {prev_seq.t_last}"
                     )
 
         return sequences
@@ -161,7 +161,7 @@ class BurstSequenceProcessor:
         Returns:
             Tuple of (times, cumulative_charges) for merged sequences
         """
-        gap = seq_b.t_start - seq_a.t_end
+        gap = seq_b.t_first - seq_a.t_last
 
         if gap <= 0 or gap > self.tau:
             raise ValueError(f"Dead-time compensation requires 0 < gap <= tau, got gap={gap}")
@@ -191,14 +191,14 @@ class BurstSequenceProcessor:
 
         # Times for seq_a
         for i in range(len(seq_a.charges)):
-            times.append(seq_a.t_start + i * self.adc_hold_delay)
+            times.append(seq_a.t_first + i * self.adc_hold_delay)
 
         # Time for compensated + first of seq_b (at seq_b.t_start)
-        times.append(seq_b.t_start)
+        times.append(seq_b.t_first)
 
         # Times for rest of seq_b
         for i in range(1, len(seq_b.charges)):
-            times.append(seq_b.t_start + i * self.adc_hold_delay)
+            times.append(seq_b.t_first + i * self.adc_hold_delay)
 
         times = np.array(times)
 
@@ -221,11 +221,11 @@ class BurstSequenceProcessor:
             Tuple of (updated_times, updated_cumulative)
         """
         # Last time and cumulative value
-        last_time = times[-1] + self.adc_hold_delay if len(times) > 0 else next_seq.t_start - 4 * self.template_spacing
+        last_time = times[-1] + self.adc_hold_delay if len(times) > 0 else next_seq.t_first - 4 * self.template_spacing
         last_cumulative = cumulative[-1]
 
         # Calculate how many template points we need
-        gap = next_seq.t_start - last_time
+        gap = next_seq.t_first - last_time
         n_template_points = int(np.ceil(gap / self.template_spacing))
 
         # Take appropriate number of template points
@@ -245,7 +245,7 @@ class BurstSequenceProcessor:
         template_times = last_time + np.arange(1, n_use + 1) * self.template_spacing
 
         # Check for collisions with next_seq start time
-        collision_mask = template_times >= next_seq.t_start
+        collision_mask = template_times >= next_seq.t_first
         if np.any(collision_mask):
             # Remove colliding elements
             first_collision_idx = np.where(collision_mask)[0][0]
@@ -265,7 +265,7 @@ class BurstSequenceProcessor:
             last_template_time = last_time
 
         # Calculate modified first charge for next_seq to maintain continuity
-        time_gap_to_next = next_seq.t_start - last_template_time
+        time_gap_to_next = next_seq.t_first - last_template_time
 
         # Assume constant slope from last template point to next_seq start
         if len(template_times) > 1:
@@ -290,7 +290,7 @@ class BurstSequenceProcessor:
         ])
 
         # Build times
-        next_seq_times = [next_seq.t_start + i * self.adc_hold_delay for i in range(len(next_seq.charges))]
+        next_seq_times = [next_seq.t_first + i * self.adc_hold_delay for i in range(len(next_seq.charges))]
         updated_times = np.concatenate([
             times,
             template_times,
@@ -319,7 +319,7 @@ class BurstSequenceProcessor:
 
         # Initialize cumulative with first sequence
         cumulative = np.concatenate([[0], np.cumsum(first_seq.charges)])
-        times = np.array([first_seq.t_start + i * self.adc_hold_delay
+        times = np.array([first_seq.t_first + i * self.adc_hold_delay
                          for i in range(len(first_seq.charges))])
 
         # Process remaining sequences
@@ -328,7 +328,7 @@ class BurstSequenceProcessor:
             curr_seq = sequences[i]
             # Gap is measured from start of last burst to start of current burst
             # times[-1] is the time of the last charge value
-            gap = curr_seq.t_start - times[-1]
+            gap = curr_seq.t_first - times[-1]
 
             # Check if close enough for dead-time compensation
             if 0 < gap <= self.tau:
@@ -342,8 +342,8 @@ class BurstSequenceProcessor:
                     pixel_x=curr_seq.pixel_x,
                     pixel_y=curr_seq.pixel_y,
                     trigger_time_idx=0,  # Not used
-                    t_start=times[0],
-                    t_end=times[-1],  # Start time of last burst
+                    t_first=times[0],
+                    t_last=times[-1],  # Start time of last burst
                     charges=prev_charges,
                     last_adc_latch=0,  # Not used
                     next_integration_start=0,  # Not used
