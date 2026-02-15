@@ -63,7 +63,7 @@ class TestBurstSequenceProcessor:
         )
         assert processor.adc_hold_delay == 10.0
         assert processor.tau == 5.0
-        assert processor.delta_t == 1.0
+        assert processor.deadtime == 1.0
 
     def test_invalid_template(self):
         """Test that template must be monotonically increasing."""
@@ -238,7 +238,6 @@ class TestBurstSequenceProcessor:
             tau=tau,
             delta_t=delta_t,
             template=template,
-            template_spacing=adc_hold_delay,
         )
 
         # Create two sequences with large gap
