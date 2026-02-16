@@ -97,7 +97,7 @@ for event in loader.iter_events():
         )
     merged_seqs = burst_processor.process_hits(event.hits)
     print('compensated', sum([np.sum(m.charges) for m in merged_seqs.values()]))
-    boffset, bdata = merged_sequences_to_block(merged_seqs, readout_config.adc_hold_delay, npadbin=5)
+    boffset, bdata = merged_sequences_to_block(merged_seqs, readout_config.adc_hold_delay, npadbin=10)
     blocks = bdata
     hwf_block_data = blocks
     hwf_block_location = boffset

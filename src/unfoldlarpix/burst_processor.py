@@ -239,23 +239,25 @@ class BurstSequenceProcessor:
         """
         if threshold is None:
             raise ValueError("Template compensation requires a threshold value.")
-        if len(times) == 0:
+        if times is not None and len(times) == 0:
             raise ValueError("Template compensation requires existing time points.")
 
-        last_time = times[-1]
-        last_cumulative = cumulative[-1]
+        first_seq = True if times is None or cumulative is None else False
+
+        last_time = times[-1] if times is not None else 0.0
+        last_cumulative = cumulative[-1] if cumulative is not None else 0.0
 
         template_cumulative = np.asarray(template_cumulative, dtype=float)
         if template_cumulative.size == 0:
             raise ValueError("Template compensation requires a non-empty cumulative template.")
-        if not np.all(np.diff(template_cumulative) >= 0):
-            raise ValueError("Template must be monotonically increasing.")
+        # if not np.all(np.diff(template_cumulative) >= 0):
+        #     raise ValueError("Template must be monotonically increasing.")
 
         # Keep only the portion of the template strictly before threshold and append the threshold point.
         transit = threshold/np.max(np.cumsum(next_seq.charges))
         transit = min(transit, 1.0)
         tlength = next_seq.t_first - last_time - deadtime
-        if tlength <= 1:
+        if not first_seq and tlength <= 1:
             raise ValueError(f"Not enough time for template compensation, available time {tlength} is too short.")
         tlength = int(np.round(tlength))
         threshold_idx = None
@@ -263,12 +265,17 @@ class BurstSequenceProcessor:
             if template_cumulative[jidx+tlength] - template_cumulative[jidx] >= transit:
                 threshold_idx = jidx + tlength
                 break
+
+        if first_seq:
+            # overwrite
+            threshold_idx = np.searchsorted(template_cumulative, transit, side='left')
+            template_section = template_cumulative[:threshold_idx+1][::-1][::self.adc_hold_delay][::-1]
+        else:
+            template_section = template_cumulative[threshold_idx-tlength:threshold_idx+1] # one more tick for downsampling
+            template_section = template_section[::-1][::self.adc_hold_delay][::-1]  # Reverse, downsample, reverse back
+
         if threshold_idx is None:
             raise ValueError("Template compensation requires the template to reach the threshold within the available time.")
-        template_section = template_cumulative[threshold_idx-tlength:threshold_idx+1] # one more tick for downsampling
-        template_section = template_section[::-1][::self.adc_hold_delay][::-1]  # Reverse, downsample, reverse back
-
-        template_section = np.diff(template_section) # integral per interval
 
         threshold_time = next_seq.trigger_time_idx
         n_template = len(template_section)
@@ -280,18 +287,25 @@ class BurstSequenceProcessor:
         if not np.any(valid_mask):
             raise ValueError("No valid template points found before threshold time, cannot apply template compensation.")
 
-        template_times = candidate_times[valid_mask]
+        if not np.isclose(candidate_times[valid_mask][-1], threshold_time):
+            raise ValueError("Template compensation requires the last valid template time to be at the trigger time.")
+        if not first_seq:
+            template_times = candidate_times[valid_mask]
+            template_section = template_section[valid_mask]
+        else:
+            template_times = candidate_times
+        template_section *= threshold /template_section[-1] # FIXME: Assume Cumulative Tempalte saturates at 1.
+        print('selected template', template_section)
+        template_section = np.diff(template_section, prepend=0) # integral per interval
         print('template_times', template_times, candidate_times, valid_mask)
-        template_section = template_section[valid_mask]
-        template_section *= threshold  # FIXME: Assume Cumulative Tempalte saturates at 1.
 
         # charge per interval
         chgs = template_section[1:].tolist() + [next_seq.charges[0] - threshold] + next_seq.charges[1:].tolist()
 
         trigger_time_idx = template_times[0] - self.adc_hold_delay
-        if trigger_time_idx >= last_time:
+        if not first_seq and trigger_time_idx >= last_time:
             raise ValueError("TBD")
-        else:
+        elif not first_seq and trigger_time_idx < last_time:
             delta_t = last_time - trigger_time_idx
             chgs[0] = template_section[0] * delta_t / self.adc_hold_delay + chgs[0]
         # Require that we can supply the threshold right before the waveform.
@@ -299,13 +313,19 @@ class BurstSequenceProcessor:
             raise ValueError("Template compensation requires the last template time to be at the trigger time.")
 
         next_seq_cumulative = np.cumsum(chgs) + last_cumulative
-
-        updated_times = np.concatenate([times, template_times[1:]])
         next_seq_times = np.array([next_seq.t_first + i * self.adc_hold_delay for i in range(len(next_seq.charges))])
+        if first_seq:
+            updated_cumulative = np.insert(next_seq_cumulative, 0, 0, axis=0)
+            updated_times = np.concatenate([template_times[1:],
+                                            next_seq_times])
+        else:
+            updated_times = np.concatenate([times, template_times[1:]])
 
-        updated_times = np.concatenate([updated_times, next_seq_times])
-        updated_cumulative = np.concatenate([cumulative, next_seq_cumulative])
-
+            updated_times = np.concatenate([updated_times, next_seq_times])
+            updated_cumulative = np.concatenate([cumulative, next_seq_cumulative])
+        if len(updated_cumulative) != len(updated_times) + 1:
+            raise ValueError("Length mismatch between updated times and cumulative after template compensation."
+                             f"Got {len(updated_times)} times and {len(updated_cumulative)} cumulative values.")
         return updated_times, updated_cumulative
 
     def process_pixel_sequences(
@@ -330,6 +350,17 @@ class BurstSequenceProcessor:
         cumulative = np.concatenate([[0], np.cumsum(first_seq.charges)])
         times = np.array([first_seq.t_first + i * self.adc_hold_delay
                          for i in range(len(first_seq.charges))])
+
+
+        # hypothetical zeroth sequence
+        times, cumulative = self._template_compensation(
+            None,
+            None,
+            0,
+            first_seq,
+            self.threshold,
+            self.template
+        )
 
         # Process remaining sequences
         i = 1
