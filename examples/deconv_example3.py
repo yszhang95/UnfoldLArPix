@@ -13,6 +13,8 @@ from unfoldlarpix.deconv import deconv_fft, gaussian_filter
 from unfoldlarpix import BurstSequence, BurstSequenceProcessor, MergedSequence
 from unfoldlarpix.burst_processor import merged_sequences_to_block
 
+from unfoldlarpix.smear_truth import gaus_smear_true
+
 # Load NPZ file produced by tred
 loader = DataLoader("data/pgun_muplus_3gev_tred_nburst4_noises.npz")
 readout_config = loader.get_readout_config()
@@ -42,21 +44,6 @@ def integrate_k(kernel: np.ndarray, kticks: int) -> np.ndarray:
 
     return kernel[..., :n].reshape(*kernel.shape[:-1],  n//kticks, kticks).sum(axis=-1)
 
-def gaus_smear_true(ticks: np.ndarray, true_charge: np.ndarray, width: float) -> tuple[np.ndarray, np.ndarray]:
-    """Smear true charge with kernel to get smeared charge."""
-    reordered = np.argsort(ticks)
-    true_charge = true_charge[reordered]
-    ticks = ticks[reordered]
-    n = true_charge.shape[0]
-    n_single_side = int((8*1/2/np.pi/width) // n + 1)
-    ktimes = n_single_side * 2 + 1
-    m = int(ktimes * n)
-    smeared = np.zeros((m,))
-    smeared = np.fft.ifft(np.fft.fft(true_charge, n=m) *
-                          np.exp(-np.fft.fftfreq(n=m, d=1)**2/width**2/2), n=m).real
-    smeared = np.roll(smeared, n_single_side*n)
-    ticks = ticks[0] + np.arange(m) - n_single_side*n
-    return ticks, smeared
 
 fr_full_k = integrate_k(fr_full, readout_config.adc_hold_delay)
 
@@ -94,6 +81,7 @@ for event in loader.iter_events():
         threshold = readout_config.threshold
         )
     merged_seqs = burst_processor.process_hits(event.hits)
+    print('compensated', sum([np.sum(m.charges) for m in merged_seqs.values()]))
     boffset, bdata = merged_sequences_to_block(merged_seqs, readout_config.adc_hold_delay, npadbin=5)
     blocks = bdata
 
@@ -107,7 +95,15 @@ for event in loader.iter_events():
     hwf_block_data = blocks
     gaussian_kernel = gaussian_filter(n=hwf_block_data.shape[-1], dt=readout_config.adc_hold_delay,
                                       sigma=sigma)
-    deconv_data, local_offset = deconv_fft(hwf_block_data, fr_full_k, gaussian_kernel)
+    deconv_q, local_offset = deconv_fft(hwf_block_data, fr_full_k, gaussian_kernel)
+
+    smear_offset, smeared_true = gaus_smear_true(event.effq.location, event.effq.data, width=sigma)
+
+    print(smear_offset, boffset, np.sum(deconv_q[deconv_q > 5]),
+          np.sum(smeared_true),
+          np.sum(event.effq.data[:, -1]),
+          np.sum(event.hits.data[:, -1]))
+    print(deconv_q)
 
 
     # print(f"  Deconvolved data shape: {deconv_data.shape}")

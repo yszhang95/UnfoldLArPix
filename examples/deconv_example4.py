@@ -10,6 +10,11 @@ from unfoldlarpix import FieldResponseProcessor
 from unfoldlarpix.hit_to_wf import hits_to_bin_wf, convert_bin_wf_to_blocks
 from unfoldlarpix.deconv import deconv_fft, gaussian_filter
 
+from unfoldlarpix import BurstSequence, BurstSequenceProcessor, MergedSequence
+from unfoldlarpix.burst_processor import merged_sequences_to_block
+
+from unfoldlarpix.smear_truth import gaus_smear_true
+
 # Load NPZ file produced by tred
 loader = DataLoader("data/two_point_charges_noises.npz")
 readout_config = loader.get_readout_config()
@@ -83,12 +88,24 @@ for event in loader.iter_events():
     hwf_block = convert_bin_wf_to_blocks(hwf, bin_size=readout_config.adc_hold_delay,
                                          shift_to_center=True)
 
+    burst_processor = BurstSequenceProcessor(
+        readout_config.adc_hold_delay,
+        tau = readout_config.adc_hold_delay,
+        deadtime = readout_config.csa_reset_time,
+        template = np.cumsum(fr_temp),
+        threshold = readout_config.threshold
+        )
+    merged_seqs = burst_processor.process_hits(event.hits)
+    print('compensated', sum([np.sum(m.charges) for m in merged_seqs.values()]))
+    boffset, bdata = merged_sequences_to_block(merged_seqs, readout_config.adc_hold_delay, npadbin=5)
+    blocks = bdata
+    hwf_block_data = blocks
+    hwf_block_location = boffset
+    print(boffset, blocks)
 
-    hwf_block_data = hwf_block.data[0, ...] # single block
-    print(hwf_block_data)
     plt.plot(np.arange(0, hwf_block_data.shape[-1])*readout_config.adc_hold_delay + readout_config.adc_hold_delay + hwf_block.location[0,2],
              hwf_block_data[0, 0, :], 'o', label="hwf_block")
-    cloc = hwf_block.location[0, :2]
+    cloc = hwf_block_location[:2]
     curr_mask = np.all(event.current.location[:,:2]==cloc[None, :], axis=1)
     curr = np.squeeze(event.current.data[curr_mask])
     plt.plot(np.arange(0, curr.shape[-1]) + event.current.location[curr_mask][0, -1], curr * readout_config.adc_hold_delay,
@@ -117,9 +134,9 @@ for event in loader.iter_events():
     print(f"  Local offset: {local_offset}")
     for i in range(2):
         plt.figure()
-        plt.plot(hwf_block.location[0, -1] - local_offset[-1] + np.arange(len(deconv_data[i, 0, :])) * readout_config.adc_hold_delay,
+        plt.plot(hwf_block_location[-1] - local_offset[-1] + np.arange(len(deconv_data[i, 0, :])) * readout_config.adc_hold_delay,
                  deconv_data[i, 0, :], 'o-', label=f"deconv charge; sum(deconv) over t = {np.sum(deconv_data[i, 0, :]):.2f}")
-        cloc = hwf_block.location[0, :2]
+        cloc = hwf_block_location[:2]
         cloc[0] += i
         effq_mask = np.all(event.effq.location[:, :2]==cloc[None, :], axis=1)
         effq = event.effq.data[effq_mask]

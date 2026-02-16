@@ -81,6 +81,8 @@ class BurstSequenceProcessor:
         if not np.all(np.diff(self.template) >= 0):
             raise ValueError("template must be monotonically increasing")
 
+        self.totq_per_pix = {}
+
     def _default_template(self) -> np.ndarray:
         """Create a default exponential-like template."""
         return np.array([1, 2, 3, 4, 6, 8, 16, 36], dtype=float)
@@ -106,6 +108,8 @@ class BurstSequenceProcessor:
 
             # Extract charge data (skip x, y, z columns)
             charges = hits.data[i, 3:]
+            charges = [charges[0],] + np.diff(charges).tolist()  # Convert to charge per burst
+            charges = np.array(charges)
 
             # Calculate times
             nburst = len(charges)
@@ -129,6 +133,9 @@ class BurstSequenceProcessor:
             if pixel_key not in sequences:
                 sequences[pixel_key] = []
             sequences[pixel_key].append(seq)
+
+            if pixel_key not in self.totq_per_pix:
+                self.totq_per_pix[pixel_key] = np.sum(seq.charges)
 
         # Sort sequences for each pixel by trigger time
         for pixel_key in sequences:
@@ -433,12 +440,14 @@ def merged_sequences_to_block(
     # calculate pixel reaches
     pixel_keys = list(merged_seqs.keys())
     pmin, pmax = np.min(pixel_keys, axis=0), np.max(pixel_keys, axis=0)
+    print(pmin, pmax)
     shape = np.zeros((3,), dtype=int)
     shape[:2] = pmax - pmin + 1
     tmin, tmax = [np.min(merged_seqs[pixel_key].times) for pixel_key in pixel_keys], [np.max(merged_seqs[pixel_key].times) for pixel_key in pixel_keys]
     tmin, tmax = np.min(tmin) - pad_length, np.max(tmax) + pad_length
     shape[2] = (int(np.ceil((tmax - tmin) / bin_size)) + 1)
     offset = np.array([pmin[0], pmin[1], tmin])
+    print(offset)
 
     # loop over pixels and put charges into blocks
     block_charges = np.zeros(shape, dtype=float)
