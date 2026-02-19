@@ -101,7 +101,7 @@ for event in loader.iter_events():
 
     print(f'smear_offset: {smear_offset}, boffset: {boffset}, '
           f'sum_deconv_q: {np.sum(deconv_q)}, '
-          f'sum_deconv_q_gt1: {np.sum(deconv_q[deconvq_q>1])}, '
+          f'sum_deconv_q_gt1: {np.sum(deconv_q[deconv_q>1])}, '
           f'sum_deconv_q_gt4: {np.sum(deconv_q[deconv_q>4])}, '
           f'sum_smeared_true: {np.sum(smeared_true)}, '
           f'sum_effq_last: {np.sum(event.effq.data[:, -1])},'
