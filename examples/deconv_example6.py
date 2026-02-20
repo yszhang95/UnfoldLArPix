@@ -16,7 +16,7 @@ from unfoldlarpix.burst_processor import merged_sequences_to_block
 from unfoldlarpix.smear_truth import gaus_smear_true
 
 # Load NPZ file produced by tred
-loader = DataLoader("data/pgun_muplus_3gev_tred_nburst4_noises.npz")
+loader = DataLoader("data/pgun_muplus_3gev_nonoises_interval_average.npz")
 readout_config = loader.get_readout_config()
 
 fr_processor = FieldResponseProcessor("data/fr_4p4pitch_3.8pix_nogrid_10pathsperpixel.npz", normalized=False)
@@ -24,6 +24,37 @@ fr_full = fr_processor.process_response()
 frcenter = fr_full[fr_full.shape[0]//2, fr_full.shape[1]//2, :]
 fr_temp = frcenter.copy()
 
+
+def interval_average_to_block(ticks: np.ndarray, bursts: np.ndarray, tpad=10) -> tuple[np.ndarray, np.ndarray]:
+    """Smear true charge with kernel to get smeared charge."""
+    if len(ticks.shape) != 2:
+        raise ValueError("ticks should be 3D array")
+    bursts = np.diff(bursts, axis=-1, prepend=0)
+    # get a minimum shape of charge block
+    loc_min = [np.min(ticks[:, i]) for i in range(ticks.shape[1])]
+    loc_max = [np.max(ticks[:, i]) for i in range(ticks.shape[1])]
+    loc_min = np.array(loc_min)
+    loc_max = np.array(loc_max)
+    print("loc_min:", loc_min, "loc_max:", loc_max)
+    shape = [loc_max[i] - loc_min[i] + 1 for i in range(ticks.shape[1])]
+    print(shape)
+    if shape[-1] % readout_config.adc_hold_delay != 1:
+        raise ValueError("The time range of the block should be divisible by adc_hold_delay.")
+    shape[-1] = shape[-1] // readout_config.adc_hold_delay + bursts.shape[-1]
+    print(shape)
+    data = np.zeros(shape, dtype=bursts.dtype)
+    # fill data with true charge
+    for i in range(ticks.shape[0]):
+        # print((ticks[i, 2] - loc_min[2])//readout_config.adc_hold_delay, ticks[i,2], loc_min[2])
+        if ticks[i, 0] == 36+102 and ticks[i, 1] == 97+1:
+            print(ticks[i, 2], loc_min[2])
+        for i3 in range(bursts.shape[-1]):
+            data[ticks[i, 0] - loc_min[0],
+                 ticks[i, 1] - loc_min[1],
+                 (ticks[i, 2] - loc_min[2])//readout_config.adc_hold_delay + i3] += bursts[i, i3]
+    loc_min[-1] -= tpad*readout_config.adc_hold_delay
+    data = np.pad(data, ((0, 0), (0, 0), (tpad, tpad)))
+    return loc_min, data
 
 def sigma_simple(y, dx=1.0):
     y = np.asarray(y, dtype=float)
@@ -72,27 +103,17 @@ for event in loader.iter_events():
 
     # hwf_block = convert_bin_wf_to_blocks(hwf, bin_size=readout_config.adc_hold_delay,
     #                                      shift_to_center=True)
-
-    burst_processor = BurstSequenceProcessor(
-        readout_config.adc_hold_delay,
-        tau = readout_config.adc_hold_delay,
-        deadtime = readout_config.csa_reset_time,
-        template = np.cumsum(fr_temp),
-        threshold = readout_config.threshold
-        )
-    merged_seqs = burst_processor.process_hits(event.hits)
-    print('compensated', sum([np.sum(m.charges) for m in merged_seqs.values()]))
-    boffset, bdata = merged_sequences_to_block(merged_seqs, readout_config.adc_hold_delay, npadbin=50)
-    blocks = bdata
-
+    boffset, hwf_block_data = interval_average_to_block(event.hits.location[:, :3], event.hits.data[:, 3:])
+    print(hwf_block_data.shape)
+    print('---', boffset)
 
     # hwf_block_data = hwf_block.data[0, ...] # single block
     # cloc = hwf_block.location[0, :2]
     # curr_mask = np.all(event.current.location[:,:2]==cloc[None, :], axis=1)
     # curr = np.squeeze(event.current.data[curr_mask])
 
-    sigma = 0.1
-    hwf_block_data = blocks
+    sigma = 0.01
+
     gaussian_kernel = gaussian_filter(n=hwf_block_data.shape[-1], dt=readout_config.adc_hold_delay,
                                       sigma=sigma)
 
@@ -116,6 +137,7 @@ for event in loader.iter_events():
 
 
     np.savez(f"deconv_event_{event.tpc_id}_{event.event_id}.npz",
+             hwf_block_data=hwf_block_data,
              deconv_q=deconv_q, boffset=boffset,
              smeared_true=smeared_true, smear_offset=smear_offset,
              effq_location=event.effq.location, effq_data=event.effq.data,

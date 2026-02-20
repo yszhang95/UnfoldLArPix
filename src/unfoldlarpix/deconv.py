@@ -18,6 +18,16 @@ def gaussian_filter(n, dt, sigma):
     gaussian = np.exp(-0.5 * freqs**2/sigma**2)
     return gaussian
 
+def gaussian_filter_3d(s, dt, sigma):
+    freqs = fft.rfftfreq(s[-1], d=dt[-1])
+    gaussian = np.exp(-0.5 * freqs**2/sigma[-1]**2)
+    for i in range(len(s[:-1])):
+        freqs_i = fft.fftfreq(s[i], d=dt[i])
+        gaussian_i = np.exp(-0.5 * freqs_i**2/sigma[i]**2)
+        gaussian = gaussian_i[None, :] * gaussian[..., None]
+    gaussian = np.moveaxis(gaussian, 0, -1)
+    return gaussian
+
 def deconv_fft(measurement: np.ndarray, kernel: np.ndarray,
                filter_fft: np.ndarray | None = None) -> np.ndarray:
     """Deconvolve measurement with kernel using FFT.
@@ -32,10 +42,10 @@ def deconv_fft(measurement: np.ndarray, kernel: np.ndarray,
     """
     # if filter_fft is not None:
     #     raise NotImplementedError("filter_fft is not implemented yet.")
-    if isinstance(filter_fft, np.ndarray):
-        if len(filter_fft.shape) != 1 or filter_fft.shape[0] != measurement.shape[-1]//2+1:
-            print('filter_fft shape:', filter_fft.shape, 'measurement shape:', measurement.shape)
-            raise ValueError(f"filter_fft shape is assumed to be 1D in time, got {filter_fft.shape}")
+    # if isinstance(filter_fft, np.ndarray):
+    #     if len(filter_fft.shape) != 1 or filter_fft.shape[-1] != measurement.shape[-1]//2+1:
+    #         print('filter_fft shape:', filter_fft.shape, 'measurement shape:', measurement.shape)
+    #         raise ValueError(f"filter_fft shape is assumed to be 1D in time, got {filter_fft.shape}")
     # Determine the shape for FFT
     shape = np.array(measurement.shape)  # Copy to avoid modifying input
     shape[0] = measurement.shape[0] + (kernel.shape[0] - 1)  # spatial dimension
@@ -50,6 +60,8 @@ def deconv_fft(measurement: np.ndarray, kernel: np.ndarray,
     # Avoid division by zero by adding a small epsilon where kernel_fft is zero
     epsilon = 1e-10
     kernel_fft = np.where(np.abs(kernel_fft) < epsilon, epsilon, kernel_fft)
+
+    print(measurement_fft.shape, kernel_fft.shape, filter_fft.shape if filter_fft is not None else None)
 
     # Perform deconvolution in the frequency domain
     signal_fft = measurement_fft / kernel_fft

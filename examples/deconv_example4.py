@@ -8,7 +8,7 @@ from unfoldlarpix import DataLoader
 from unfoldlarpix import FieldResponseProcessor
 
 from unfoldlarpix.hit_to_wf import hits_to_bin_wf, convert_bin_wf_to_blocks
-from unfoldlarpix.deconv import deconv_fft, gaussian_filter
+from unfoldlarpix.deconv import deconv_fft, gaussian_filter, gaussian_filter_3d
 
 from unfoldlarpix import BurstSequence, BurstSequenceProcessor, MergedSequence
 from unfoldlarpix.burst_processor import merged_sequences_to_block
@@ -97,7 +97,7 @@ for event in loader.iter_events():
         )
     merged_seqs = burst_processor.process_hits(event.hits)
     print('compensated', sum([np.sum(m.charges) for m in merged_seqs.values()]))
-    boffset, bdata = merged_sequences_to_block(merged_seqs, readout_config.adc_hold_delay, npadbin=10)
+    boffset, bdata = merged_sequences_to_block(merged_seqs, readout_config.adc_hold_delay, npadbin=40)
     blocks = bdata
     hwf_block_data = blocks
     hwf_block_location = boffset
@@ -124,18 +124,36 @@ for event in loader.iter_events():
 
     sigma = 0.01
 
+    npadpxl = 20
+
+    hwf_block_data = np.pad(hwf_block_data, ((npadpxl, npadpxl), (npadpxl, npadpxl), (0, 0)), mode='constant', constant_values=0
+                            )
+    hwf_block_location = hwf_block_location - np.array([20, 20, 0])
+
     gaussian_kernel = gaussian_filter(n=hwf_block_data.shape[-1], dt=readout_config.adc_hold_delay,
                                       sigma=sigma)
 
+    gaussian_kernel = gaussian_filter_3d((
+        hwf_block_data.shape[0]+fr_full_k.shape[0]-1,
+        hwf_block_data.shape[1]+fr_full_k.shape[1]-1,
+        hwf_block_data.shape[2]), dt=(1,1,1), sigma=(20, 20, sigma))
+
+
 
     deconv_data, local_offset = deconv_fft(hwf_block_data, fr_full_k, gaussian_kernel)
+
     print(f"  Deconvolved data shape: {deconv_data.shape}")
     # print(deconv_data)
     print(f"  Local offset: {local_offset}")
     for i in range(2):
         plt.figure()
-        plt.plot(hwf_block_location[-1] - local_offset[-1] + np.arange(len(deconv_data[i, 0, :])) * readout_config.adc_hold_delay,
-                 deconv_data[i, 0, :], 'o-', label=f"deconv charge; sum(deconv) over t = {np.sum(deconv_data[i, 0, :]):.2f}")
+        plt.plot(hwf_block_location[-1] - local_offset[-1] + np.arange(len(deconv_data[i+npadpxl, 0+npadpxl, :])) * readout_config.adc_hold_delay,
+                 deconv_data[i+20, 0+20, :], 'o-', label=f"deconv charge; sum(deconv) over t = {np.sum(deconv_data[i+20, 0+20, :]):.2f}")
+        plt.plot(hwf_block_location[-1] - local_offset[-1] + np.arange(len(deconv_data[i+npadpxl-1, 0+npadpxl, :])) * readout_config.adc_hold_delay,
+                 deconv_data[i+20-1, 0+20, :], 'o-', label=f"deconv charge; sum(deconv) over t = {np.sum(deconv_data[i+20, 0+20, :]):.2f}")
+        plt.plot(hwf_block_location[-1] - local_offset[-1] + np.arange(len(deconv_data[i+npadpxl+1, 0+npadpxl, :])) * readout_config.adc_hold_delay,
+                 deconv_data[i+20+1, 0+20, :], 'o-', label=f"deconv charge; sum(deconv) over t = {np.sum(deconv_data[i+20, 0+20, :]):.2f}")
+
         cloc = hwf_block_location[:2]
         cloc[0] += i
         effq_mask = np.all(event.effq.location[:, :2]==cloc[None, :], axis=1)
@@ -144,11 +162,11 @@ for event in loader.iter_events():
         #     raise ValueError(f"Expected exactly one effq entry for pixel {cloc}, got {effq.shape[0]}")
         effqloc = event.effq.location[effq_mask]
         # effqloc = np.padd(effqloc[:, 2], (0, len(smeared)))
-        smeared = gaus_smear_true(effqloc[:, 2], effq[:, -1], width=sigma)
-        effqsigma = sigma_simple(effq[:, -1], dx=1.0)
-        plt.plot(effqloc[:, 2], effq[:, -1] * readout_config.adc_hold_delay, 'o-', label=f"effq * adc_hold_delay; sum(effq) over t = {np.sum(effq[:, -1]):.2f}; sigma={effqsigma:.2f}")
-        smearedsigma = sigma_simple(smeared[1], dx=1.0)
-        plt.plot(smeared[0], smeared[1] * readout_config.adc_hold_delay, 'o-', label=f"smeared effq * adc_hold_delay; sigma={smearedsigma:.2f}")
+        # smeared = gaus_smear_true(effqloc[:, 2], effq[:, -1], width=sigma)
+        # effqsigma = sigma_simple(effq[:, -1], dx=1.0)
+        # plt.plot(effqloc[:, 2], effq[:, -1] * readout_config.adc_hold_delay, 'o-', label=f"effq * adc_hold_delay; sum(effq) over t = {np.sum(effq[:, -1]):.2f}; sigma={effqsigma:.2f}")
+        # smearedsigma = sigma_simple(smeared[1], dx=1.0)
+        # plt.plot(smeared[0], smeared[1] * readout_config.adc_hold_delay, 'o-', label=f"smeared effq * adc_hold_delay; sigma={smearedsigma:.2f}")
         plt.legend(loc='upper left')
         plt.title(f"at block index {i}; pixel index = {cloc}")
         plt.savefig(f'deconv_block_{i}_noises.png')

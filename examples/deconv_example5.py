@@ -8,7 +8,7 @@ from unfoldlarpix import DataLoader
 from unfoldlarpix import FieldResponseProcessor
 
 from unfoldlarpix.hit_to_wf import hits_to_bin_wf, convert_bin_wf_to_blocks
-from unfoldlarpix.deconv import deconv_fft, gaussian_filter, gaussian_filter_3d
+from unfoldlarpix.deconv import deconv_fft, gaussian_filter
 
 from unfoldlarpix import BurstSequence, BurstSequenceProcessor, MergedSequence
 from unfoldlarpix.burst_processor import merged_sequences_to_block
@@ -82,7 +82,7 @@ for event in loader.iter_events():
         )
     merged_seqs = burst_processor.process_hits(event.hits)
     print('compensated', sum([np.sum(m.charges) for m in merged_seqs.values()]))
-    boffset, bdata = merged_sequences_to_block(merged_seqs, readout_config.adc_hold_delay, npadbin=50)
+    boffset, bdata = merged_sequences_to_block(merged_seqs, readout_config.adc_hold_delay, npadbin=5)
     blocks = bdata
 
 
@@ -91,18 +91,11 @@ for event in loader.iter_events():
     # curr_mask = np.all(event.current.location[:,:2]==cloc[None, :], axis=1)
     # curr = np.squeeze(event.current.data[curr_mask])
 
-    sigma = 0.1
+    sigma = 0.01
     hwf_block_data = blocks
     gaussian_kernel = gaussian_filter(n=hwf_block_data.shape[-1], dt=readout_config.adc_hold_delay,
                                       sigma=sigma)
-
-    # gaussian_kernel = gaussian_filter_3d((
-    #     hwf_block_data.shape[0]+fr_full_k.shape[0]-1,
-    #     hwf_block_data.shape[1]+fr_full_k.shape[1]-1,
-    #     hwf_block_data.shape[2]), dt=(1,1,1), sigma=(2, 2, sigma))
-
-    deconv_q, local_offset = deconv_fft(hwf_block_data, fr_full_k,
-                                        gaussian_kernel)
+    deconv_q, local_offset = deconv_fft(hwf_block_data, fr_full_k, gaussian_kernel)
 
     smear_offset, smeared_true = gaus_smear_true(event.effq.location, event.effq.data, width=sigma)
 
@@ -116,7 +109,7 @@ for event in loader.iter_events():
 
 
     np.savez(f"deconv_event_{event.tpc_id}_{event.event_id}.npz",
-             deconv_q=deconv_q, boffset=boffset,
+             deconv_q=deconv_q, local_offset=local_offset,
              smeared_true=smeared_true, smear_offset=smear_offset,
              effq_location=event.effq.location, effq_data=event.effq.data,
              hits_location=event.hits.location, hits_data=event.hits.data,
