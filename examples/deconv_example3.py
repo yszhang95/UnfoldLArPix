@@ -16,7 +16,9 @@ from unfoldlarpix.burst_processor import merged_sequences_to_block
 from unfoldlarpix.smear_truth import gaus_smear_true
 
 # Load NPZ file produced by tred
-loader = DataLoader("data/pgun_muplus_3gev_tred_nburst4_noises.npz")
+# loader = DataLoader("data/pgun_muplus_3gev_tred_nburst4_noises.npz")
+# loader = DataLoader("data/pgun_muplus_3gev_tred_nburst4_nonoises_nd_readout.npz")
+loader = DataLoader("data/pgun_muplus_3gev_tred_nburst4_noises_nd_readout.npz")
 readout_config = loader.get_readout_config()
 
 fr_processor = FieldResponseProcessor("data/fr_4p4pitch_3.8pix_nogrid_10pathsperpixel.npz", normalized=False)
@@ -91,7 +93,7 @@ for event in loader.iter_events():
     # curr_mask = np.all(event.current.location[:,:2]==cloc[None, :], axis=1)
     # curr = np.squeeze(event.current.data[curr_mask])
 
-    sigma = 0.1
+    sigma = 0.01
     hwf_block_data = blocks
     gaussian_kernel = gaussian_filter(n=hwf_block_data.shape[-1], dt=readout_config.adc_hold_delay,
                                       sigma=sigma)
