@@ -16,8 +16,10 @@ from unfoldlarpix.burst_processor import merged_sequences_to_block
 from unfoldlarpix.smear_truth import gaus_smear_true
 
 # Load NPZ file produced by tred
-has_noises = False
-finstring = "data/pgun_muplus_3gev_noises_interval_average.npz" if has_noises else "data/pgun_muplus_3gev_nonoises_interval_average.npz"
+
+has_noises = True
+#  finstring = "data/pgun_muplus_3gev_noises_interval_average.npz" if has_noises else "data/pgun_muplus_3gev_nonoises_interval_average.npz"
+finstring = "data/pgun_muplus_3gev_noises_offset8_interval_average.npz" if has_noises else "data/pgun_muplus_3gev_nonoises_offset8_interval_average.npz"
 loader = DataLoader(finstring)
 readout_config = loader.get_readout_config()
 
@@ -139,7 +141,7 @@ for event in loader.iter_events():
 
 
     noise_postfix = "_with_noises" if has_noises else "_nonoises"
-    np.savez(f"deconv_event_{event.tpc_id}_{event.event_id}{noise_postfix}.npz",
+    np.savez(f"deconv_event_{event.tpc_id}_{event.event_id}{noise_postfix}_offset8.npz",
              hwf_block_data=hwf_block_data,
              deconv_q=deconv_q, boffset=boffset,
              smeared_true=smeared_true, smear_offset=smear_offset,
