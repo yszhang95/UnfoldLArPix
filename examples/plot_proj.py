@@ -76,7 +76,7 @@ def align_voxel_blocks(
   return aligned_fine, aligned_coarse, fine_summed, target_lower
 
 for ievent in range(1):
-  f = np.load('deconv_event_0_0_with_noises.npz')
+  f = np.load('deconv_event_0_0.npz')
   smeared_true = f['smeared_true']
   deconv_q = f['deconv_q'] * (f['deconv_q'] > threshold)
   effq_proj = np.sum(smeared_true, axis=-1)
