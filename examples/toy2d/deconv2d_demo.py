@@ -7,7 +7,7 @@ Creates a simple delta signal, convolves with an asymmetric 2D kernel
 with 2D Gaussian regularization filter under 4 scenarios:
 1. Ideal (no noise, no misalignment)
 2. Noisy (Gaussian noise in time domain)
-3. Misaligned (spatial shift in x dimension)
+3. Misaligned (time shifts between measurements in spatial dimension)
 4. Noisy + Misaligned
 """
 
