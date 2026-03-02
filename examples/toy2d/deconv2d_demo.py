@@ -124,8 +124,7 @@ def convolve_2d_fft(signal, kernel):
     # The convolution output starts at (0, 0), we want to keep the
     # physically meaningful part
     start_x = (kx - 1) // 2
-    start_t = (kt - 1) // 2
-    measurement = conv[start_x : start_x + nx, start_t : start_t + nt]
+    measurement = conv[start_x : start_x + nx, :]
 
     return measurement
 
@@ -157,7 +156,6 @@ def gaussian_filter_2d(shape, dt_x, dt_t, sigma_x, sigma_t):
     # 2D Gaussian
     gaussian_x = np.exp(-0.5 * freqs_x[:, np.newaxis]**2 / sigma_x**2)
     gaussian_t = np.exp(-0.5 * freqs_t[np.newaxis, :]**2 / sigma_t**2)
-    print(gaussian_t, gaussian_x)
 
     gaussian_2d = gaussian_x * gaussian_t
     return gaussian_2d
@@ -179,7 +177,9 @@ def deconvolve_2d_fft(measurement, kernel, filter_2d=None):
 
     # Padding for FFT
     pad_nx = nx + kx - 1
-    pad_nt = nt + kt - 1
+    pad_nt = nt
+    # FIXME: Why pre-padding?
+    measurement = np.pad(measurement, ((pad_nx - nx, 0), (0, 0)), mode='constant')
 
     # FFT
     meas_fft = np.fft.rfft2(measurement, s=(pad_nx, pad_nt))
@@ -201,8 +201,7 @@ def deconvolve_2d_fft(measurement, kernel, filter_2d=None):
 
     # Crop back to original size
     start_x = (kx - 1) // 2
-    start_t = (kt - 1) // 2
-    signal_cropped = signal[start_x : start_x + nx, start_t : start_t + nt]
+    signal_cropped = signal[start_x : start_x + nx, :nt]
 
     return signal_cropped
 
@@ -261,7 +260,7 @@ def main():
 
     # With Gaussian filter for noisy cases
     # Choose filter parameters based on problem scale
-    sigma_x_filter = 20  # smoothing in spatial dimension
+    sigma_x_filter = 0.1  # smoothing in spatial dimension
     sigma_t_filter = 20  # smoothing in time dimension
     pad_nx = nx + kernel.shape[0] - 1
     pad_nt = nt + kernel.shape[1] - 1
@@ -312,7 +311,7 @@ def main():
     plt.close()
 
     # Plot 2: Main 4×4 grid showing signal, measurements, and deconvolutions
-    fig, axes = plt.subplots(4, 4, figsize=(16, 14))
+    fig, axes = plt.subplots(4, 5, figsize=(20, 16))
 
     vmin_meas = min(measurement_ideal.min(), measurement_noisy.min(),
                     measurement_misaligned.min(), measurement_both.min())
@@ -326,7 +325,7 @@ def main():
 
     # Row 0: Signal, Kernel, Ideal measurement, Ideal deconvolution
     im = axes[0, 0].imshow(signal_ideal, aspect='auto', cmap='viridis', origin='lower')
-    axes[0, 0].set_title('True Signal\n(delta at (16, 16))')
+    axes[0, 0].set_title(f'True Signal\n(delta at ({delta_t}, {delta_x}))')
     axes[0, 0].plot(delta_t, delta_x, 'r+', markersize=15, markeredgewidth=2)
     plt.colorbar(im, ax=axes[0, 0])
 
@@ -334,87 +333,132 @@ def main():
     axes[0, 1].set_title('Asymmetric Kernel')
     plt.colorbar(im, ax=axes[0, 1])
 
+    # im = axes[0, 2].imshow(measurement_ideal, aspect='auto', cmap='viridis',
+    #                        origin='lower', vmin=vmin_meas, vmax=vmax_meas)
     im = axes[0, 2].imshow(measurement_ideal, aspect='auto', cmap='viridis',
-                           origin='lower', vmin=vmin_meas, vmax=vmax_meas)
+                           origin='lower')
     axes[0, 2].set_title('Ideal Measurement\n(no noise, no misalignment)')
     plt.colorbar(im, ax=axes[0, 2])
 
+    # im = axes[0, 3].imshow(deconv_ideal, aspect='auto', cmap='viridis',
+    #                        origin='lower', vmin=vmin_deconv, vmax=vmax_deconv)
     im = axes[0, 3].imshow(deconv_ideal, aspect='auto', cmap='viridis',
-                           origin='lower', vmin=vmin_deconv, vmax=vmax_deconv)
+                           origin='lower')
+
     axes[0, 3].set_title('Deconv Ideal\n(no filter applied)')
     axes[0, 3].plot(delta_t, delta_x, 'r+', markersize=15, markeredgewidth=2)
     plt.colorbar(im, ax=axes[0, 3])
 
     # Row 1: Noisy measurement and deconvolution
+    # im = axes[1, 0].imshow(measurement_noisy, aspect='auto', cmap='viridis',
+    #                        origin='lower', vmin=vmin_meas, vmax=vmax_meas)
     im = axes[1, 0].imshow(measurement_noisy, aspect='auto', cmap='viridis',
-                           origin='lower', vmin=vmin_meas, vmax=vmax_meas)
+                           origin='lower')
     axes[1, 0].set_title('Noisy Measurement\n(time-domain noise)')
     plt.colorbar(im, ax=axes[1, 0])
 
+    # im = axes[1, 1].imshow(deconv_noisy, aspect='auto', cmap='viridis',
+    #                        origin='lower', vmin=vmin_deconv, vmax=vmax_deconv)
     im = axes[1, 1].imshow(deconv_noisy, aspect='auto', cmap='viridis',
-                           origin='lower', vmin=vmin_deconv, vmax=vmax_deconv)
+                           origin='lower')
     axes[1, 1].set_title('Deconv Noisy\n(+ 2D Gaussian filter)')
     axes[1, 1].plot(delta_t, delta_x, 'r+', markersize=15, markeredgewidth=2)
     plt.colorbar(im, ax=axes[1, 1])
 
     # Row 2: Misaligned measurement and deconvolution
+    # im = axes[2, 0].imshow(measurement_misaligned, aspect='auto', cmap='viridis',
+    #                        origin='lower', vmin=vmin_meas, vmax=vmax_meas)
     im = axes[2, 0].imshow(measurement_misaligned, aspect='auto', cmap='viridis',
-                           origin='lower', vmin=vmin_meas, vmax=vmax_meas)
-    axes[2, 0].set_title('Misaligned Measurement\n(Time at charge center shift +3 ticks)')
+                           origin='lower')
+    axes[2, 0].set_title(f'Misaligned Measurement\n(Time at charge center shift {misalign_shift} ticks)')
     plt.colorbar(im, ax=axes[2, 0])
 
+    # im = axes[2, 1].imshow(deconv_misaligned, aspect='auto', cmap='viridis',
+    #                        origin='lower', vmin=vmin_deconv, vmax=vmax_deconv)
     im = axes[2, 1].imshow(deconv_misaligned, aspect='auto', cmap='viridis',
-                           origin='lower', vmin=vmin_deconv, vmax=vmax_deconv)
+                           origin='lower')
     axes[2, 1].set_title('Deconv Misaligned\n(+ 2D Gaussian filter)')
-    axes[2, 1].plot(delta_t - misalign_shift, delta_x, 'r+', markersize=15,
-                    markeredgewidth=2, label='True pos (shifted)')
+    axes[2, 1].plot(delta_t, delta_x, 'r+', markersize=15,
+                    markeredgewidth=2, label='True pos')
     plt.colorbar(im, ax=axes[2, 1])
 
     # Row 3: Both noise and misalignment
+    # im = axes[3, 0].imshow(measurement_both, aspect='auto', cmap='viridis',
+    #                        origin='lower', vmin=vmin_meas, vmax=vmax_meas)
     im = axes[3, 0].imshow(measurement_both, aspect='auto', cmap='viridis',
-                           origin='lower', vmin=vmin_meas, vmax=vmax_meas)
+                           origin='lower')
     axes[3, 0].set_title('Both: Noisy + Misaligned\nMeasurement')
     plt.colorbar(im, ax=axes[3, 0])
 
+    # im = axes[3, 1].imshow(deconv_both, aspect='auto', cmap='viridis',
+    #                        origin='lower', vmin=vmin_deconv, vmax=vmax_deconv)
     im = axes[3, 1].imshow(deconv_both, aspect='auto', cmap='viridis',
-                           origin='lower', vmin=vmin_deconv, vmax=vmax_deconv)
+                           origin='lower')
     axes[3, 1].set_title('Deconv Both\n(+ 2D Gaussian filter)')
-    axes[3, 1].plot(delta_t, delta_x - misalign_shift, 'r+', markersize=15,
+    axes[3, 1].plot(delta_t, delta_x, 'r+', markersize=15,
                     markeredgewidth=2, label='True pos (shifted)')
     plt.colorbar(im, ax=axes[3, 1])
 
     # Columns 2-3: 1D profiles (spatial and temporal)
     # Spatial profile at t=delta_t
-    axes[0, 2].plot(signal_ideal[:, delta_t], 'o-', label='Signal', linewidth=2)
+    # axes[0, 2].plot(signal_ideal[:, delta_t], 'o-', label='Signal', linewidth=2)
     axes[1, 2].plot(measurement_noisy[:, delta_t], 'o-', label='Noisy meas',
                     linewidth=2)
     axes[2, 2].plot(measurement_misaligned[:, delta_t], 'o-', label='Misaligned meas',
                     linewidth=2)
     axes[3, 2].plot(measurement_both[:, delta_t], 'o-', label='Both meas', linewidth=2)
 
-    for i in range(4):
+    for i in range(1, 4):
         axes[i, 2].set_ylabel('Amplitude')
         axes[i, 2].grid(True, alpha=0.3)
         axes[i, 2].legend(loc='upper right')
-    axes[0, 2].set_title('Spatial Profile at t={}'.format(delta_t))
+        axes[i, 2].set_title('Spatial Profile of measurements at t={}'.format(delta_t))
 
     # Temporal profile at x=delta_x (accounting for misalignment)
-    axes[0, 3].plot(signal_ideal[delta_x, :], 'o-', label='Signal', linewidth=2)
-    axes[1, 3].plot(deconv_noisy[delta_x, :], 'o-', label='Deconv noisy',
-                    linewidth=2)
-    axes[2, 3].plot(deconv_misaligned[delta_x, :], 'o-',
-                    label='Deconv misaligned', linewidth=2)
-    axes[2, 3].set_xlabel('Time')
-    axes[3, 3].plot(deconv_both[delta_x, :], 'o-', label='Deconv both',
-                    linewidth=2)
-    axes[3, 3].set_xlabel('Time')
+    axes[0, 4].plot(deconv_ideal[delta_x, :], 'o-', label='Signal', linewidth=2)
+    # for i in range(0, 10):
+    #     axes[0, 4].plot(deconv_ideal[i, :], 'o-', label='Signal', linewidth=2)
 
-    for i in range(4):
+    axes[1, 3].plot(deconv_noisy[delta_x, :]-1, 'o-', label='Deconv noisy',
+                    linewidth=2)
+    axes[2, 3].plot(deconv_misaligned[delta_x-1, :], 'o-',
+                    label=f'Deconv misaligned', linewidth=2)
+    axes[2, 3].set_xlabel('Time')
+    axes[3, 3].plot(deconv_both[delta_x-1, :], 'o-', label='Deconv both',
+                    linewidth=2)
+    for i in range(1, 4):
         axes[i, 3].set_xlabel('Time (bin)')
         axes[i, 3].set_ylabel('Amplitude')
         axes[i, 3].grid(True, alpha=0.3)
         axes[i, 3].legend(loc='upper right')
-    axes[0, 3].set_title('Temporal Profile at x={}'.format(delta_x))
+        axes[i, 3].set_title('Temporal Profile of deconvolution at x={}'.format(delta_x-1))
+    for i in range(1, 4):
+        axes[i, 3].text(0.2, 0.7, 'sigma_x_freq={}'.format(sigma_x_filter), transform=axes[i, 3].transAxes,
+                    fontsize=10, color='red', ha='center')
+        axes[i, 3].text(0.2, 0.6, 'sigma_t_freq={}'.format(sigma_t_filter), transform=axes[i, 3].transAxes,
+                    fontsize=10, color='red', ha='center')
+
+    axes[1, 4].plot(deconv_noisy[delta_x, :], 'o-', label='Deconv noisy',
+                    linewidth=2)
+    axes[2, 4].plot(deconv_misaligned[delta_x, :], 'o-',
+                    label='Deconv misaligned', linewidth=2)
+    axes[2, 4].set_xlabel('Time')
+    axes[3, 4].plot(deconv_both[delta_x, :], 'o-', label='Deconv both',
+                    linewidth=2)
+    axes[3, 4].set_xlabel('Time')
+
+    for i in range(4):
+        axes[i, 4].set_xlabel('Time (bin)')
+        axes[i, 4].set_ylabel('Amplitude')
+        axes[i, 4].grid(True, alpha=0.3)
+        axes[i, 4].legend(loc='upper right')
+        axes[i, 4].set_title('Temporal Profile of deconvoluiton at x={}'.format(delta_x))
+    for i in range(1, 4):
+        axes[i, 4].text(0.2, 0.7, 'sigma_x_freq={}'.format(sigma_x_filter), transform=axes[i, 4].transAxes,
+                    fontsize=10, color='red', ha='center')
+        axes[i, 4].text(0.2, 0.6, 'sigma_t_freq={}'.format(sigma_t_filter), transform=axes[i, 4].transAxes,
+                    fontsize=10, color='red', ha='center')
+
 
     # Hide unused subplots
     axes[0, 0].set_xlabel('Time (bin)')
@@ -424,13 +468,17 @@ def main():
     for ax in axes[3, :]:
         ax.set_xlabel('Time (bin)')
 
+    focomp = f'deconv2d_comparison_sigmax{sigma_x_filter:.2f}_sigmat{sigma_t_filter:.2f}'
+    focomp = focomp.replace('.', 'p')
+    focomp += '.png'
+
     plt.tight_layout()
-    plt.savefig(output_dir / 'deconv2d_comparison.png', dpi=150)
+    plt.savefig(output_dir / focomp, dpi=150)
     plt.close()
 
     print("\n✓ Plots saved:")
     print(f"  - {output_dir / 'kernel_detail.png'}")
-    print(f"  - {output_dir / 'deconv2d_comparison.png'}")
+    print(f"  - {output_dir / focomp}")
 
 
 if __name__ == '__main__':
