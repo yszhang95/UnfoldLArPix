@@ -2,7 +2,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-threshold = 4
+threshold = 0.5
 filtered_deconv_q = []
 filtered_smeared_true = []
 filtered_totQ = []
@@ -125,7 +125,7 @@ for ievent in range(1):
 plt.figure(figsize=(10, 6))
 plt.hist(filtered_smeared_true, label='Smeared True Projection', range=(0, 40), bins=40, alpha=0.5)
 plt.hist(filtered_deconv_q, label='Deconvolved Projection', range=(0, 40), bins=40, alpha=0.5)
-plt.hist(filtered_totQ, label='Total Charge from Hits', range=(0, 40), bins=40, alpha=0.5)
+#plt.hist(filtered_totQ, label='Total Charge from Hits', range=(0, 40), bins=40, alpha=0.5)
 plt.xlabel('Charge Projection')
 plt.ylabel('Count')
 plt.title('Comparison of Smeared True Projection and Deconvolved Projection')
