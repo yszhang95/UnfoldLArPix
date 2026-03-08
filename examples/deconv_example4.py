@@ -101,7 +101,7 @@ for event in loader.iter_events():
     blocks = bdata
     hwf_block_data = blocks
     hwf_block_location = boffset
-    print(boffset, blocks)
+    # print(boffset, blocks)
 
     plt.plot(np.arange(0, hwf_block_data.shape[-1])*readout_config.adc_hold_delay + readout_config.adc_hold_delay + hwf_block.location[0,2],
              hwf_block_data[0, 0, :], 'o', label="hwf_block")
@@ -122,7 +122,7 @@ for event in loader.iter_events():
     plt.legend()
     plt.savefig('fr_kernel.png')
 
-    sigma = 0.01
+    sigma = 0.005
 
     npadpxl = 20
 
@@ -132,11 +132,18 @@ for event in loader.iter_events():
 
     gaussian_kernel = gaussian_filter(n=hwf_block_data.shape[-1], dt=readout_config.adc_hold_delay,
                                       sigma=sigma)
+    gkernel_copy = gaussian_kernel.copy()
 
     gaussian_kernel = gaussian_filter_3d((
         hwf_block_data.shape[0]+fr_full_k.shape[0]-1,
         hwf_block_data.shape[1]+fr_full_k.shape[1]-1,
-        hwf_block_data.shape[2]), dt=(1,1,1), sigma=(20, 20, sigma))
+        hwf_block_data.shape[2]), dt=(1,1, readout_config.adc_hold_delay), sigma=(1, 1, sigma))
+    # print(f"Gaussian kernel shape: {gaussian_kernel.shape}")
+    # print(np.argwhere(gaussian_kernel > 0.9), 'np.where')
+    # print(np.max(np.abs(gaussian_kernel[0, 0, :] - gkernel_copy[None, None, :])), 'max abs diff of gaussian kernel')
+    # print(np.argmax(np.abs(gaussian_kernel[0, 0, :] - gkernel_copy[None, None, :])), 'max abs diff of gaussian kernel')
+    # print(gaussian_kernel[0, 0, :], 'gaussian kernel at (0, 0)')
+    # print(gkernel_copy[:], 'gaussian kernel at (0, 0)')
 
 
 
@@ -148,11 +155,11 @@ for event in loader.iter_events():
     for i in range(2):
         plt.figure()
         plt.plot(hwf_block_location[-1] - local_offset[-1] + np.arange(len(deconv_data[i+npadpxl, 0+npadpxl, :])) * readout_config.adc_hold_delay,
-                 deconv_data[i+20, 0+20, :], 'o-', label=f"deconv charge; sum(deconv) over t = {np.sum(deconv_data[i+20, 0+20, :]):.2f}")
+                 deconv_data[i+20, 0+20, :], 'o-', label=f"deconv charge center; sum(deconv) over t = {np.sum(deconv_data[i+20, 0+20, :]):.2f}")
         plt.plot(hwf_block_location[-1] - local_offset[-1] + np.arange(len(deconv_data[i+npadpxl-1, 0+npadpxl, :])) * readout_config.adc_hold_delay,
-                 deconv_data[i+20-1, 0+20, :], 'o-', label=f"deconv charge; sum(deconv) over t = {np.sum(deconv_data[i+20, 0+20, :]):.2f}")
+                 deconv_data[i+20-1, 0+20, :], 'o-', label=f"deconv charge -1; sum(deconv) over t = {np.sum(deconv_data[i+20-1, 0+20, :]):.2f}")
         plt.plot(hwf_block_location[-1] - local_offset[-1] + np.arange(len(deconv_data[i+npadpxl+1, 0+npadpxl, :])) * readout_config.adc_hold_delay,
-                 deconv_data[i+20+1, 0+20, :], 'o-', label=f"deconv charge; sum(deconv) over t = {np.sum(deconv_data[i+20, 0+20, :]):.2f}")
+                 deconv_data[i+20+1, 0+20, :], 'o-', label=f"deconv charge +1; sum(deconv) over t = {np.sum(deconv_data[i+20+1, 0+20, :]):.2f}")
 
         cloc = hwf_block_location[:2]
         cloc[0] += i

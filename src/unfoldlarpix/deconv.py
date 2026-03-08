@@ -61,8 +61,6 @@ def deconv_fft(measurement: np.ndarray, kernel: np.ndarray,
     epsilon = 1e-10
     kernel_fft = np.where(np.abs(kernel_fft) < epsilon, epsilon, kernel_fft)
 
-    print(measurement_fft.shape, kernel_fft.shape, filter_fft.shape if filter_fft is not None else None)
-
     # Perform deconvolution in the frequency domain
     signal_fft = measurement_fft / kernel_fft
     if filter_fft is not None:

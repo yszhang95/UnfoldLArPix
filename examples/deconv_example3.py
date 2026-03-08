@@ -13,7 +13,7 @@ from unfoldlarpix.deconv import deconv_fft, gaussian_filter, gaussian_filter_3d
 from unfoldlarpix import BurstSequence, BurstSequenceProcessor, MergedSequence
 from unfoldlarpix.burst_processor import merged_sequences_to_block
 
-from unfoldlarpix.smear_truth import gaus_smear_true
+from unfoldlarpix.smear_truth import gaus_smear_true, gaus_smear_true_3d
 
 # Load NPZ file produced by tred
 # loader = DataLoader("data/pgun_muplus_3gev_tred_nburst4_noises.npz")
@@ -93,20 +93,24 @@ for event in loader.iter_events():
     # curr_mask = np.all(event.current.location[:,:2]==cloc[None, :], axis=1)
     # curr = np.squeeze(event.current.data[curr_mask])
 
-    sigma = 0.01
+    # sigma = 0.005
+    # sigma_pxl = 0.2
+    sigma = 50
+    sigma_pxl = 50
     hwf_block_data = blocks
     gaussian_kernel = gaussian_filter(n=hwf_block_data.shape[-1], dt=readout_config.adc_hold_delay,
                                       sigma=sigma)
 
-    # gaussian_kernel = gaussian_filter_3d((
-    #     hwf_block_data.shape[0]+fr_full_k.shape[0]-1,
-    #     hwf_block_data.shape[1]+fr_full_k.shape[1]-1,
-    #     hwf_block_data.shape[2]), dt=(1,1,1), sigma=(2, 2, sigma))
+    gaussian_kernel = gaussian_filter_3d((
+        hwf_block_data.shape[0]+fr_full_k.shape[0]-1,
+        hwf_block_data.shape[1]+fr_full_k.shape[1]-1,
+        hwf_block_data.shape[2]), dt=(1,1,readout_config.adc_hold_delay), sigma=(sigma_pxl, sigma_pxl, sigma))
 
     deconv_q, local_offset = deconv_fft(hwf_block_data, fr_full_k,
                                         gaussian_kernel)
 
-    smear_offset, smeared_true = gaus_smear_true(event.effq.location, event.effq.data, width=sigma)
+    # smear_offset, smeared_true = gaus_smear_true(event.effq.location, event.effq.data, width=sigma)
+    smear_offset, smeared_true = gaus_smear_true_3d(event.effq.location, event.effq.data, width=np.array([sigma_pxl, sigma_pxl, sigma]))
 
     print(f'smear_offset: {smear_offset}, boffset: {boffset}, '
           f'sum_deconv_q: {np.sum(deconv_q)}, '
