@@ -11,6 +11,7 @@ from .data_containers import (
     EventData,
     Geometry,
     Hits,
+    TrueHits,
     ReadoutConfig,
 )
 
@@ -58,7 +59,7 @@ class DataLoader:
         if key.endswith("_location"):
             return None
 
-        for data_type in ["effq", "current", "hits", "event_id", "global_tref"]:
+        for data_type in ["effq", "current", "hits", "truehits", "event_id", "global_tref"]:
             if key.startswith(f'{data_type}_tpc'):
                 return data_type
         return None
@@ -168,10 +169,11 @@ class DataLoader:
                     "effq": [],
                     "current": [],
                     "hits": [],
+                    "truehits": [],
                     "global_tref": [],
                 }
 
-            if data_type in ["effq", "current", "hits"]:
+            if data_type in ["effq", "current", "hits", "truehits"]:
                 grouped[group_key][data_type].append(array)
             elif data_type == "global_tref":
                 grouped[group_key]["global_tref"].append(array)
@@ -259,6 +261,20 @@ class DataLoader:
                     tpc_id=tpc_id,
                     event_id=event_id,
                 )
+
+        # Create TrueHits container (optional — may not be present in all NPZ files)
+        # Location is always taken from hits (truehits shares pixel positions with hits).
+        if group_data["truehits"] and event_data.hits is not None:
+            # Flatten to 2D (N, T): handles shapes like (N, 1, 1, T) from tred output
+            merged_data = np.vstack(
+                [a.reshape(a.shape[0], -1) for a in group_data["truehits"]]
+            )
+            event_data.truehits = TrueHits(
+                data=merged_data,
+                location=event_data.hits.location,
+                tpc_id=tpc_id,
+                event_id=event_id,
+            )
 
         # Set global_tref if available
         if group_data["global_tref"]:

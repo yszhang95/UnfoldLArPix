@@ -79,6 +79,29 @@ class Hits(DataContainer):
 
 
 @dataclass
+class TrueHits(DataContainer):
+    """Container for true (simulated) hit data.
+
+    Data is stored as a 2D array (N, T) where T is the number of time bins.
+    Unlike Hits, there are no leading coordinate columns — each column is a
+    charge value. Location is shared with the corresponding Hits container
+    when no dedicated truehits location is present in the NPZ file.
+    """
+
+    def __post_init__(self) -> None:
+        """Validate true-hit-specific constraints."""
+        super().__post_init__()
+        if self.data.ndim != 2:
+            raise ValueError(
+                f"TrueHits data must be 2D (N, T), got shape {self.data.shape}"
+            )
+        if self.location.shape[1] != 5:
+            raise ValueError(
+                f"TrueHits location must have shape (N, 5), got {self.location.shape}"
+            )
+
+
+@dataclass
 class EventData:
     """Container for all data types associated with a single (event_id, tpc_id)."""
 
@@ -87,6 +110,7 @@ class EventData:
     effq: Optional[EffectiveCharge] = None
     current: Optional[Current] = None
     hits: Optional[Hits] = None
+    truehits: Optional[TrueHits] = None
     global_tref: Optional[np.ndarray] = None
     metadata: Optional[Dict[str, Any]] = None
 
@@ -98,7 +122,8 @@ class EventData:
     def has_data(self) -> bool:
         """Check if any data containers are present."""
         return any(
-            container is not None for container in [self.effq, self.current, self.hits]
+            container is not None
+            for container in [self.effq, self.current, self.hits, self.truehits]
         )
 
     def get_data_types(self) -> List[str]:
@@ -110,6 +135,8 @@ class EventData:
             types.append("current")
         if self.hits is not None:
             types.append("hits")
+        if self.truehits is not None:
+            types.append("truehits")
         return types
 
 
