@@ -195,6 +195,9 @@ def power_spectrum_projection_hist(
     n_freq_bins: int = 100,
     n_power_bins: int = 100,
     log_power: bool = True,
+    draw_hist: bool = True,
+    mean_color: str = 'red',
+    mean_label: str = 'mean power',
     ax: plt.Axes | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Compute per-trace power spectra along one axis, displayed as a 2D histogram.
@@ -220,6 +223,13 @@ def power_spectrum_projection_hist(
         Number of histogram bins along the power axis.
     log_power : bool
         If True, histogram and display log10 of power.
+    draw_hist : bool
+        If True, draw the 2-D histogram.  Set to False to overlay only the
+        mean power line on an existing axes.
+    mean_color : str
+        Colour of the mean-power line.
+    mean_label : str
+        Legend label for the mean-power line.
     ax : matplotlib.axes.Axes, optional
         Axes to draw into.  A new figure/axes is created if ``None``.
 
@@ -261,7 +271,6 @@ def power_spectrum_projection_hist(
     freq_edges = np.linspace(freqs[0], freqs[-1], n_freq_bins + 1)
     power_edges = np.linspace(powers.min(), powers.max(), n_power_bins + 1)
 
-    # Tile freqs to match the raveled powers array
     freq_rep = np.tile(freqs, flat.shape[0])   # (N_flat * Nf,)
     hist2d, _, _ = np.histogram2d(
         freq_rep, powers.ravel(),
@@ -275,33 +284,36 @@ def power_spectrum_projection_hist(
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 5))
 
-    extent = [freq_edges[0], freq_edges[-1], power_edges[0], power_edges[-1]]
-    im = ax.imshow(
-        hist2d.T,          # (n_power_bins, n_freq_bins) → rows=power, cols=freq
-        origin='lower',
-        aspect='auto',
-        extent=extent,
-        cmap='viridis',
-    )
-    plt.colorbar(im, ax=ax, label='counts')
+    if draw_hist:
+        extent = [freq_edges[0], freq_edges[-1], power_edges[0], power_edges[-1]]
+        im = ax.imshow(
+            hist2d.T,      # (n_power_bins, n_freq_bins) → rows=power, cols=freq
+            origin='lower',
+            aspect='auto',
+            extent=extent,
+            cmap='viridis',
+        )
+        plt.colorbar(im, ax=ax, label='counts')
+        ax.set_xlabel('frequency [cycles/sample]')
+        ax.set_ylabel('log\u2081\u2080(power)' if log_power else 'power')
+        ax.set_title(
+            f'Power spectra along axis {unchanged_axis} '
+            f'(projected axes {other_axes[0]}, {other_axes[1]})'
+        )
 
-    ax.plot(freqs, avg_power, color='red', linewidth=1.5, label='mean power')
-
-    ax.set_xlabel('frequency [cycles/sample]')
-    ax.set_ylabel('log\u2081\u2080(power)' if log_power else 'power')
-    ax.set_title(
-        f'Power spectra along axis {unchanged_axis} '
-        f'(projected axes {other_axes[0]}, {other_axes[1]})'
-    )
+    ax.plot(freqs, avg_power, color=mean_color, linewidth=1.5, label=mean_label)
     ax.legend()
 
     return freqs, avg_power, hist2d
 
-regions = find_active_region(true_meas)
-print("Active regions:", regions)
+# ---------------------------------------------------------------------------
+# Power-spectrum plots
+# ---------------------------------------------------------------------------
 
-# For each unchanged_axis i the slice_ranges come from the other two axes.
-# Mapping: axis 0 → slice axes 1,2; axis 1 → slice axes 0,2; axis 2 → slice axes 0,1
+# Active region is defined by the true signal
+regions = find_active_region(true_meas)
+print("Active regions (true_meas):", regions)
+
 slice_ranges_per_axis = [
     (regions[1], regions[2]),   # unchanged_axis = 0
     (regions[0], regions[2]),   # unchanged_axis = 1
@@ -309,58 +321,85 @@ slice_ranges_per_axis = [
 ]
 axis_labels = ['x (pixel)', 'y (pixel)', 't (tick)']
 
-fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-fig.suptitle('Power spectra of true_meas — active region per axis')
+# Collect mean powers for the ratio plot
+avg_noisy = {}
+avg_true  = {}
 
-for unchanged_axis, (ax_plot, sr) in enumerate(zip(axes, slice_ranges_per_axis)):
-    power_spectrum_projection_hist(
+# --- Figure 1: noisy_meas 2D histogram + mean ---
+fig1, axes1 = plt.subplots(1, 3, figsize=(18, 5))
+fig1.suptitle('Power spectra — noisy_meas')
+
+for uax, (ax_plot, sr) in enumerate(zip(axes1, slice_ranges_per_axis)):
+    freqs, avg, _ = power_spectrum_projection_hist(
         noisy_meas,
-        unchanged_axis=unchanged_axis,
+        unchanged_axis=uax,
         slice_ranges=sr,
+        draw_hist=True,
+        mean_color='red',
+        mean_label='noisy mean',
         ax=ax_plot,
     )
-    other = [axis_labels[i] for i in range(3) if i != unchanged_axis]
+    avg_noisy[uax] = (freqs, avg)
+    other = [axis_labels[i] for i in range(3) if i != uax]
     ax_plot.set_title(
-        f'FFT along {axis_labels[unchanged_axis]}\n'
+        f'FFT along {axis_labels[uax]}\n'
         f'(slice: {other[0]} {sr[0]}, {other[1]} {sr[1]})'
     )
 
 plt.tight_layout()
-plt.savefig('power_spectra_true_active_region.png', dpi=150)
+plt.savefig('power_spectra_noisy.png', dpi=150)
 plt.show()
 
-# ---------------------------------------------------------------------------
-# Power-spectrum 2-D histograms for noisy_meas, one panel per axis
-# ---------------------------------------------------------------------------
+# --- Figure 2: true_meas 2D histogram + mean ---
+fig2, axes2 = plt.subplots(1, 3, figsize=(18, 5))
+fig2.suptitle('Power spectra — true_meas')
 
-# regions = find_active_region(noisy_meas)
-# print("Active regions:", regions)
-
-# For each unchanged_axis i the slice_ranges come from the other two axes.
-# Mapping: axis 0 → slice axes 1,2; axis 1 → slice axes 0,2; axis 2 → slice axes 0,1
-# slice_ranges_per_axis = [
-#     (regions[1], regions[2]),   # unchanged_axis = 0
-#     (regions[0], regions[2]),   # unchanged_axis = 1
-#     (regions[0], regions[1]),   # unchanged_axis = 2
-# ]
-# axis_labels = ['x (pixel)', 'y (pixel)', 't (tick)']
-
-fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-fig.suptitle('Power spectra of noisy_meas — active region per axis')
-
-for unchanged_axis, (ax_plot, sr) in enumerate(zip(axes, slice_ranges_per_axis)):
-    power_spectrum_projection_hist(
-        noisy_meas,
-        unchanged_axis=unchanged_axis,
+for uax, (ax_plot, sr) in enumerate(zip(axes2, slice_ranges_per_axis)):
+    freqs, avg, _ = power_spectrum_projection_hist(
+        true_meas,
+        unchanged_axis=uax,
         slice_ranges=sr,
+        draw_hist=True,
+        mean_color='cyan',
+        mean_label='true mean',
         ax=ax_plot,
     )
-    other = [axis_labels[i] for i in range(3) if i != unchanged_axis]
+    avg_true[uax] = (freqs, avg)
+    other = [axis_labels[i] for i in range(3) if i != uax]
     ax_plot.set_title(
-        f'FFT along {axis_labels[unchanged_axis]}\n'
+        f'FFT along {axis_labels[uax]}\n'
         f'(slice: {other[0]} {sr[0]}, {other[1]} {sr[1]})'
     )
 
 plt.tight_layout()
-plt.savefig('power_spectra_noisy_active_region.png', dpi=150)
+plt.savefig('power_spectra_true.png', dpi=150)
+plt.show()
+
+# --- Figure 3: mean powers overlaid + ratio ---
+fig3, axes3 = plt.subplots(2, 3, figsize=(18, 10))
+fig3.suptitle('Mean power comparison and ratio (noisy / true)')
+
+for uax in range(3):
+    freqs_n, avg_n = avg_noisy[uax]
+    freqs_t, avg_t = avg_true[uax]
+
+    ax_top = axes3[0, uax]
+    ax_top.plot(freqs_n, avg_n, color='red',  linewidth=1.5, label='noisy mean')
+    ax_top.plot(freqs_t, avg_t, color='cyan', linewidth=1.5, label='true mean')
+    ax_top.set_xlabel('frequency [cycles/sample]')
+    ax_top.set_ylabel('log\u2081\u2080(power)')
+    ax_top.set_title(f'Mean power along {axis_labels[uax]}')
+    ax_top.legend()
+
+    ax_bot = axes3[1, uax]
+    log_ratio = avg_t - avg_n   # difference in log10 = log10(noisy/true)
+    ratio = 10 ** log_ratio          # convert back to linear ratio
+    ax_bot.plot(freqs_n, ratio, color='orange', linewidth=1.5)
+    ax_bot.axhline(0, color='grey', linewidth=0.8, linestyle='--')
+    ax_bot.set_xlabel('frequency [cycles/sample]')
+    ax_bot.set_ylabel('log\u2081\u2080(noisy / true)')
+    ax_bot.set_title(f'Ratio along {axis_labels[uax]}')
+
+plt.tight_layout()
+plt.savefig('power_spectra_ratio.png', dpi=150)
 plt.show()
