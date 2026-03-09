@@ -81,6 +81,12 @@ def integrate_k(kernel: np.ndarray, kticks: int) -> np.ndarray:
 
 fr_full_k = integrate_k(fr_full, readout_config.adc_hold_delay)
 
+ax_units = {
+    0: ' (1/pixel)',
+    1: ' (1/pixel)',
+    2: f' (1/ {readout_config.adc_hold_delay} ticks)',
+}
+
 # Iterate over events grouped by (event_id, tpc_id)
 for event in loader.iter_events():
     print(f"TPC {event.tpc_id}, Event {event.event_id}")
@@ -173,9 +179,7 @@ def plot_snr_analysis(noisy_block: np.ndarray, true_block: np.ndarray,
     ratio   = snr_ratio_3d(P_true, P_noisy)
 
     freqs  = freq_axes(shape)
-    labels = [r'$f_x$ [pixel$^{-1}$]',
-              r'$f_y$ [pixel$^{-1}$]',
-              rf'$f_t$ [tick$^{{-1}}$] ($\Delta t={dt}\,\mu$s)']
+    labels = [f'frequency [{ax_units[i]}]' for i in range(3)]
     names  = ['x', 'y', 't']
 
     fig, axes = plt.subplots(2, 3, figsize=(15, 8))
@@ -238,7 +242,7 @@ def plot_charge_projections(noisy_block: np.ndarray, true_block: np.ndarray) -> 
 
     One subplot per axis (x, y, t), both noisy and true overlaid.
     """
-    axis_labels = ['x [pixel]', 'y [pixel]', 't [tick]']
+    axis_labels = ['x [pixel]', 'y [pixel]', f't [{readout_config.adc_hold_delay} ticks]']
     axis_names  = ['x', 'y', 't']
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
@@ -289,9 +293,7 @@ def plot_ratio_clipped(noisy_block: np.ndarray, true_block: np.ndarray,
     P_true  = power_spectrum_3d(true_block)
 
     freqs  = freq_axes(shape)
-    labels = [r'$f_x$ [pixel$^{-1}$]',
-              r'$f_y$ [pixel$^{-1}$]',
-              rf'$f_t$ [tick$^{{-1}}$] ($\Delta t={dt}\,\mu$s)']
+    labels = [f'frequency [{ax_units[i]}]' for i in range(3)]
     names  = ['x', 'y', 't']
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))

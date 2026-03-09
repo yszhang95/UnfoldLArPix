@@ -187,6 +187,11 @@ def find_active_region(
 
     return regions
 
+ax_units = {
+    0: ' (1/pixel)',
+    1: ' (1/pixel)',
+    2: f' (1/ {readout_config.adc_hold_delay} ticks)',
+}
 
 def power_spectrum_projection_hist(
     block: np.ndarray,
@@ -198,6 +203,7 @@ def power_spectrum_projection_hist(
     draw_hist: bool = True,
     mean_color: str = 'red',
     mean_label: str = 'mean power',
+    freq_unit: str = '',
     ax: plt.Axes | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Compute per-trace power spectra along one axis, displayed as a 2D histogram.
@@ -294,7 +300,7 @@ def power_spectrum_projection_hist(
             cmap='viridis',
         )
         plt.colorbar(im, ax=ax, label='counts')
-        ax.set_xlabel('frequency [cycles/sample]')
+        ax.set_xlabel(f'frequency [{freq_unit}]')
         ax.set_ylabel('log\u2081\u2080(power)' if log_power else 'power')
         ax.set_title(
             f'Power spectra along axis {unchanged_axis} '
@@ -337,6 +343,7 @@ for uax, (ax_plot, sr) in enumerate(zip(axes1, slice_ranges_per_axis)):
         draw_hist=True,
         mean_color='red',
         mean_label='noisy mean',
+        freq_unit=ax_units[uax],
         ax=ax_plot,
     )
     avg_noisy[uax] = (freqs, avg)
@@ -362,6 +369,7 @@ for uax, (ax_plot, sr) in enumerate(zip(axes2, slice_ranges_per_axis)):
         draw_hist=True,
         mean_color='cyan',
         mean_label='true mean',
+        freq_unit=ax_units[uax],
         ax=ax_plot,
     )
     avg_true[uax] = (freqs, avg)
@@ -382,11 +390,12 @@ fig3.suptitle('Mean power comparison and ratio (noisy / true)')
 for uax in range(3):
     freqs_n, avg_n = avg_noisy[uax]
     freqs_t, avg_t = avg_true[uax]
+    xlabel = f'frequency [{ax_units[uax]}]'
 
     ax_top = axes3[0, uax]
     ax_top.plot(freqs_n, avg_n, color='red',  linewidth=1.5, label='noisy mean')
     ax_top.plot(freqs_t, avg_t, color='cyan', linewidth=1.5, label='true mean')
-    ax_top.set_xlabel('frequency [cycles/sample]')
+    ax_top.set_xlabel(xlabel)
     ax_top.set_ylabel('log\u2081\u2080(power)')
     ax_top.set_title(f'Mean power along {axis_labels[uax]}')
     ax_top.legend()
@@ -396,7 +405,7 @@ for uax in range(3):
     ratio = 10 ** log_ratio          # convert back to linear ratio
     ax_bot.plot(freqs_n, ratio, color='orange', linewidth=1.5)
     ax_bot.axhline(0, color='grey', linewidth=0.8, linestyle='--')
-    ax_bot.set_xlabel('frequency [cycles/sample]')
+    ax_bot.set_xlabel(xlabel)
     ax_bot.set_ylabel('log\u2081\u2080(noisy / true)')
     ax_bot.set_title(f'Ratio along {axis_labels[uax]}')
 
