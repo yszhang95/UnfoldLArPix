@@ -182,17 +182,15 @@ def plot_snr_analysis(noisy_block: np.ndarray, true_block: np.ndarray,
 
     for i in range(3):
         f  = freqs[i]
-        if i == 0:
-            pn = P_noisy[:, 0, 0]
-            pt = P_true[:, 0, 0]
-        elif i == 1:
-            pn = P_noisy[0, :, 0]
-            pt = P_true[0, :, 0]
+        noisy_proj = project_sum(noisy_block, axis=i)
+        true_proj  = project_sum(true_block, axis=i)
+        if i != 2:
+            pn = np.abs(np.fft.fft(noisy_proj))**2
+            pt = np.abs(np.fft.fft(true_proj))**2
         else:
-            pn = P_noisy[0, 0, :]
-            pt = P_true[0, 0, :]
+            pn = np.abs(np.fft.rfft(noisy_proj))**2
+            pt = np.abs(np.fft.rfft(true_proj))**2
         r  = pt/pn
-
 
         # fftshift for the two-sided x/y axes; rfftfreq is already one-sided
         if i < 2:
@@ -206,7 +204,7 @@ def plot_snr_analysis(noisy_block: np.ndarray, true_block: np.ndarray,
         ax.semilogy(f, pn, label='noisy', alpha=0.8)
         ax.semilogy(f, pt, label='true',  alpha=0.8)
         ax.set_xlabel(labels[i])
-        ax.set_ylabel('Power (mean over other axes)')
+        ax.set_ylabel('Power [a.u.]')
         ax.set_title(f'Power spectrum — {names[i]} projection')
         ax.legend()
         ax.grid(True, alpha=0.3)
@@ -220,7 +218,7 @@ def plot_snr_analysis(noisy_block: np.ndarray, true_block: np.ndarray,
         ax.set_title(f'S^2/(S^2+N^2) ratio — {names[i]} projection')
         ax.grid(True, alpha=0.3)
 
-    fig.suptitle('Fourier power spectra and SNR ratio', fontsize=13)
+    fig.suptitle('Fourier power spectra and S^2/(S^2+N^2) ratio', fontsize=13)
     fig.tight_layout()
     return fig
 
@@ -271,4 +269,62 @@ def plot_charge_projections(noisy_block: np.ndarray, true_block: np.ndarray) -> 
 
 fig2 = plot_charge_projections(noisy_meas, true_meas)
 fig2.savefig(f"charge_projections{noise_postfix}.png", dpi=150)
+plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Ratio-only plots with y-axis clipped to [0, 1.5]
+# ---------------------------------------------------------------------------
+
+def plot_ratio_clipped(noisy_block: np.ndarray, true_block: np.ndarray,
+                       dt: float = 1.0) -> plt.Figure:
+    """Plot the S²/N² ratio projections only, with y limited to [0, 1.5]."""
+    shape = tuple(max(a, b) for a, b in zip(noisy_block.shape, true_block.shape))
+    def pad_to(arr):
+        return np.pad(arr, [(0, s - n) for s, n in zip(shape, arr.shape)])
+    noisy_block = pad_to(noisy_block)
+    true_block  = pad_to(true_block)
+
+    P_noisy = power_spectrum_3d(noisy_block)
+    P_true  = power_spectrum_3d(true_block)
+
+    freqs  = freq_axes(shape)
+    labels = [r'$f_x$ [pixel$^{-1}$]',
+              r'$f_y$ [pixel$^{-1}$]',
+              rf'$f_t$ [tick$^{{-1}}$] ($\Delta t={dt}\,\mu$s)']
+    names  = ['x', 'y', 't']
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+    for i, ax in enumerate(axes):
+        f = freqs[i]
+        noisy_proj = project_sum(noisy_block, axis=i)
+        true_proj  = project_sum(true_block, axis=i)
+        if i != 2:
+            pn = np.abs(np.fft.fft(noisy_proj))**2
+            pt = np.abs(np.fft.fft(true_proj))**2
+        else:
+            pn = np.abs(np.fft.rfft(noisy_proj))**2
+            pt = np.abs(np.fft.rfft(true_proj))**2
+        r  = pt/pn
+
+        if i < 2:
+            f = np.fft.fftshift(f)
+            r = np.fft.fftshift(r)
+
+        ax.plot(f, r)
+        ax.axhline(1.0, color='k', linestyle='--', linewidth=0.8, alpha=0.6)
+        ax.set_ylim(0, 1.5)
+        ax.set_xlabel(labels[i])
+        ax.set_ylabel(r'$|\widetilde{S}|^2\,/\,|\widetilde{N}|^2$')
+        ax.set_title(f'S²/(S²+N²) ratio — {names[i]} projection')
+        ax.grid(True, alpha=0.3)
+
+    fig.suptitle('S²/(S²+N²) ratio (clipped to [0, 1.5])', fontsize=13)
+    fig.tight_layout()
+    return fig
+
+
+fig3 = plot_ratio_clipped(noisy_meas, true_meas, dt=readout_config.time_spacing)
+fig3.savefig(f"snr_ratio_clipped{noise_postfix}.png", dpi=150)
 plt.show()
