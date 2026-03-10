@@ -64,6 +64,13 @@ for r, c in [(0, 0), (0, 5), (0, 14), (4, 4), (4, 5), (10, 10)]:
     match = np.allclose(direct, from_full)
     print(f"  ({r:2d},{c:2d}) -> averaged pixel ({ap_r},{ap_c})  match={match}")
 
+# ── Save expanded array to NPZ ───────────────────────────────────────────────
+out_npz = NPZ_PATH.parent / (NPZ_PATH.stem + "_average_expanded.npz")
+save_dict = {k: data[k] for k in data if k != "response"}
+save_dict["response"] = quarter_reconstructed
+np.savez(out_npz, **save_dict)
+print(f"\nSaved expanded response {quarter_reconstructed.shape} to {out_npz}")
+
 # ── Plot: compare time waveforms at a few quarter positions ─────────────────
 fig, axes = plt.subplots(2, 3, figsize=(12, 6), sharey=True)
 sample_positions = [(0, 0), (0, 5), (0, 14), (5, 5), (10, 0), (24, 24)]
