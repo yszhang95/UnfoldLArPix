@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # import numpy as np
 # import unfoldlarpix
+import sys
+from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -18,7 +20,8 @@ from unfoldlarpix.smear_truth import gaus_smear_true
 # Load NPZ file produced by tred
 
 has_noises = True
-finstring = "data/pgun_muplus_3gev_tred_noises_truehits_interval_average.npz"
+finstring = sys.argv[1] if len(sys.argv) > 1 else "data/pgun_muplus_3gev_tred_noises_truehits_interval_average.npz"
+tag = Path(finstring).stem
 loader = DataLoader(finstring)
 readout_config = loader.get_readout_config()
 
@@ -333,7 +336,7 @@ avg_true  = {}
 
 # --- Figure 1: noisy_meas 2D histogram + mean ---
 fig1, axes1 = plt.subplots(1, 3, figsize=(18, 5))
-fig1.suptitle('Power spectra — noisy_meas')
+fig1.suptitle(f'Power spectra — noisy_meas  [{tag}]')
 
 for uax, (ax_plot, sr) in enumerate(zip(axes1, slice_ranges_per_axis)):
     freqs, avg, _ = power_spectrum_projection_hist(
@@ -354,12 +357,12 @@ for uax, (ax_plot, sr) in enumerate(zip(axes1, slice_ranges_per_axis)):
     )
 
 plt.tight_layout()
-plt.savefig('power_spectra_noisy.png', dpi=150)
+plt.savefig(f'power_spectra_noisy_{tag}.png', dpi=150)
 plt.show()
 
 # --- Figure 2: true_meas 2D histogram + mean ---
 fig2, axes2 = plt.subplots(1, 3, figsize=(18, 5))
-fig2.suptitle('Power spectra — true_meas')
+fig2.suptitle(f'Power spectra — true_meas  [{tag}]')
 
 for uax, (ax_plot, sr) in enumerate(zip(axes2, slice_ranges_per_axis)):
     freqs, avg, _ = power_spectrum_projection_hist(
@@ -380,12 +383,12 @@ for uax, (ax_plot, sr) in enumerate(zip(axes2, slice_ranges_per_axis)):
     )
 
 plt.tight_layout()
-plt.savefig('power_spectra_true.png', dpi=150)
+plt.savefig(f'power_spectra_true_{tag}.png', dpi=150)
 plt.show()
 
 # --- Figure 3: mean powers overlaid + ratio ---
 fig3, axes3 = plt.subplots(2, 3, figsize=(18, 10))
-fig3.suptitle('Mean power comparison and ratio (noisy / true)')
+fig3.suptitle(f'Mean power comparison and ratio (noisy / true)  [{tag}]')
 
 for uax in range(3):
     freqs_n, avg_n = avg_noisy[uax]
@@ -410,5 +413,5 @@ for uax in range(3):
     ax_bot.set_title(f'Ratio along {axis_labels[uax]}')
 
 plt.tight_layout()
-plt.savefig('power_spectra_ratio.png', dpi=150)
+plt.savefig(f'power_spectra_ratio_{tag}.png', dpi=150)
 plt.show()
