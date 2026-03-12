@@ -29,77 +29,84 @@ TIME_PER_TICK  = 0.05    # us / tick
 PIXEL_PITCH    = 0.4434  # cm
 
 
-def compute_xyz(npz_path: str) -> tuple[np.ndarray, np.ndarray]:
-    """Return (pos, charge) for all voxels in deconv_q.
+def _compute_xyz_from_array(data: dict, array_3d: np.ndarray, offset: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Shared coordinate computation given a 3D voxel array and its coarse-grid offset.
 
     Parameters
     ----------
-    npz_path : str
-        Path to a .npz file saved by deconv_example3.py.
+    data : dict-like (NpzFile)
+        Loaded npz containing geometry/readout metadata.
+    array_3d : np.ndarray, shape (n_px, n_py, n_t)
+        Voxel values on the coarse grid (time axis already in adc_hold_delay bins).
+    offset : array-like, shape (3,)
+        [pixel_x_min, pixel_y_min, t_min_tick] of array_3d.
 
     Returns
     -------
     pos : np.ndarray, shape (N, 3)
-        Physical coordinates [x, y, z] in cm for every voxel.
     charge : np.ndarray, shape (N,)
-        Deconvolved charge in ke- for every voxel.
     """
-    data = np.load(npz_path)
-
-    deconv_q        = data["deconv_q"]       # (n_px, n_py, n_t)
-    boffset         = data["boffset"]        # [pixel_x_min, pixel_y_min, t_min_tick]
-    global_tref     = data["global_tref"]    # array; [1] is the reference tick
+    global_tref     = data["global_tref"]
     anode_position  = float(data["anode_position"])
     drift_direction = int(data["drift_direction"])
-    tpc_lower       = data["tpc_lower"]      # 2-vector [y_lower, z_lower]
+    tpc_lower       = data["tpc_lower"]
     adc_hold_delay  = int(data["adc_hold_delay"])
     drtoa           = float(np.squeeze(data["drtoa"]))
 
     tref_tick = float(np.asarray(global_tref).flat[1])
 
-    n_px, n_py, n_t = deconv_q.shape
-
+    n_px, n_py, n_t = array_3d.shape
     i_idx, j_idx, k_idx = np.meshgrid(
-        np.arange(n_px),
-        np.arange(n_py),
-        np.arange(n_t),
-        indexing="ij",
+        np.arange(n_px), np.arange(n_py), np.arange(n_t), indexing="ij"
     )
 
-    tick             = boffset[2] + k_idx * adc_hold_delay
-    print(boffset[2], tref_tick, np.max(k_idx) * adc_hold_delay)
+    tick             = offset[2] + k_idx * adc_hold_delay
     drift_time_ticks = tick - tref_tick
-    print(drift_direction)
 
-    x = anode_position - drift_direction * drift_time_ticks * DRIFT_VELOCITY * TIME_PER_TICK
+    x  = anode_position - drift_direction * drift_time_ticks * DRIFT_VELOCITY * TIME_PER_TICK
     x += drtoa
-    print(tpc_lower, anode_position)
-    y = tpc_lower[0] + (boffset[0] + i_idx) * PIXEL_PITCH
-    z = tpc_lower[1] + (boffset[1] + j_idx) * PIXEL_PITCH
+    y  = tpc_lower[0] + (offset[0] + i_idx) * PIXEL_PITCH
+    z  = tpc_lower[1] + (offset[1] + j_idx) * PIXEL_PITCH
 
     pos    = np.stack([x, y, z], axis=-1).reshape(-1, 3)
-    charge = deconv_q.reshape(-1)
+    charge = array_3d.reshape(-1)
     return pos, charge
 
 
-def save_json(npz_path: str, output_dir: str, threshold: float, prefix: str, tpc_id: int = 0, event_id: int = None) -> None:
-    """Load a deconv npz, filter by threshold, and write a wire-cell JSON."""
-    # Try to parse tpc_id and event_id from filename if not provided
-    if event_id is None:
-        m = re.search(r"event_(\d+)_(\d+)", os.path.basename(npz_path))
-        if m is not None:
-            tpc_id = int(m.group(1))
-            event_id = int(m.group(2))
-        else:
-            # Use hash of filename for fallback event_id
-            event_id = hash(os.path.basename(npz_path)) % 100000
-    eid = event_id
+def compute_xyz(npz_path: str) -> tuple[np.ndarray, np.ndarray]:
+    """Return (pos, charge) for all voxels in deconv_q."""
+    data = np.load(npz_path)
+    print(data["boffset"][2], float(np.asarray(data["global_tref"]).flat[1]),
+          data["deconv_q"].shape[2] * int(data["adc_hold_delay"]))
+    print(int(data["drift_direction"]))
+    print(data["tpc_lower"], float(data["anode_position"]))
+    return _compute_xyz_from_array(data, data["deconv_q"], data["boffset"])
 
-    pos, charge = compute_xyz(npz_path)
-    print(pos[:,0].min())
-    print(pos[:,0].min())
 
-    # Filter below threshold (charge is in ke-)
+def compute_xyz_smeared(npz_path: str) -> tuple[np.ndarray, np.ndarray]:
+    """Return (pos, charge) for smeared_true rebinned into adc_hold_delay bins."""
+    data = np.load(npz_path)
+    smeared_true = data["smeared_true"]    # (n_px, n_py, n_t_fine)
+    smear_offset = data["smear_offset"]    # [px_min, py_min, t_min_tick]
+    adc_hold_delay = int(data["adc_hold_delay"])
+
+    # Rebin time axis: pad to adc_hold_delay boundary, sum groups of adc_hold_delay ticks
+    n_px, n_py, n_t_fine = smeared_true.shape
+    t_min = int(smear_offset[2])
+    t_bin_start = (t_min // adc_hold_delay) * adc_hold_delay
+    pad_start   = t_min - t_bin_start
+    pad_end     = (-(pad_start + n_t_fine)) % adc_hold_delay
+    padded      = np.pad(smeared_true, ((0, 0), (0, 0), (pad_start, pad_end)))
+    n_t_coarse  = padded.shape[2] // adc_hold_delay
+    rebinned    = padded.reshape(n_px, n_py, n_t_coarse, adc_hold_delay).sum(axis=-1)
+
+    coarse_offset = np.array([smear_offset[0], smear_offset[1], t_bin_start])
+    return _compute_xyz_from_array(data, rebinned, coarse_offset)
+
+
+def _write_json(pos: np.ndarray, charge: np.ndarray, tpc_id: int, eid: int,
+                output_dir: str, prefix: str, threshold: float, label: str) -> None:
+    """Filter voxels and write a single wire-cell JSON file."""
     mask   = charge >= threshold
     pos    = pos[mask]
     charge = charge[mask]
@@ -125,12 +132,35 @@ def save_json(npz_path: str, output_dir: str, threshold: float, prefix: str, tpc
 
     edir = os.path.join(output_dir, "data", str(eid))
     os.makedirs(edir, exist_ok=True)
-    filename = f"{eid}-{prefix}.json"
-    out_path = os.path.join(edir, filename)
+    out_path = os.path.join(edir, f"{eid}-{prefix}.json")
     with open(out_path, "w") as f:
         json.dump(evt, f, indent=2)
 
-    print(f"  [{tpc_id}/{eid}] kept {len(charge)} voxels (threshold={threshold} ke-)  -> {out_path}")
+    print(f"  [{tpc_id}/{eid}] {label}: kept {len(charge)} voxels (threshold={threshold} ke-)  -> {out_path}")
+
+
+def save_json(npz_path: str, output_dir: str, threshold: float, prefix: str,
+              tpc_id: int = 0, event_id: int = None,
+              smeared_prefix: str = None) -> None:
+    """Load a deconv npz, filter by threshold, and write wire-cell JSON(s)."""
+    # Try to parse tpc_id and event_id from filename if not provided
+    if event_id is None:
+        m = re.search(r"event_(\d+)_(\d+)", os.path.basename(npz_path))
+        if m is not None:
+            tpc_id = int(m.group(1))
+            event_id = int(m.group(2))
+        else:
+            # Use hash of filename for fallback event_id
+            event_id = hash(os.path.basename(npz_path)) % 100000
+    eid = event_id
+
+    pos, charge = compute_xyz(npz_path)
+    print(pos[:,0].min())
+    _write_json(pos, charge, tpc_id, eid, output_dir, prefix, threshold, "deconv")
+
+    if smeared_prefix is not None:
+        pos_s, charge_s = compute_xyz_smeared(npz_path)
+        _write_json(pos_s, charge_s, tpc_id, eid, output_dir, smeared_prefix, threshold, "smeared")
 
 
 def main():
@@ -146,10 +176,13 @@ def main():
                         help="TPC ID (default: 0, or extract from filename)")
     parser.add_argument("--event-id", type=int, default=None,
                         help="Event ID (default: None, or extract from filename/hash)")
+    parser.add_argument("--smeared-prefix", default=None,
+                        help="If set, also write smeared-true JSON with this prefix")
     args = parser.parse_args()
 
     for npz_path in args.npz_files:
-        save_json(npz_path, args.output_dir, args.threshold, args.prefix, args.tpc_id, args.event_id)
+        save_json(npz_path, args.output_dir, args.threshold, args.prefix,
+                  args.tpc_id, args.event_id, args.smeared_prefix)
 
 
 if __name__ == "__main__":
