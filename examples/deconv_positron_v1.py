@@ -22,15 +22,16 @@ parser.add_argument("--sigma", type=float, default=0.005,
                     help="Gaussian filter sigma in time (default: 0.005)")
 parser.add_argument("--sigma-pxl", type=float, default=0.2,
                     help="Gaussian filter sigma in pixel (default: 0.2)")
+parser.add_argument("--input-file", default="data/pgun_positron_3gev_tred_noises_effq_nt1.npz",
+                    help="Input NPZ file produced by tred")
+parser.add_argument("--field-response", default="/srv/storage1/yousen/tred_workspace/response_44_v2a_full_25x25pixel_tred.npz",
+                    help="Field response NPZ file")
 args = parser.parse_args()
 
-# Load NPZ file produced by tred
-# loader = DataLoader("data/pgun_muplus_3gev_tred_nburst4_noises.npz")
-# loader = DataLoader("data/pgun_muplus_3gev_tred_nburst4_nonoises_nd_readout.npz")
-loader = DataLoader("data/pgun_positron_3gev_tred_noises_effq_nt1.npz")
+loader = DataLoader(args.input_file)
 readout_config = loader.get_readout_config()
 
-fr_processor = FieldResponseProcessor("/srv/storage1/yousen/tred_workspace/response_44_v2a_full_25x25pixel_tred.npz", normalized=False)
+fr_processor = FieldResponseProcessor(args.field_response, normalized=False)
 fr_full = fr_processor.process_response()
 frcenter = fr_full[fr_full.shape[0]//2, fr_full.shape[1]//2, :]
 fr_temp = frcenter.copy()

@@ -74,7 +74,9 @@ def step1_deconv(cfg, cwd: Path, dry: bool) -> None:
             script = f"deconv_positron_{ver}.py"
             run([sys.executable, script,
                  "--sigma", str(sigma),
-                 "--sigma-pxl", str(sigma_pxl)],
+                 "--sigma-pxl", str(sigma_pxl),
+                 "--input-file", cfg.input_file,
+                 "--field-response", cfg.field_response],
                 dry, cwd)
 
 
@@ -168,6 +170,12 @@ def parse_args():
                    help="Output directory for histogram plots (step 4)")
     p.add_argument("--plot-threshold", type=float, default=0.5,
                    help="Threshold passed to plot_proj.py")
+    p.add_argument("--input-file",
+                   default="data/pgun_positron_3gev_tred_noises_effq_nt1.npz",
+                   help="Input NPZ file produced by tred (passed to deconv scripts)")
+    p.add_argument("--field-response",
+                   default="/srv/storage1/yousen/tred_workspace/response_44_v2a_full_25x25pixel_tred.npz",
+                   help="Field response NPZ file (passed to deconv scripts)")
     p.add_argument("--cwd", default=".",
                    help="Working directory (directory containing the scripts)")
     p.add_argument("--dry-run", action="store_true",
