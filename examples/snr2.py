@@ -404,9 +404,10 @@ for uax in range(3):
     ax_top.legend()
 
     ax_bot = axes3[1, uax]
-    log_ratio = avg_t - avg_n   # difference in log10 = log10(noisy/true)
+    n = min(len(avg_t), len(avg_n))
+    log_ratio = avg_t[:n] - avg_n[:n]   # difference in log10 = log10(noisy/true)
     ratio = 10 ** log_ratio          # convert back to linear ratio
-    ax_bot.plot(freqs_n, ratio, color='orange', linewidth=1.5)
+    ax_bot.plot(freqs_n[:n], ratio, color='orange', linewidth=1.5)
     ax_bot.axhline(0, color='grey', linewidth=0.8, linestyle='--')
     ax_bot.set_xlabel(xlabel)
     ax_bot.set_ylabel('log\u2081\u2080(noisy / true)')
