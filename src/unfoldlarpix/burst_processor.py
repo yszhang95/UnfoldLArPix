@@ -261,9 +261,12 @@ class BurstSequenceProcessor:
             raise ValueError(f"Not enough time for template compensation, available time {tlength} is too short.")
         tlength = int(np.round(tlength))
         threshold_idx = None
+        print(tlength)
         for jidx in range(tlength, len(template_cumulative)):
-            if template_cumulative[jidx+tlength] - template_cumulative[jidx] >= transit:
-                threshold_idx = jidx + tlength
+            # if template_cumulative[jidx+tlength] - template_cumulative[jidx] >= transit:
+                # threshold_idx = jidx + tlength
+            if template_cumulative[jidx] - template_cumulative[jidx-tlength] >= transit:
+                threshold_idx = jidx
                 break
 
         if first_seq:
@@ -303,8 +306,17 @@ class BurstSequenceProcessor:
         chgs = template_section[1:].tolist() + [next_seq.charges[0] - threshold] + next_seq.charges[1:].tolist()
 
         trigger_time_idx = template_times[0] - self.adc_hold_delay
-        if not first_seq and trigger_time_idx >= last_time:
+        # if not first_seq and trigger_time_idx >= last_time:
+        #     print(trigger_time_idx, last_time)
+        #     raise ValueError("TBD")
+        # FIXME: this is wrong
+        if not first_seq and trigger_time_idx > last_time:
+            print(trigger_time_idx, last_time)
             raise ValueError("TBD")
+        # FIXME: this is wrong
+        elif not first_seq and trigger_time_idx == last_time:
+            delta_t = last_time - trigger_time_idx
+            chgs[0] = template_section[0] * delta_t / self.adc_hold_delay + chgs[0]
         elif not first_seq and trigger_time_idx < last_time:
             delta_t = last_time - trigger_time_idx
             chgs[0] = template_section[0] * delta_t / self.adc_hold_delay + chgs[0]

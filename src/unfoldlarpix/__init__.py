@@ -18,6 +18,7 @@ from .burst_processor import (
     BurstSequenceProcessor,
     MergedSequence,
 )
+from .burst_processor_v2 import BurstSequenceProcessorV2
 
 __all__ = [
     "DataLoader",
@@ -30,5 +31,6 @@ __all__ = [
     "FieldResponseProcessor",
     "BurstSequence",
     "BurstSequenceProcessor",
+    "BurstSequenceProcessorV2",
     "MergedSequence",
 ]
