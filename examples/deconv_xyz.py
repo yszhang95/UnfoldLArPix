@@ -53,6 +53,7 @@ def compute_xyz(npz_path: str) -> tuple[np.ndarray, np.ndarray]:
     drift_direction = int(data["drift_direction"])
     tpc_lower       = data["tpc_lower"]      # 2-vector [y_lower, z_lower]
     adc_hold_delay  = int(data["adc_hold_delay"])
+    drtoa           = float(np.squeeze(data["drtoa"]))
 
     tref_tick = float(np.asarray(global_tref).flat[1])
 
@@ -71,6 +72,7 @@ def compute_xyz(npz_path: str) -> tuple[np.ndarray, np.ndarray]:
     print(drift_direction)
 
     x = anode_position - drift_direction * drift_time_ticks * DRIFT_VELOCITY * TIME_PER_TICK
+    x += drtoa
     print(tpc_lower, anode_position)
     y = tpc_lower[0] + (boffset[0] + i_idx) * PIXEL_PITCH
     z = tpc_lower[1] + (boffset[1] + j_idx) * PIXEL_PITCH

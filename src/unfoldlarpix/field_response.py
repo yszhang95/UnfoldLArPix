@@ -176,6 +176,8 @@ class FieldResponseProcessor:
         raw_response = data["response"]
         npath = int(data["npath"])
         time_tick = data["time_tick"]
+        if time_tick.ndim == 1:
+            time_tick = time_tick[0]
 
         # Apply normalization if needed
         if not self.normalized:

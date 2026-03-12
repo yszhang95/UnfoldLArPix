@@ -95,10 +95,10 @@ for event in loader.iter_events():
     # curr_mask = np.all(event.current.location[:,:2]==cloc[None, :], axis=1)
     # curr = np.squeeze(event.current.data[curr_mask])
 
-    # sigma = 0.005
-    # sigma_pxl = 0.2
-    sigma = 50
-    sigma_pxl = 50
+    sigma = 0.005
+    sigma_pxl = 0.1
+    # sigma = 50
+    # sigma_pxl = 50
     hwf_block_data = blocks
     gaussian_kernel = gaussian_filter(n=hwf_block_data.shape[-1], dt=readout_config.adc_hold_delay,
                                       sigma=sigma)
@@ -135,7 +135,8 @@ for event in loader.iter_events():
              anode_position=geometry.anode_position,
              drift_direction=geometry.drift_direction,
              global_tref=event.global_tref,
-             tpc_lower=geometry.lower)
+             tpc_lower=geometry.lower,
+             drtoa=float(np.squeeze(fr_processor.get_metadata()['drift_length'])))
 
 # Get geometry information
 geometry = loader.get_geometry(0)

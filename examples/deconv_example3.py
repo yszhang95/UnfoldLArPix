@@ -121,6 +121,7 @@ for event in loader.iter_events():
           f'sum_hits_last: {np.sum(event.hits.data[:, -1])}')
 
 
+    geometry = loader.get_geometry(event.tpc_id)
     np.savez(f"deconv_event_{event.tpc_id}_{event.event_id}.npz",
              deconv_q=deconv_q, boffset=boffset,
              smeared_true=smeared_true, smear_offset=smear_offset,
@@ -128,7 +129,12 @@ for event in loader.iter_events():
              hits_location=event.hits.location, hits_data=event.hits.data,
              adc_hold_delay=readout_config.adc_hold_delay,
              csa_reset_time=readout_config.csa_reset_time,
-             adc_downsample_factor=readout_config.adc_hold_delay)
+             adc_downsample_factor=readout_config.adc_hold_delay,
+             anode_position=geometry.anode_position,
+             drift_direction=geometry.drift_direction,
+             global_tref=event.global_tref,
+             tpc_lower=geometry.lower,
+             drtoa=float(np.squeeze(fr_processor.get_metadata()['drift_length'])))
 
 # Get geometry information
 geometry = loader.get_geometry(0)
