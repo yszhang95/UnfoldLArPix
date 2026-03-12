@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -12,6 +13,14 @@ from unfoldlarpix import BurstSequenceProcessorV2, MergedSequence
 from unfoldlarpix.burst_processor import merged_sequences_to_block
 
 from unfoldlarpix.smear_truth import gaus_smear_true, gaus_smear_true_3d
+
+# Parse command-line arguments
+parser = argparse.ArgumentParser(description="Deconvolve positron event data (V2)")
+parser.add_argument("--sigma", type=float, default=0.005,
+                    help="Gaussian filter sigma in time (default: 0.005)")
+parser.add_argument("--sigma-pxl", type=float, default=0.2,
+                    help="Gaussian filter sigma in pixel (default: 0.2)")
+args = parser.parse_args()
 
 # Load NPZ file produced by tred
 # loader = DataLoader("data/pgun_muplus_3gev_tred_nburst4_noises.npz")
@@ -80,11 +89,8 @@ for event in loader.iter_events():
     boffset, bdata = merged_sequences_to_block(merged_seqs, readout_config.adc_hold_delay, npadbin=50)
     blocks = bdata
 
-    sigma = 0.005
-    sigma_pxl = 0.1
-
-    # sigma = 50
-    # sigma_pxl = 50
+    sigma = args.sigma
+    sigma_pxl = args.sigma_pxl
     hwf_block_data = blocks
     gaussian_kernel = gaussian_filter(n=hwf_block_data.shape[-1], dt=readout_config.adc_hold_delay,
                                       sigma=sigma)
