@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
+import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+
+parser = argparse.ArgumentParser()
+parser.add_argument('input', help='Input NPZ file')
+parser.add_argument('--threshold', type=float, default=0.5)
+parser.add_argument('--prefix', type=str, default=None,
+                    help='Output filename prefix (default: input stem)')
+args = parser.parse_args()
+threshold = args.threshold
+prefix = args.prefix if args.prefix is not None else args.input.removesuffix('.npz')
 
 filtered_deconv_q = []
 filtered_smeared_true = []
@@ -76,7 +86,7 @@ def align_voxel_blocks(
 
 for ievent in range(1):
   # f = np.load('deconv_event_0_0.npz')
-  f = np.load('deconv_positron_v2_event_0_0.npz')
+  f = np.load(args.input)
   # f = np.load('deconv_positron_v2_event_0_0.npz')
   smeared_true = f['smeared_true']
   deconv_q = f['deconv_q'] * (f['deconv_q'] > threshold)
@@ -120,7 +130,7 @@ for ievent in range(1):
   axs[2].legend()
   axs[2].set_xlabel('Smeared - Deconvolved')
   plt.tight_layout()
-  fig.savefig('hist_diff.png')
+  fig.savefig(f'{prefix}_hist_diff.png')
 
   from matplotlib.colors import LogNorm
   fig2d, ax2d = plt.subplots(figsize=(8, 6))
@@ -130,7 +140,7 @@ for ievent in range(1):
   ax2d.set_xlabel('Smeared True (summed)')
   ax2d.set_ylabel('Deconvolved')
   ax2d.set_title('2D Histogram: Smeared True vs Deconvolved (aligned)')
-  fig2d.savefig('hist_2d.png')
+  fig2d.savefig(f'{prefix}_hist_2d.png')
 
   # Build hits grid on same coarse grid as aligned_deconv_q
   adc_hold_delay = int(f['adc_hold_delay'])
@@ -144,7 +154,7 @@ for ievent in range(1):
   ax2dh.set_xlabel('True Charge (smeared)')
   ax2dh.set_ylabel('Hits Charge')
   ax2dh.set_title('True Charge vs Hits (voxels with hits > f{threshold})')
-  fig2dh.savefig('hist_2d_hits.png')
+  fig2dh.savefig(f'{prefix}_hist_2d_hits.png')
 
 
 plt.figure(figsize=(10, 6))
@@ -156,4 +166,4 @@ plt.ylabel('Count')
 plt.title('Comparison of Smeared True Projection and Deconvolved Projection')
 plt.legend()
 plt.grid()
-plt.savefig('hist_deconv_q.png')
+plt.savefig(f'{prefix}_hist_deconv_q.png')
