@@ -15,9 +15,9 @@ from unfoldlarpix.smear_truth import gaus_smear_true, gaus_smear_true_3d
 parser = argparse.ArgumentParser(description="Deconvolve positron event data (V3)")
 parser.add_argument("--sigma", type=float, default=0.005,
                     help="Gaussian filter sigma in time (default: 0.005)")
-parser.add_argument("--sigma-pxl", type=float, default=0.2,
-                    help="Gaussian filter sigma in pixel (default: 0.2)")
-parser.add_argument("--input-file", default="data/pgun_positron_3gev_tred_noises_effq_nt1.npz",
+parser.add_argument("--sigma-pxl", type=float, default=0.1,
+                    help="Gaussian filter sigma in pixel (default: 0.1)")
+parser.add_argument("--input-file", default="data/pgun_positron_3gev_tred_noises_effq_nt1_wf.npz",
                     help="Input NPZ file produced by tred")
 parser.add_argument("--field-response", default="/srv/storage1/yousen/tred_workspace/response_44_v2a_full_25x25pixel_tred.npz",
                     help="Field response NPZ file")
