@@ -62,6 +62,8 @@ fr_full_k = integrate_k(fr_full, readout_config.adc_hold_delay)
 # Iterate over events grouped by (event_id, tpc_id)
 for event in loader.iter_events():
     print(f"TPC {event.tpc_id}, Event {event.event_id}")
+    if event.tpc_id != 0:
+        continue
 
     # Access effective charge data
     if event.effq:

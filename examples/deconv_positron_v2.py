@@ -24,7 +24,26 @@ parser.add_argument("--input-file", default="data/pgun_positron_3gev_tred_noises
                     help="Input NPZ file produced by tred")
 parser.add_argument("--field-response", default="/srv/storage1/yousen/tred_workspace/response_44_v2a_full_25x25pixel_tred.npz",
                     help="Field response NPZ file")
+parser.add_argument("--tpc-id", type=int, default=None,
+                    help="Process only this TPC ID (default: process all)")
+parser.add_argument("--output-suffix", default="",
+                    help="Suffix to append to output filename (e.g., 's0p0005_sp10')")
 args = parser.parse_args()
+
+# Helper to format sigma values for filenames
+def fmt_sigma_detailed(v: float) -> str:
+    """0.0005 -> 's0p0005', 0.005 -> 's005', 0.01 -> 's010'"""
+    s = f"{v:.4f}".rstrip('0').rstrip('.')
+    return 's' + s.replace('.', 'p')
+
+def fmt_sigma_pxl_detailed(v: float) -> str:
+    """0.1 -> 'sp10', 0.15 -> 'sp15', 0.2 -> 'sp20'"""
+    s = f"{v:.2f}".rstrip('0').rstrip('.')
+    return 'sp' + s.replace('.', 'p')
+
+# Generate output suffix if not provided
+if not args.output_suffix:
+    args.output_suffix = fmt_sigma_detailed(args.sigma) + '_' + fmt_sigma_pxl_detailed(args.sigma_pxl)
 
 loader = DataLoader(args.input_file)
 readout_config = loader.get_readout_config()
@@ -59,6 +78,10 @@ fr_full_k = integrate_k(fr_full, readout_config.adc_hold_delay)
 
 # Iterate over events grouped by (event_id, tpc_id)
 for event in loader.iter_events():
+    # Filter by TPC ID if specified
+    if args.tpc_id is not None and event.tpc_id != args.tpc_id:
+        continue
+
     print(f"TPC {event.tpc_id}, Event {event.event_id}")
 
     # Access effective charge data
@@ -116,7 +139,9 @@ for event in loader.iter_events():
 
 
     geometry = loader.get_geometry(event.tpc_id)
-    np.savez(f"deconv_positron_v2_event_{event.tpc_id}_{event.event_id}.npz",
+    output_filename = f"deconv_positron_v2_{args.output_suffix}_event_{event.tpc_id}_{event.event_id}.npz"
+    print(f"Saving to: {output_filename}")
+    np.savez(output_filename,
              deconv_q=deconv_q, boffset=boffset,
              smeared_true=smeared_true, smear_offset=smear_offset,
              effq_location=event.effq.location, effq_data=event.effq.data,
