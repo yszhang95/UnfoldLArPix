@@ -6,7 +6,7 @@ Filters and displays voxels with charge > threshold from deconv_q array.
 
 import numpy as np
 import plotly.graph_objects as go
-from dash import Dash, dcc, html, Input, Output, State
+from dash import Dash, dcc, html, Input, Output, State, callback_context
 import dash_bootstrap_components as dbc
 from pathlib import Path
 import os
@@ -15,7 +15,12 @@ app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 
 # Get available npz files from examples directory (including subdirectories)
 EXAMPLES_DIR = Path(__file__).parent
-NPZ_FILES = sorted([str(f.relative_to(EXAMPLES_DIR)) for f in EXAMPLES_DIR.rglob("*.npz")])
+
+def get_npz_files():
+    """Scan for available NPZ files."""
+    return sorted([str(f.relative_to(EXAMPLES_DIR)) for f in EXAMPLES_DIR.rglob("*.npz")])
+
+NPZ_FILES = get_npz_files()
 
 app.layout = dbc.Container([
     dbc.Row([
@@ -33,7 +38,17 @@ app.layout = dbc.Container([
                 value=NPZ_FILES[0] if NPZ_FILES else None,
                 clearable=False
             ),
-        ], width=6),
+        ], width=10),
+        dbc.Col([
+            html.Label(""),
+            dbc.Button(
+                "🔄 Refresh Files",
+                id='refresh-files-btn',
+                color="info",
+                className="w-100 mt-2",
+                size="sm"
+            ),
+        ], width=2),
     ]),
 
     dbc.Row([
@@ -81,12 +96,37 @@ app.layout = dbc.Container([
         ], width=12)
     ]),
 
+    dbc.Row([
+        dbc.Col([
+            html.H3("Waveform View (Click a voxel in 3D plot)", className="mt-4"),
+            dcc.Loading(
+                id="waveform-loading",
+                type="default",
+                children=[
+                    dcc.Graph(id='waveform-display', style={'height': '600px'})
+                ]
+            )
+        ], width=12)
+    ], className="mt-4"),
+
     dcc.Store(id='loaded-data-store'),
 ], fluid=True, className="p-4")
 
 
 # Global cache for loaded npz data (to avoid JSON serialization of large arrays)
 _loaded_npz_cache = {}
+
+
+@app.callback(
+    Output('file-selector', 'options'),
+    Input('refresh-files-btn', 'n_clicks'),
+    prevent_initial_call=True
+)
+def refresh_file_list(n_clicks):
+    """Refresh the list of available NPZ files."""
+    npz_files = get_npz_files()
+    print(f"Refreshed file list: found {len(npz_files)} NPZ files")
+    return [{'label': f, 'value': f} for f in npz_files]
 
 
 @app.callback(
@@ -227,6 +267,110 @@ def update_display(loaded_data, threshold, color_scale):
     ])
 
     return fig, stats
+
+
+@app.callback(
+    Output('waveform-display', 'figure'),
+    Input('event-display', 'clickData'),
+    State('loaded-data-store', 'data'),
+)
+def display_waveform(clickData, loaded_data):
+    """Display waveform for clicked voxel with aligned smeared_true data."""
+
+    if not clickData:
+        return go.Figure().add_annotation(text="Click a voxel to view its waveform")
+
+    if not loaded_data or not loaded_data.get('loaded'):
+        return go.Figure().add_annotation(text="No data loaded")
+
+    filename = loaded_data.get('filename')
+    if filename not in _loaded_npz_cache:
+        return go.Figure().add_annotation(text="Data not in cache")
+
+    npz_data = _loaded_npz_cache[filename]
+    required_keys = ['deconv_q', 'boffset', 'adc_downsample_factor', 'smeared_true', 'smear_offset']
+    if not all(k in npz_data for k in required_keys):
+        return go.Figure().add_annotation(text=f"Missing required data: {required_keys}")
+
+    try:
+        # Extract clicked point coordinates (local to deconv_q)
+        point = clickData['points'][0]
+        x_local = int(point['x'])
+        y_local = int(point['y'])
+
+        deconv_q = np.array(npz_data['deconv_q'])
+        smeared_true = np.array(npz_data['smeared_true'])
+        boffset = np.array(npz_data['boffset'])
+        smear_offset = np.array(npz_data['smear_offset'])
+        dt_deconv = float(npz_data['adc_downsample_factor'])
+
+        # Convert local coordinates to global pixel coordinates
+        pxl_x = int(boffset[0]) + x_local
+        pxl_y = int(boffset[1]) + y_local
+
+        # Extract deconv_q waveform
+        deconv_waveform = deconv_q[x_local, y_local, :]
+        t0_deconv = float(boffset[2])
+        times_deconv = t0_deconv + np.arange(len(deconv_waveform)) * dt_deconv
+
+        # Try to get aligned smeared_true waveform
+        fig = go.Figure()
+
+        # Add deconv_q trace
+        fig.add_trace(go.Scatter(
+            x=times_deconv,
+            y=deconv_waveform / dt_deconv,  # Normalize by downsample factor
+            mode='lines+markers',
+            name=f'deconv_q (local: {x_local}, {y_local})',
+            line=dict(color='blue', width=2),
+            marker=dict(size=4),
+        ))
+
+        # Try to add smeared_true at aligned global position
+        try:
+            x_smear = pxl_x - int(smear_offset[0])
+            y_smear = pxl_y - int(smear_offset[1])
+
+            # Check bounds
+            if 0 <= x_smear < smeared_true.shape[0] and 0 <= y_smear < smeared_true.shape[1]:
+                smear_waveform = smeared_true[x_smear, y_smear, :]
+                t0_smear = float(smear_offset[2])
+                times_smear = t0_smear + np.arange(len(smear_waveform)) * 1  # dt=1 for smeared_true
+
+                fig.add_trace(go.Scatter(
+                    x=times_smear,
+                    y=smear_waveform,
+                    mode='lines+markers',
+                    name=f'smeared_true (global: {pxl_x}, {pxl_y})',
+                    line=dict(color='red', width=2),
+                    marker=dict(size=4),
+                ))
+            else:
+                # Smeared position out of bounds
+                fig.add_annotation(
+                    text=f"smeared_true out of bounds: local ({x_smear}, {y_smear})",
+                    showarrow=False,
+                    y=0.95,
+                )
+        except Exception as e:
+            print(f"Could not plot smeared_true: {e}")
+
+        fig.update_layout(
+            title=f"Waveforms: deconv_q[{x_local}, {y_local}] @ global pixel ({pxl_x}, {pxl_y})",
+            xaxis_title="Time (ticks, 50ns)",
+            yaxis_title="Charge",
+            height=600,
+            hovermode='x unified',
+            legend=dict(x=0.01, y=0.99),
+        )
+
+        return fig
+
+    except Exception as e:
+        print(f"Error displaying waveform: {e}")
+        import traceback
+        traceback.print_exc()
+        return go.Figure().add_annotation(text=f"Error: {str(e)}")
 
 
 if __name__ == '__main__':

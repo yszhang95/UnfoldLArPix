@@ -23,7 +23,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
+    "dash>=4.0.0",
+    "dash-bootstrap-components>=2.0.4",
     "numpy>=1.24.2",
+    "plotly>=6.6.0",
 ]
 
 [project.scripts]
