@@ -193,14 +193,29 @@ def load_npz_file(filename):
     try:
         data = np.load(filepath, allow_pickle=True)
 
-        # Cache the full data in memory
-        _loaded_npz_cache[filename] = data
+        # Convert NPZ contents into a plain dict of numpy arrays and store in cache.
+        # Storing a plain dict ensures we are not holding onto a file handle or a lazily-loaded object.
+        cache_entry = {}
+        for key in data.files:
+            try:
+                cache_entry[key] = np.array(data[key])
+            except Exception:
+                # As a fallback, store the raw object
+                cache_entry[key] = data[key]
+
+        # Close the NpzFile explicitly (safe even if it's already closed)
+        try:
+            data.close()
+        except Exception:
+            pass
+
+        _loaded_npz_cache[filename] = cache_entry
 
         # Extract metadata only for the store
         result = {
             'filename': filename,
-            'has_deconv_q': 'deconv_q' in data,
-            'deconv_q_shape': list(data['deconv_q'].shape) if 'deconv_q' in data else None,
+            'has_deconv_q': 'deconv_q' in cache_entry,
+            'deconv_q_shape': list(cache_entry['deconv_q'].shape) if 'deconv_q' in cache_entry else None,
             'loaded': True,
         }
 
