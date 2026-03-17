@@ -98,7 +98,54 @@ app.layout = dbc.Container([
 
     dbc.Row([
         dbc.Col([
-            html.H3("Waveform View (Click a voxel in 3D plot)", className="mt-4"),
+            html.H3("Waveform View", className="mt-4"),
+            html.P("Click a voxel in the 3D plot above, or enter global pixel coordinates below:"),
+        ], width=12)
+    ], className="mt-4"),
+
+    dbc.Row([
+        dbc.Col([
+            html.Label("Global Pixel X:"),
+            dcc.Input(
+                id='input-pxl-x',
+                type='number',
+                placeholder='Enter pxl_x',
+                className="form-control",
+            ),
+        ], width=12, md=3),
+        dbc.Col([
+            html.Label("Global Pixel Y:"),
+            dcc.Input(
+                id='input-pxl-y',
+                type='number',
+                placeholder='Enter pxl_y',
+                className="form-control",
+            ),
+        ], width=12, md=3),
+        dbc.Col([
+            html.Label(""),
+            dbc.Button(
+                "Plot Waveform",
+                id='plot-waveform-btn',
+                color="primary",
+                className="w-100 mt-2",
+                size="sm"
+            ),
+        ], width=12, md=2),
+        dbc.Col([
+            html.Label(""),
+            dbc.Button(
+                "Clear",
+                id='clear-coords-btn',
+                color="secondary",
+                className="w-100 mt-2",
+                size="sm"
+            ),
+        ], width=12, md=2),
+    ], className="mb-3"),
+
+    dbc.Row([
+        dbc.Col([
             dcc.Loading(
                 id="waveform-loading",
                 type="default",
@@ -107,9 +154,10 @@ app.layout = dbc.Container([
                 ]
             )
         ], width=12)
-    ], className="mt-4"),
+    ], className="mt-3"),
 
     dcc.Store(id='loaded-data-store'),
+    dcc.Store(id='selected-coords-store', data={}),
 ], fluid=True, className="p-4")
 
 
@@ -270,18 +318,80 @@ def update_display(loaded_data, threshold, color_scale):
 
 
 @app.callback(
-    Output('waveform-display', 'figure'),
+    Output('selected-coords-store', 'data'),
     Input('event-display', 'clickData'),
     State('loaded-data-store', 'data'),
 )
-def display_waveform(clickData, loaded_data):
-    """Display waveform for clicked voxel with aligned smeared_true data."""
+def update_coords_from_click(clickData, loaded_data):
+    """Update selected coordinates from click on 3D plot."""
+    if not clickData or not loaded_data or not loaded_data.get('loaded'):
+        return {}
 
-    if not clickData:
-        return go.Figure().add_annotation(text="Click a voxel to view its waveform")
+    filename = loaded_data.get('filename')
+    if filename not in _loaded_npz_cache:
+        return {}
 
-    if not loaded_data or not loaded_data.get('loaded'):
-        return go.Figure().add_annotation(text="No data loaded")
+    npz_data = _loaded_npz_cache[filename]
+    if 'boffset' not in npz_data:
+        return {}
+
+    try:
+        # Extract clicked point coordinates (local to deconv_q)
+        point = clickData['points'][0]
+        x_local = int(point['x'])
+        y_local = int(point['y'])
+
+        boffset = np.array(npz_data['boffset'])
+        # Convert local coordinates to global pixel coordinates
+        pxl_x = int(boffset[0]) + x_local
+        pxl_y = int(boffset[1]) + y_local
+
+        return {'pxl_x': pxl_x, 'pxl_y': pxl_y, 'source': 'click'}
+    except Exception as e:
+        print(f"Error extracting coordinates from click: {e}")
+        return {}
+
+
+@app.callback(
+    Output('selected-coords-store', 'data'),
+    Input('plot-waveform-btn', 'n_clicks'),
+    State('input-pxl-x', 'value'),
+    State('input-pxl-y', 'value'),
+    prevent_initial_call=True
+)
+def update_coords_from_input(n_clicks, pxl_x, pxl_y):
+    """Update selected coordinates from manual input."""
+    if pxl_x is None or pxl_y is None:
+        return {}
+
+    try:
+        return {'pxl_x': int(pxl_x), 'pxl_y': int(pxl_y), 'source': 'input'}
+    except Exception as e:
+        print(f"Error parsing input coordinates: {e}")
+        return {}
+
+
+@app.callback(
+    Output('input-pxl-x', 'value'),
+    Output('input-pxl-y', 'value'),
+    Input('clear-coords-btn', 'n_clicks'),
+    prevent_initial_call=True
+)
+def clear_coordinates(n_clicks):
+    """Clear coordinate inputs."""
+    return None, None
+
+
+@app.callback(
+    Output('waveform-display', 'figure'),
+    Input('selected-coords-store', 'data'),
+    State('loaded-data-store', 'data'),
+)
+def display_waveform(selected_coords, loaded_data):
+    """Display waveform for selected voxel with aligned smeared_true data."""
+
+    if not selected_coords or not loaded_data or not loaded_data.get('loaded'):
+        return go.Figure().add_annotation(text="Click a voxel or enter coordinates to view its waveform")
 
     filename = loaded_data.get('filename')
     if filename not in _loaded_npz_cache:
@@ -293,10 +403,12 @@ def display_waveform(clickData, loaded_data):
         return go.Figure().add_annotation(text=f"Missing required data: {required_keys}")
 
     try:
-        # Extract clicked point coordinates (local to deconv_q)
-        point = clickData['points'][0]
-        x_local = int(point['x'])
-        y_local = int(point['y'])
+        # Extract global coordinates
+        pxl_x = selected_coords.get('pxl_x')
+        pxl_y = selected_coords.get('pxl_y')
+
+        if pxl_x is None or pxl_y is None:
+            return go.Figure().add_annotation(text="Invalid coordinates")
 
         deconv_q = np.array(npz_data['deconv_q'])
         smeared_true = np.array(npz_data['smeared_true'])
@@ -304,9 +416,15 @@ def display_waveform(clickData, loaded_data):
         smear_offset = np.array(npz_data['smear_offset'])
         dt_deconv = float(npz_data['adc_downsample_factor'])
 
-        # Convert local coordinates to global pixel coordinates
-        pxl_x = int(boffset[0]) + x_local
-        pxl_y = int(boffset[1]) + y_local
+        # Convert global coordinates to local coordinates
+        x_local = pxl_x - int(boffset[0])
+        y_local = pxl_y - int(boffset[1])
+
+        # Check bounds
+        if not (0 <= x_local < deconv_q.shape[0] and 0 <= y_local < deconv_q.shape[1]):
+            return go.Figure().add_annotation(
+                text=f"Global coordinates ({pxl_x}, {pxl_y}) out of bounds for deconv_q"
+            )
 
         # Extract deconv_q waveform
         deconv_waveform = deconv_q[x_local, y_local, :]
@@ -321,7 +439,7 @@ def display_waveform(clickData, loaded_data):
             x=times_deconv,
             y=deconv_waveform / dt_deconv,  # Normalize by downsample factor
             mode='lines+markers',
-            name=f'deconv_q (local: {x_local}, {y_local})',
+            name=f'deconv_q (global: {pxl_x}, {pxl_y}, local: {x_local}, {y_local})',
             line=dict(color='blue', width=2),
             marker=dict(size=4),
         ))
@@ -356,7 +474,7 @@ def display_waveform(clickData, loaded_data):
             print(f"Could not plot smeared_true: {e}")
 
         fig.update_layout(
-            title=f"Waveforms: deconv_q[{x_local}, {y_local}] @ global pixel ({pxl_x}, {pxl_y})",
+            title=f"Waveforms: Global pixel ({pxl_x}, {pxl_y})",
             xaxis_title="Time (ticks, 50ns)",
             yaxis_title="Charge",
             height=600,
