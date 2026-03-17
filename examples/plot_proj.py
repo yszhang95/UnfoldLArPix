@@ -120,13 +120,13 @@ for ievent in range(1):
   )
   print(new_offset, f['boffset'], f['smear_offset'], aligned_smear.shape, aligned_deconv_q.shape, smear_summed.shape)
   fig, axs = plt.subplots(1, 3, figsize=(18, 6))
-  axs[0].hist(smear_summed.flatten() - aligned_deconv_q.flatten(), bins=40, range=(-40, 40), alpha=0.5)
+  axs[0].hist(smear_summed.flatten() - aligned_deconv_q.flatten(), bins=40, range=(-5, 5), alpha=0.5)
   axs[0].set_xlabel('Smeared - Deconvolved')
   axs[0].set_title('All padded hits')
-  axs[1].hist((smear_summed - aligned_deconv_q)[smear_summed > threshold].flatten(), bins=40, range=(-40, 40), alpha=0.5, label='Smear sum > {}'.format(threshold))
+  axs[1].hist((smear_summed - aligned_deconv_q)[smear_summed > threshold].flatten(), bins=40, range=(-5, 5), alpha=0.5, label='Smear sum > {}'.format(threshold))
   axs[1].legend()
   axs[1].set_xlabel('Smeared - Deconvolved')
-  axs[2].hist((smear_summed - aligned_deconv_q)[(smear_summed < threshold) & (smear_summed > 0.1)].flatten(), bins=40, range=(-40, 40), alpha=0.5, label='Smear sum > 0.1 & < {}'.format(threshold))
+  axs[2].hist((smear_summed - aligned_deconv_q)[(smear_summed < threshold) & (smear_summed > 0.1)].flatten(), bins=40, range=(-5, 5), alpha=0.5, label='Smear sum > 0.1 & < {}'.format(threshold))
   axs[2].legend()
   axs[2].set_xlabel('Smeared - Deconvolved')
   plt.tight_layout()
@@ -135,7 +135,7 @@ for ievent in range(1):
   from matplotlib.colors import LogNorm
   fig2d, ax2d = plt.subplots(figsize=(8, 6))
   h, xedges, yedges, img = ax2d.hist2d(smear_summed.flatten(), aligned_deconv_q.flatten(),
-                                        bins=40, range=[[0, 40], [0, 40]], norm=LogNorm())
+                                        bins=40, range=[[0, 10], [0, 10]], norm=LogNorm())
   fig2d.colorbar(img, ax=ax2d)
   ax2d.set_xlabel('Smeared True (summed)')
   ax2d.set_ylabel('Deconvolved')
@@ -149,7 +149,7 @@ for ievent in range(1):
   fig2dh, ax2dh = plt.subplots(figsize=(8, 6))
   h, xedges, yedges, img = ax2dh.hist2d(
       smear_summed[mask], aligned_deconv_q[mask],
-      bins=40, range=[[0, 40], [0, 40]], norm=LogNorm())
+      bins=40, range=[[0, 10], [0, 10]], norm=LogNorm())
   fig2dh.colorbar(img, ax=ax2dh)
   ax2dh.set_xlabel('True Charge (smeared)')
   ax2dh.set_ylabel('Hits Charge')

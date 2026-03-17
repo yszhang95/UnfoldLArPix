@@ -18,7 +18,7 @@ from unfoldlarpix.smear_truth import gaus_smear_true, gaus_smear_true_3d
 # Load NPZ file produced by tred
 # loader = DataLoader("data/pgun_muplus_3gev_tred_nburst4_noises.npz")
 # loader = DataLoader("data/pgun_muplus_3gev_tred_nburst4_nonoises_nd_readout.npz")
-loader = DataLoader("data/pgun_muplus_3gev_tred_nburst4_noises_nd_readout.npz")
+loader = DataLoader("data/pgun_positron_3gev_tred_noises_effq_nt1_thres1k_nburst256.npz")
 readout_config = loader.get_readout_config()
 
 fr_processor = FieldResponseProcessor("data/fr_4p4pitch_3.8pix_nogrid_10pathsperpixel.npz", normalized=False)
@@ -95,8 +95,8 @@ for event in loader.iter_events():
 
     # sigma = 0.005
     # sigma_pxl = 0.2
-    sigma = 50
-    sigma_pxl = 50
+    sigma = 0.002
+    sigma_pxl = 0.8
     hwf_block_data = blocks
     gaussian_kernel = gaussian_filter(n=hwf_block_data.shape[-1], dt=readout_config.adc_hold_delay,
                                       sigma=sigma)

@@ -39,13 +39,15 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 def fmt_sigma(v: float) -> str:
-    """0.005 -> '005', 0.01 -> '010', 0.2 -> '200'"""
-    return f"{v:.3f}".lstrip("0").replace(".", "")
+    """0.002 -> '0p002', 0.005 -> '0p005', 0.01 -> '0p01'"""
+    s = f"{v:.4f}".rstrip("0").rstrip(".")
+    return s.replace(".", "p")
 
 
 def fmt_sigma_pxl(v: float) -> str:
-    """0.1 -> '10', 0.15 -> '15', 0.2 -> '20'"""
-    return f"{v:.2f}".lstrip("0").replace(".", "")
+    """0.08 -> '0p08', 0.1 -> '0p1', 0.8 -> '0p8'"""
+    s = f"{v:.2f}".rstrip("0").rstrip(".")
+    return s.replace(".", "p")
 
 
 def fmt_threshold(v: float) -> str:
