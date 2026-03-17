@@ -163,3 +163,14 @@ Thumbs.db
 
 # backup
 *.bak
+
+# aider
+.ai.code.prompt.org
+.aider.chat.history.md
+.aider.*
+.aider.tags.cache.v4/
+.envrc
+.jupyter_ystore.db
+*.zip
+*png
+**/data/0/*.json
