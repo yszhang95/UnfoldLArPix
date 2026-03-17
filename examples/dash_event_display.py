@@ -335,55 +335,70 @@ def update_display(loaded_data, threshold, color_scale):
 @app.callback(
     Output('selected-coords-store', 'data'),
     Input('event-display', 'clickData'),
-    State('loaded-data-store', 'data'),
-)
-def update_coords_from_click(clickData, loaded_data):
-    """Update selected coordinates from click on 3D plot."""
-    if not clickData or not loaded_data or not loaded_data.get('loaded'):
-        return {}
-
-    filename = loaded_data.get('filename')
-    if filename not in _loaded_npz_cache:
-        return {}
-
-    npz_data = _loaded_npz_cache[filename]
-    if 'boffset' not in npz_data:
-        return {}
-
-    try:
-        # Extract clicked point coordinates (local to deconv_q)
-        point = clickData['points'][0]
-        x_local = int(point['x'])
-        y_local = int(point['y'])
-
-        boffset = np.array(npz_data['boffset'])
-        # Convert local coordinates to global pixel coordinates
-        pxl_x = int(boffset[0]) + x_local
-        pxl_y = int(boffset[1]) + y_local
-
-        return {'pxl_x': pxl_x, 'pxl_y': pxl_y, 'source': 'click'}
-    except Exception as e:
-        print(f"Error extracting coordinates from click: {e}")
-        return {}
-
-
-@app.callback(
-    Output('selected-coords-store', 'data'),
     Input('plot-waveform-btn', 'n_clicks'),
     State('input-pxl-x', 'value'),
     State('input-pxl-y', 'value'),
-    prevent_initial_call=True
+    State('loaded-data-store', 'data'),
+    prevent_initial_call=False
 )
-def update_coords_from_input(n_clicks, pxl_x, pxl_y):
-    """Update selected coordinates from manual input."""
-    if pxl_x is None or pxl_y is None:
+def update_selected_coords(clickData, plot_nclicks, pxl_x, pxl_y, loaded_data):
+    """
+    Unified callback to update selected coordinates from either:
+      - a click in the 3D event-display (clickData), or
+      - the Plot Waveform button using manual pxl_x/pxl_y inputs.
+
+    Uses callback_context to determine which input triggered the callback.
+    """
+
+    trig = callback_context.triggered
+    if not trig:
+        # No trigger (initial call) — do nothing.
         return {}
 
-    try:
-        return {'pxl_x': int(pxl_x), 'pxl_y': int(pxl_y), 'source': 'input'}
-    except Exception as e:
-        print(f"Error parsing input coordinates: {e}")
-        return {}
+    prop_id = trig[0].get('prop_id', '')
+
+    # Click from the 3D plot
+    if prop_id.startswith('event-display'):
+        if not clickData or not loaded_data or not loaded_data.get('loaded'):
+            return {}
+
+        filename = loaded_data.get('filename')
+        if filename not in _loaded_npz_cache:
+            return {}
+
+        npz_data = _loaded_npz_cache[filename]
+        if 'boffset' not in npz_data:
+            return {}
+
+        try:
+            # Extract clicked point coordinates (local to deconv_q)
+            point = clickData['points'][0]
+            x_local = int(point['x'])
+            y_local = int(point['y'])
+
+            boffset = np.array(npz_data['boffset'])
+            # Convert local coordinates to global pixel coordinates
+            pxl_x_global = int(boffset[0]) + x_local
+            pxl_y_global = int(boffset[1]) + y_local
+
+            return {'pxl_x': pxl_x_global, 'pxl_y': pxl_y_global, 'source': 'click'}
+        except Exception as e:
+            print(f"Error extracting coordinates from click: {e}")
+            return {}
+
+    # Manual input via button
+    if prop_id.startswith('plot-waveform-btn'):
+        if pxl_x is None or pxl_y is None:
+            return {}
+
+        try:
+            return {'pxl_x': int(pxl_x), 'pxl_y': int(pxl_y), 'source': 'input'}
+        except Exception as e:
+            print(f"Error parsing input coordinates: {e}")
+            return {}
+
+    # Unhandled trigger
+    return {}
 
 
 @app.callback(
