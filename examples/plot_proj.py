@@ -166,6 +166,63 @@ for ievent in range(1):
   ax2dh.set_title(f'True Charge vs Hits (voxels with hits > {threshold})')
   fig2dh.savefig(f'{prefix}_hist_2d_hits.png')
 
+  # New plot: histogram of distances between peak time indices of aligned smeared true and aligned deconv
+  # Consider only spatial voxels where the smeared true sequence exceeds the threshold (at any time).
+  # We compute argmax along the time axis (assumed to be the last axis).
+  try:
+      smear_arr = np.asarray(smear_summed)
+      deconv_arr = np.asarray(aligned_deconv_q)
+      if smear_arr.ndim < 1 or deconv_arr.ndim < 1:
+          raise ValueError("Unexpected array dimensionality for peak analysis.")
+      # Determine time axis (last axis)
+      time_axis = -1
+      # mask pixels where smeared true has any sample > threshold
+      smear_peak_mask = smear_arr.max(axis=time_axis) > threshold
+      n_masked = np.count_nonzero(smear_peak_mask)
+      if n_masked == 0:
+          print("No smeared-true sequences exceed threshold; skipping peak-distance histogram.")
+      else:
+          smear_peaks = np.argmax(smear_arr, axis=time_axis)
+          deconv_peaks = np.argmax(deconv_arr, axis=time_axis)
+          # Extract peaks for masked spatial positions and compute signed distances (smear - deconv)
+          # Flatten spatial dims to 1D for ease. Keep absolute and signed histograms.
+          spatial_shape = smear_peaks.shape[:-1] if smear_peaks.ndim > 1 else ()
+          # create flattened indices of masked positions
+          if smear_peaks.ndim == 1:
+              # 1D time series only (rare)
+              masked_smear_peaks = smear_peaks[smear_peak_mask]
+              masked_deconv_peaks = deconv_peaks[smear_peak_mask]
+          else:
+              # flatten spatial dims
+              masked_smear_peaks = smear_peaks.reshape(-1)[smear_peak_mask.reshape(-1)]
+              masked_deconv_peaks = deconv_peaks.reshape(-1)[smear_peak_mask.reshape(-1)]
+          signed_dists = masked_smear_peaks.astype(int) - masked_deconv_peaks.astype(int)
+          abs_dists = np.abs(signed_dists)
+
+          # Plot histogram of signed distances
+          fig_peak_signed, ax_peak_signed = plt.subplots(figsize=(8, 6))
+          bins_signed = np.arange(signed_dists.min() - 0.5, signed_dists.max() + 1.5, 1.0) if signed_dists.size > 0 else [0]
+          ax_peak_signed.hist(signed_dists, bins=bins_signed, alpha=0.7)
+          ax_peak_signed.set_xlabel('Signed peak index distance (smeared_peak - deconv_peak) [bins]')
+          ax_peak_signed.set_ylabel('Count')
+          ax_peak_signed.set_title(f'Peak index signed distance (n={signed_dists.size}) for smeared_true > {threshold}')
+          fig_peak_signed.tight_layout()
+          fig_peak_signed.savefig(f'{prefix}_hist_peak_signed_dist.png')
+
+          # Plot histogram of absolute distances
+          fig_peak_abs, ax_peak_abs = plt.subplots(figsize=(8, 6))
+          max_abs = int(abs_dists.max()) if abs_dists.size > 0 else 0
+          bins_abs = np.arange(0, max_abs + 1.5, 1.0)
+          ax_peak_abs.hist(abs_dists, bins=bins_abs, alpha=0.7)
+          ax_peak_abs.set_xlabel('Absolute peak index distance [bins]')
+          ax_peak_abs.set_ylabel('Count')
+          ax_peak_abs.set_title(f'Peak index absolute distance (n={abs_dists.size}) for smeared_true > {threshold}')
+          fig_peak_abs.tight_layout()
+          fig_peak_abs.savefig(f'{prefix}_hist_peak_abs_dist.png')
+
+  except Exception as e:
+      print("Failed to compute peak-distance histogram:", e)
+
 
 plt.figure(figsize=(10, 6))
 plt.hist(filtered_smeared_true, label='Smeared True Projection', range=(0, 40), bins=40, alpha=0.5)
