@@ -22,6 +22,7 @@ def align_voxel_blocks(
     fine_voxels: np.ndarray,
     coarse_voxels: np.ndarray,
     bin_size: int | np.ndarray,
+    bound_to_upper: bool = True
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
   """
   Pad and align fine/coarse voxel blocks so they share a lower corner and have
@@ -47,11 +48,17 @@ def align_voxel_blocks(
   if np.any(bin_size <= 0):
     raise ValueError("bin_size must be positive.")
 
+  if bound_to_upper:
+      coarse_lower = coarse_lower - bin_size
+
   fine_shape = np.array(fine_voxels.shape, dtype=int)
   coarse_shape = np.array(coarse_voxels.shape, dtype=int)
 
   target_lower = coarse_lower.copy()
-  target_lower += np.clip(np.floor((fine_lower - target_lower)//bin_size * bin_size), max=0)
+  # Using min instead of np.clip for a_max=0 to avoid array/scalar broadcast issues with None
+  # target_lower must be <= fine_lower and <= coarse_lower to prevent negative padding
+  diff_bins = ((fine_lower - target_lower) // bin_size) * bin_size
+  target_lower += np.minimum(diff_bins, 0)
   print("target_lower:", target_lower, "fine_lower:", fine_lower, "coarse_lower:", coarse_lower)
   fine_upper = fine_lower + fine_shape
   coarse_upper = coarse_lower + coarse_shape * bin_size
@@ -82,7 +89,9 @@ def align_voxel_blocks(
   reshaped = aligned_fine.reshape(refine_factor)
   print(sub_axes)
   fine_summed = reshaped.sum(axis=tuple(sub_axes))
-  return aligned_fine, aligned_coarse, fine_summed, target_lower
+  
+  output_offset = target_lower + bin_size if bound_to_upper else target_lower
+  return aligned_fine, aligned_coarse, fine_summed, output_offset
 
 for ievent in range(1):
   # f = np.load('deconv_event_0_0.npz')
@@ -116,7 +125,8 @@ for ievent in range(1):
       coarse_lower_corner=f['boffset'],
       fine_voxels=smeared_true,
       coarse_voxels=deconv_q,
-      bin_size=f['adc_hold_delay']
+      bin_size=f['adc_hold_delay'],
+      bound_to_upper=True
   )
   print(new_offset, f['boffset'], f['smear_offset'], aligned_smear.shape, aligned_deconv_q.shape, smear_summed.shape)
   fig, axs = plt.subplots(1, 3, figsize=(18, 6))
@@ -153,7 +163,7 @@ for ievent in range(1):
   fig2dh.colorbar(img, ax=ax2dh)
   ax2dh.set_xlabel('True Charge (smeared)')
   ax2dh.set_ylabel('Hits Charge')
-  ax2dh.set_title('True Charge vs Hits (voxels with hits > f{threshold})')
+  ax2dh.set_title(f'True Charge vs Hits (voxels with hits > {threshold})')
   fig2dh.savefig(f'{prefix}_hist_2d_hits.png')
 
 

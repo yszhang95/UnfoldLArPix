@@ -67,40 +67,68 @@ def run(cmd: list[str], dry: bool, cwd: Path) -> None:
 # Steps
 # ---------------------------------------------------------------------------
 
+def extract_file_label(input_file: str) -> str:
+    """Extract a short label from input filename for suffix."""
+    # Remove 'pgun_positron_3gev_tred_noises_effq_nt1_' prefix if present
+    label = Path(input_file).stem
+    if "thres" in label:
+        # Extract the threshold/burst part: thres5k_nburst256, etc.
+        parts = label.split("_")
+        # Find 'thres' and get remaining parts
+        idx = next((i for i, p in enumerate(parts) if p.startswith("thres")), -1)
+        if idx >= 0:
+            label = "_".join(parts[idx:])
+    return label
+
+
 def step1_deconv(cfg, cwd: Path, dry: bool) -> None:
-    """Run deconv scripts for every (sigma, sigma_pxl) pair."""
+    """Run deconv scripts for every (sigma, sigma_pxl) pair and input file."""
     print("\n=== Step 1: Deconvolution ===")
-    for sigma, sigma_pxl in product(cfg.sigmas, cfg.sigma_pxls):
-        print(f"\n  sigma={sigma}  sigma_pxl={sigma_pxl}")
-        for ver in cfg.versions:
-            script = f"deconv_positron_{ver}.py"
-            run([sys.executable, script,
-                 "--sigma", str(sigma),
-                 "--sigma-pxl", str(sigma_pxl),
-                 "--input-file", cfg.input_file,
-                 "--field-response", cfg.field_response],
-                dry, cwd)
+    input_files = cfg.input_files if isinstance(cfg.input_files, list) else [cfg.input_files]
+
+    for input_file in input_files:
+        file_label = extract_file_label(input_file)
+        for sigma, sigma_pxl in product(cfg.sigmas, cfg.sigma_pxls):
+            print(f"\n  input={input_file}  sigma={sigma}  sigma_pxl={sigma_pxl}")
+            for ver in cfg.versions:
+                script = f"deconv_positron_{ver}.py"
+                # Create output suffix from file label + sigma values
+                ss = fmt_sigma(sigma).lstrip('0')  # Remove leading '0'
+                sp = fmt_sigma_pxl(sigma_pxl).lstrip('0')
+                output_suffix = f"{file_label}_s{ss}_sp{sp}"
+                run([sys.executable, script,
+                     "--sigma", str(sigma),
+                     "--sigma-pxl", str(sigma_pxl),
+                     "--input-file", input_file,
+                     "--field-response", cfg.field_response,
+                     "--output-suffix", output_suffix],
+                    dry, cwd)
 
 
 def step2_export(cfg, cwd: Path, dry: bool) -> None:
     """Export JSON files (deconv + smeared) for every combination x threshold."""
     print("\n=== Step 2: JSON export ===")
     out_dir = cfg.output_matrix
-    for sigma, sigma_pxl in product(cfg.sigmas, cfg.sigma_pxls):
-        ss = fmt_sigma(sigma)
-        sp = fmt_sigma_pxl(sigma_pxl)
-        for ver in cfg.versions:
-            npz = f"deconv_positron{'_v2' if ver == 'v2' else ''}_event_0_0.npz"
-            for thr in cfg.thresholds:
-                ts = fmt_threshold(thr)
-                prefix = f"{ver}_s{ss}_sp{sp}_t{ts}"
-                run([sys.executable, "deconv_xyz.py", npz,
-                     "--tpc-id", "0", "--event-id", "0",
-                     "--threshold", str(thr),
-                     "--prefix", prefix,
-                     "--smeared-prefix", f"{prefix}_smeared",
-                     "--output-dir", str(out_dir)],
-                    dry, cwd)
+    input_files = cfg.input_files if isinstance(cfg.input_files, list) else [cfg.input_files]
+
+    for input_file in input_files:
+        file_label = extract_file_label(input_file)
+        for sigma, sigma_pxl in product(cfg.sigmas, cfg.sigma_pxls):
+            ss = fmt_sigma(sigma).lstrip('0')
+            sp = fmt_sigma_pxl(sigma_pxl).lstrip('0')
+            for ver in cfg.versions:
+                output_suffix = f"{file_label}_s{ss}_sp{sp}"
+                npz = f"deconv_positron{'_v2' if ver == 'v2' else ''}_{output_suffix}_event_0_0.npz"
+                for thr in cfg.thresholds:
+                    ts = fmt_threshold(thr)
+                    prefix = f"{ver}_{output_suffix}_t{ts}"
+                    run([sys.executable, "deconv_xyz.py", npz,
+                         "--tpc-id", "0", "--event-id", "0",
+                         "--threshold", str(thr),
+                         "--prefix", prefix,
+                         "--smeared-prefix", f"{prefix}_smeared",
+                         "--output-dir", str(out_dir)],
+                        dry, cwd)
 
 
 def step3_copy(cfg, cwd: Path, dry: bool) -> None:
@@ -109,38 +137,48 @@ def step3_copy(cfg, cwd: Path, dry: bool) -> None:
     dest = Path(cfg.dest_dir)
     if not dry:
         dest.mkdir(parents=True, exist_ok=True)
-    for sigma, sigma_pxl in product(cfg.sigmas, cfg.sigma_pxls):
-        ss = fmt_sigma(sigma)
-        sp = fmt_sigma_pxl(sigma_pxl)
-        for ver in cfg.versions:
-            for thr in cfg.thresholds:
-                ts = fmt_threshold(thr)
-                prefix = f"{ver}_s{ss}_sp{sp}_t{ts}"
-                src_dir = Path(cfg.output_matrix) / "data" / "0"
-                for suffix in ("", "_smeared"):
-                    src = src_dir / f"0-{prefix}{suffix}.json"
-                    dst = dest / f"0-{prefix}{suffix}.json"
-                    print(f"  cp {src.name} -> {dest}/")
-                    if not dry:
-                        shutil.copy2(src, dst)
+    input_files = cfg.input_files if isinstance(cfg.input_files, list) else [cfg.input_files]
+
+    for input_file in input_files:
+        file_label = extract_file_label(input_file)
+        for sigma, sigma_pxl in product(cfg.sigmas, cfg.sigma_pxls):
+            ss = fmt_sigma(sigma).lstrip('0')
+            sp = fmt_sigma_pxl(sigma_pxl).lstrip('0')
+            for ver in cfg.versions:
+                output_suffix = f"{file_label}_s{ss}_sp{sp}"
+                for thr in cfg.thresholds:
+                    ts = fmt_threshold(thr)
+                    prefix = f"{ver}_{output_suffix}_t{ts}"
+                    src_dir = Path(cfg.output_matrix) / "data" / "0"
+                    for suffix in ("", "_smeared"):
+                        src = src_dir / f"0-{prefix}{suffix}.json"
+                        dst = dest / f"0-{prefix}{suffix}.json"
+                        print(f"  cp {src.name} -> {dest}/")
+                        if not dry:
+                            shutil.copy2(src, dst)
 
 
 def step4_plots(cfg, cwd: Path, dry: bool) -> None:
-    """Generate histogram plots for every (sigma, sigma_pxl) x version."""
+    """Generate histogram plots for every (sigma, sigma_pxl) x version x input file."""
     print(f"\n=== Step 4: Plots -> {cfg.plot_dir} ===")
     plot_dir = Path(cfg.plot_dir)
     if not dry:
         plot_dir.mkdir(parents=True, exist_ok=True)
-    for sigma, sigma_pxl in product(cfg.sigmas, cfg.sigma_pxls):
-        ss = fmt_sigma(sigma)
-        sp = fmt_sigma_pxl(sigma_pxl)
-        for ver in cfg.versions:
-            npz = f"deconv_positron{'_v2' if ver == 'v2' else ''}_event_0_0.npz"
-            prefix = plot_dir / f"{ver}_s{ss}_sp{sp}"
-            run([sys.executable, "plot_proj.py", npz,
-                 "--threshold", str(cfg.plot_threshold),
-                 "--prefix", str(prefix)],
-                dry, cwd)
+    input_files = cfg.input_files if isinstance(cfg.input_files, list) else [cfg.input_files]
+
+    for input_file in input_files:
+        file_label = extract_file_label(input_file)
+        for sigma, sigma_pxl in product(cfg.sigmas, cfg.sigma_pxls):
+            ss = fmt_sigma(sigma).lstrip('0')
+            sp = fmt_sigma_pxl(sigma_pxl).lstrip('0')
+            for ver in cfg.versions:
+                output_suffix = f"{file_label}_s{ss}_sp{sp}"
+                npz = f"deconv_positron{'_v2' if ver == 'v2' else ''}_{output_suffix}_event_0_0.npz"
+                prefix = plot_dir / f"{ver}_{output_suffix}"
+                run([sys.executable, "plot_proj.py", npz,
+                     "--threshold", str(cfg.plot_threshold),
+                     "--prefix", str(prefix)],
+                    dry, cwd)
 
 
 # ---------------------------------------------------------------------------
@@ -173,8 +211,11 @@ def parse_args():
     p.add_argument("--plot-threshold", type=float, default=0.5,
                    help="Threshold passed to plot_proj.py")
     p.add_argument("--input-file",
-                   default="data/pgun_positron_3gev_tred_noises_effq_nt1.npz",
-                   help="Input NPZ file produced by tred (passed to deconv scripts)")
+                   default=None,
+                   help="(Deprecated: use --input-files) Input NPZ file produced by tred")
+    p.add_argument("--input-files", nargs="+",
+                   default=None,
+                   help="Input NPZ files produced by tred (passed to deconv scripts)")
     p.add_argument("--field-response",
                    default="/srv/storage1/yousen/tred_workspace/response_44_v2a_full_25x25pixel_tred.npz",
                    help="Field response NPZ file (passed to deconv scripts)")
@@ -189,6 +230,14 @@ def main():
     cfg = parse_args()
     cwd = Path(cfg.cwd).resolve()
 
+    # Handle backwards compatibility: --input-file vs --input-files
+    if cfg.input_files is not None:
+        cfg.input_files = cfg.input_files
+    elif cfg.input_file is not None:
+        cfg.input_files = [cfg.input_file]
+    else:
+        cfg.input_files = ["data/pgun_positron_3gev_tred_noises_effq_nt1.npz"]
+
     step_map = {
         1: step1_deconv,
         2: step2_export,
@@ -199,6 +248,7 @@ def main():
     print(f"Pipeline: steps={cfg.steps}  versions={cfg.versions}")
     print(f"  sigmas={cfg.sigmas}  sigma_pxls={cfg.sigma_pxls}")
     print(f"  thresholds={cfg.thresholds}")
+    print(f"  input_files={cfg.input_files}")
     print(f"  cwd={cwd}  dry={cfg.dry_run}")
 
     for step_num in sorted(cfg.steps):

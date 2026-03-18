@@ -126,10 +126,11 @@ for event in loader.iter_events():
 
     deconv_q, local_offset = deconv_fft(hwf_block_data, fr_full_k,
                                         gaussian_kernel)
-    if any(list(o != 0 for in local_offset)):
+    if any(list(o != 0 for o in local_offset)):
         raise ValueError()
 
     smear_offset, smeared_true = gaus_smear_true_3d(event.effq.location, event.effq.data, width=np.array([sigma_pxl, sigma_pxl, sigma]))
+    smear_offset[-1] += readout_config.adc_hold_delay
 
     print(f'smear_offset: {smear_offset}, boffset: {boffset}, '
           f'sum_deconv_q: {np.sum(deconv_q)}, '
