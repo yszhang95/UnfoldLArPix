@@ -174,3 +174,4 @@ Thumbs.db
 *.zip
 *png
 **/data/0/*.json
+.aider*

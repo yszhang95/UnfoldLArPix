@@ -121,6 +121,9 @@ for event in loader.iter_events():
 
     deconv_q, local_offset = deconv_fft(hwf_block_data, fr_full_k,
                                         gaussian_kernel)
+    # check local_offset
+    if any(list(o != 0 for in local_offset)):
+        raise ValueError()
 
     smear_offset, smeared_true = gaus_smear_true_3d(event.effq.location, event.effq.data, width=np.array([sigma_pxl, sigma_pxl, sigma]))
 
@@ -136,6 +139,8 @@ for event in loader.iter_events():
     geometry = loader.get_geometry(event.tpc_id)
     np.savez(f"deconv_positron_v3_event_{event.tpc_id}_{event.event_id}.npz",
              deconv_q=deconv_q, boffset=boffset,
+             hwf_block=hwf_block_data,
+             hwf_block_offset=boffset,
              smeared_true=smeared_true, smear_offset=smear_offset,
              effq_location=event.effq.location, effq_data=event.effq.data,
              hits_location=event.hits.location, hits_data=event.hits.data,
