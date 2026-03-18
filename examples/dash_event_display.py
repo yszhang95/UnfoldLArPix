@@ -142,6 +142,16 @@ app.layout = dbc.Container([
                 size="sm"
             ),
         ], width=12, md=2),
+        dbc.Col([
+            html.Label(""),
+            dbc.Button(
+                "Shift Truth +1 dt",
+                id='shift-truth-btn',
+                color="warning",
+                className="w-100 mt-2",
+                size="sm"
+            ),
+        ], width=12, md=2),
     ], className="mb-3"),
 
     dbc.Row([
@@ -158,6 +168,7 @@ app.layout = dbc.Container([
 
     dcc.Store(id='loaded-data-store'),
     dcc.Store(id='selected-coords-store', data={}),
+    dcc.Store(id='truth-shift-store', data=0),
 ], fluid=True, className="p-4")
 
 
@@ -413,11 +424,26 @@ def clear_coordinates(n_clicks):
 
 
 @app.callback(
+    Output('truth-shift-store', 'data'),
+    Input('shift-truth-btn', 'n_clicks'),
+    State('truth-shift-store', 'data'),
+    prevent_initial_call=True
+)
+def toggle_truth_shift(n_clicks, current_shift):
+    """Toggle the truth shift between 0 and 1."""
+    if current_shift == 0:
+        return 1
+    else:
+        return 0
+
+
+@app.callback(
     Output('waveform-display', 'figure'),
     Input('selected-coords-store', 'data'),
+    Input('truth-shift-store', 'data'),
     State('loaded-data-store', 'data'),
 )
-def display_waveform(selected_coords, loaded_data):
+def display_waveform(selected_coords, truth_shift, loaded_data):
     """Display waveform for selected voxel with aligned smeared_true data."""
 
     if not selected_coords or not loaded_data or not loaded_data.get('loaded'):
@@ -483,13 +509,17 @@ def display_waveform(selected_coords, loaded_data):
             if 0 <= x_smear < smeared_true.shape[0] and 0 <= y_smear < smeared_true.shape[1]:
                 smear_waveform = smeared_true[x_smear, y_smear, :]
                 t0_smear = float(smear_offset[2])
-                times_smear = t0_smear + np.arange(len(smear_waveform)) * 1  # dt=1 for smeared_true
+                
+                # Apply shift if enabled
+                time_shift = truth_shift * dt_deconv if truth_shift else 0
+                times_smear = t0_smear + np.arange(len(smear_waveform)) * 1 + time_shift  # dt=1 for smeared_true
 
+                shift_label = f" (shifted +{dt_deconv:.1f} ticks)" if truth_shift else ""
                 fig.add_trace(go.Scatter(
                     x=times_smear,
                     y=smear_waveform,
                     mode='lines+markers',
-                    name=f'smeared_true (global: {pxl_x}, {pxl_y})',
+                    name=f'smeared_true (global: {pxl_x}, {pxl_y}){shift_label}',
                     line=dict(color='red', width=2),
                     marker=dict(size=4),
                 ))
