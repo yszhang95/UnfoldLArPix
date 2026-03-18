@@ -59,7 +59,7 @@ app.layout = dbc.Container([
                 min=0,
                 max=15,
                 step=0.1,
-                value=1,
+                value=0.5,
                 marks={i: str(i) for i in range(0, 16)},
                 tooltip={"placement": "bottom", "always_visible": True}
             ),
@@ -509,7 +509,7 @@ def display_waveform(selected_coords, truth_shift, loaded_data):
             if 0 <= x_smear < smeared_true.shape[0] and 0 <= y_smear < smeared_true.shape[1]:
                 smear_waveform = smeared_true[x_smear, y_smear, :]
                 t0_smear = float(smear_offset[2])
-                
+
                 # Apply shift if enabled
                 time_shift = truth_shift * dt_deconv if truth_shift else 0
                 times_smear = t0_smear + np.arange(len(smear_waveform)) * 1 + time_shift  # dt=1 for smeared_true
