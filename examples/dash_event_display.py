@@ -506,7 +506,7 @@ def display_waveform(selected_coords, loaded_data):
         fig.update_layout(
             title=f"Waveforms: Global pixel ({pxl_x}, {pxl_y})",
             xaxis_title="Time (ticks, 50ns)",
-            yaxis_title="Charge",
+            yaxis_title="Charge per 50ns",
             height=600,
             hovermode='x unified',
             legend=dict(x=0.01, y=0.99),
