@@ -145,9 +145,9 @@ app.layout = dbc.Container([
         dbc.Col([
             html.Label(""),
             dbc.Button(
-                "Shift Truth +1 dt",
+                "Shift Truth: OFF",
                 id='shift-truth-btn',
-                color="warning",
+                color="secondary",
                 className="w-100 mt-2",
                 size="sm"
             ),
@@ -425,16 +425,18 @@ def clear_coordinates(n_clicks):
 
 @app.callback(
     Output('truth-shift-store', 'data'),
+    Output('shift-truth-btn', 'children'),
+    Output('shift-truth-btn', 'color'),
     Input('shift-truth-btn', 'n_clicks'),
     State('truth-shift-store', 'data'),
     prevent_initial_call=True
 )
 def toggle_truth_shift(n_clicks, current_shift):
-    """Toggle the truth shift between 0 and 1."""
+    """Toggle the truth shift between 0 and 1, and update button appearance."""
     if current_shift == 0:
-        return 1
+        return 1, "Shift Truth: ON", "success"
     else:
-        return 0
+        return 0, "Shift Truth: OFF", "secondary"
 
 
 @app.callback(
