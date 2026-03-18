@@ -383,3 +383,36 @@ class TestValidation:
         hits = Hits(data=hits_data, location=hits_loc, tpc_id=0, event_id=0)
         with pytest.raises(ValueError, match="Duplicate trigger times"):
             proc.extract_sequences_from_hits(hits)
+
+
+# ---------------------------------------------------------------------------
+# 7. Single-hit sequences (t_first == t_last)
+# ---------------------------------------------------------------------------
+
+class TestSingleHit:
+    """When nburst == 1, t_first == t_last.  All code paths must handle this."""
+
+    def test_single_hit_construction(self):
+        """BurstSequence with nburst=1 (t_first == t_last) should not raise."""
+        seq = make_seq(trigger_time_idx=0, nburst=1, charges=[100.0])
+        assert seq.t_first == seq.t_last
+
+    def test_single_hit_single_sequence(self):
+        """process_pixel_sequences works with one single-hit sequence."""
+        proc = make_processor(threshold=30.0)
+        seq = make_seq(trigger_time_idx=0, nburst=1, charges=[100.0])
+        merged = proc.process_pixel_sequences([seq])
+        assert len(merged.charges) > 0
+        assert len(merged.times) == len(merged.charges)
+        assert len(merged.cumulative) == len(merged.charges) + 1
+        np.testing.assert_allclose(merged.cumulative[0], 0.0)
+
+    def test_single_hit_followed_by_multi_hit(self):
+        """A single-hit first sequence followed by a normal sequence merges correctly."""
+        LONG_TEMPLATE = np.cumsum(np.ones(200, dtype=float))
+        proc = make_processor(template=LONG_TEMPLATE, threshold=30.0)
+        seq_a = make_seq(trigger_time_idx=0, nburst=1, charges=[100.0])   # t_first=t_last=10
+        seq_b = make_seq(trigger_time_idx=50, nburst=2, charges=[80.0, 40.0])  # t_first=60
+        merged = proc.process_pixel_sequences([seq_a, seq_b])
+        assert np.all(np.diff(merged.times) > 0), "times not strictly monotonic"
+        assert len(merged.cumulative) == len(merged.charges) + 1

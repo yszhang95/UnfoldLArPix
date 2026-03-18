@@ -22,7 +22,7 @@ class BurstSequence:
 
     def __post_init__(self):
         """Validate sequence data."""
-        if self.t_last <= self.t_first:
+        if self.t_last < self.t_first:
             raise ValueError(f"t_end ({self.t_last}) must be > t_start ({self.t_first})")
         if len(self.charges) == 0:
             raise ValueError("charges array cannot be empty")
