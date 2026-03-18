@@ -186,17 +186,28 @@ for ievent in range(1):
           deconv_peaks = np.argmax(deconv_arr, axis=time_axis)
           # Extract peaks for masked spatial positions and compute signed distances (smear - deconv)
           # Flatten spatial dims to 1D for ease. Keep absolute and signed histograms.
-          spatial_shape = smear_peaks.shape[:-1] if smear_peaks.ndim > 1 else ()
-          # create flattened indices of masked positions
-          if smear_peaks.ndim == 1:
+          # Prepare flattened arrays with shape (n_spatial, n_time)
+          if smear_arr.ndim == 1:
               # 1D time series only (rare)
               masked_smear_peaks = smear_peaks[smear_peak_mask]
               masked_deconv_peaks = deconv_peaks[smear_peak_mask]
+              signed_dists = masked_smear_peaks.astype(int) - masked_deconv_peaks.astype(int)
+              true_charge_at_peak = np.array([smear_arr[idx] for idx in np.nonzero(smear_peak_mask)[0]])
           else:
-              # flatten spatial dims
-              masked_smear_peaks = smear_peaks.reshape(-1)[smear_peak_mask.reshape(-1)]
-              masked_deconv_peaks = deconv_peaks.reshape(-1)[smear_peak_mask.reshape(-1)]
-          signed_dists = masked_smear_peaks.astype(int) - masked_deconv_peaks.astype(int)
+              # flatten spatial dims to (n_spatial, n_time)
+              ntime = smear_arr.shape[-1]
+              smear_flat = smear_arr.reshape(-1, ntime)
+              deconv_flat = deconv_arr.reshape(-1, ntime)
+              smear_peaks_flat = smear_peaks.reshape(-1)
+              deconv_peaks_flat = deconv_peaks.reshape(-1)
+              mask_flat = smear_peak_mask.reshape(-1)
+              rows = np.nonzero(mask_flat)[0]
+              masked_smear_peaks = smear_peaks_flat[rows]
+              masked_deconv_peaks = deconv_peaks_flat[rows]
+              signed_dists = masked_smear_peaks.astype(int) - masked_deconv_peaks.astype(int)
+              # true charge in smeared true at the smeared_peak index for each masked spatial position
+              true_charge_at_peak = smear_flat[rows, masked_smear_peaks]
+
           abs_dists = np.abs(signed_dists)
 
           # Plot histogram of signed distances
@@ -219,6 +230,37 @@ for ievent in range(1):
           ax_peak_abs.set_title(f'Peak index absolute distance (n={abs_dists.size}) for smeared_true > {threshold}')
           fig_peak_abs.tight_layout()
           fig_peak_abs.savefig(f'{prefix}_hist_peak_abs_dist.png')
+
+          # New 2D plot: signed distance vs true charge at smeared peak
+          try:
+              if signed_dists.size == 0:
+                  print("No signed distances to plot for signed_vs_true_charge.")
+              else:
+                  # Scatter plot
+                  fig_scatter, ax_scatter = plt.subplots(figsize=(8, 6))
+                  ax_scatter.scatter(signed_dists, true_charge_at_peak, alpha=0.6)
+                  ax_scatter.set_xlabel('Signed peak index distance (smeared_peak - deconv_peak) [bins]')
+                  ax_scatter.set_ylabel('Smeared true charge at smeared peak [units]')
+                  ax_scatter.set_title(f'Signed distance vs smeared-true charge at peak (n={signed_dists.size})')
+                  fig_scatter.tight_layout()
+                  fig_scatter.savefig(f'{prefix}_signed_vs_true_scatter.png')
+
+                  # 2D histogram (log color)
+                  fig2dh_sd_tc, ax2dh_sd_tc = plt.subplots(figsize=(8, 6))
+                  # bins for signed distances (integer offsets)
+                  bins_x = np.arange(signed_dists.min() - 0.5, signed_dists.max() + 1.5, 1.0)
+                  # dynamic bins for true charge
+                  y_max = float(np.max(true_charge_at_peak)) if true_charge_at_peak.size > 0 else 1.0
+                  bins_y = np.linspace(0.0, max(1.0, y_max), 40)
+                  h2, xedges2, yedges2, img2 = ax2dh_sd_tc.hist2d(signed_dists, true_charge_at_peak, bins=[bins_x, bins_y], norm=LogNorm())
+                  fig2dh_sd_tc.colorbar(img2, ax=ax2dh_sd_tc)
+                  ax2dh_sd_tc.set_xlabel('Signed peak index distance (smeared_peak - deconv_peak) [bins]')
+                  ax2dh_sd_tc.set_ylabel('Smeared true charge at smeared peak [units]')
+                  ax2dh_sd_tc.set_title(f'2D: Signed distance vs smeared-true charge at peak (n={signed_dists.size})')
+                  fig2dh_sd_tc.tight_layout()
+                  fig2dh_sd_tc.savefig(f'{prefix}_hist2d_signed_vs_true_charge.png')
+          except Exception as e2:
+              print("Failed to produce signed_vs_true_charge plots:", e2)
 
   except Exception as e:
       print("Failed to compute peak-distance histogram:", e)
