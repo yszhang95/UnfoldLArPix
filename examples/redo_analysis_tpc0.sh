@@ -1,6 +1,6 @@
 #!/bin/bash
 # LArPix Deconvolution Analysis - TPC 0 Only Re-run
-# Re-executes 5 parameter configurations (5 from ANALYSIS_LOG.md)
+# Re-executes 7 parameter configurations
 # with --tpc-id 0 filtering to process only TPC 0 data
 
 set -e
@@ -12,7 +12,7 @@ echo "LArPix Deconvolution Analysis - TPC 0 Only"
 echo "=========================================="
 echo ""
 echo "Output Directory: analysis_20260318_tpc0/"
-echo "Configuration: 5 parameter combinations × 4 datasets"
+echo "Configuration: 7 parameter combinations × 4 datasets"
 echo ""
 
 # Input files (all 4 datasets)
@@ -38,7 +38,7 @@ echo ""
 # ============================================================================
 # Run 1: σ_temporal=0.005, σ_pixel=0.1
 # ============================================================================
-echo "[1/5] σ_temporal=0.005, σ_pixel=0.1"
+echo "[1/7] σ_temporal=0.005, σ_pixel=0.1"
 python run_analysis.py \
   --sigmas 0.005 \
   --sigma-pxls 0.1 \
@@ -54,7 +54,7 @@ echo ""
 # ============================================================================
 # Run 2: σ_temporal=0.005, σ_pixel=0.2
 # ============================================================================
-echo "[2/5] σ_temporal=0.005, σ_pixel=0.2"
+echo "[2/7] σ_temporal=0.005, σ_pixel=0.2"
 python run_analysis.py \
   --sigmas 0.005 \
   --sigma-pxls 0.2 \
@@ -70,7 +70,7 @@ echo ""
 # ============================================================================
 # Run 3: σ_temporal=0.004, σ_pixel=0.2
 # ============================================================================
-echo "[3/5] σ_temporal=0.004, σ_pixel=0.2"
+echo "[3/7] σ_temporal=0.004, σ_pixel=0.2"
 python run_analysis.py \
   --sigmas 0.004 \
   --sigma-pxls 0.2 \
@@ -86,7 +86,7 @@ echo ""
 # ============================================================================
 # Run 4: σ_temporal=0.003, σ_pixel=0.2
 # ============================================================================
-echo "[4/5] σ_temporal=0.003, σ_pixel=0.2"
+echo "[4/7] σ_temporal=0.003, σ_pixel=0.2"
 python run_analysis.py \
   --sigmas 0.003 \
   --sigma-pxls 0.2 \
@@ -102,7 +102,7 @@ echo ""
 # ============================================================================
 # Run 5: σ_temporal=0.003, σ_pixel=0.15
 # ============================================================================
-echo "[5/5] σ_temporal=0.003, σ_pixel=0.15"
+echo "[5/7] σ_temporal=0.003, σ_pixel=0.15"
 python run_analysis.py \
   --sigmas 0.003 \
   --sigma-pxls 0.15 \
@@ -113,6 +113,32 @@ python run_analysis.py \
   --plot-dir "$PLOT_DIR" \
   --steps 1 2 3 4
 echo "✓ Run 5 complete"
+echo ""
+
+echo "[6/7] σ_temporal=0.004, σ_pixel=0.1"
+python run_analysis.py \
+  --sigmas 0.004 \
+  --sigma-pxls 0.1 \
+  --thresholds "$THRESHOLD" \
+  --versions "$VERSION" \
+  --input-files "${INPUT_FILES[@]}" \
+  --dest-dir "$DEST_DIR" \
+  --plot-dir "$PLOT_DIR" \
+  --steps 1 2 3 4
+echo "✓ Run 6 complete"
+echo ""
+
+echo "[7/7] σ_temporal=0.002, σ_pixel=0.2"
+python run_analysis.py \
+  --sigmas 0.002 \
+  --sigma-pxls 0.2 \
+  --thresholds "$THRESHOLD" \
+  --versions "$VERSION" \
+  --input-files "${INPUT_FILES[@]}" \
+  --dest-dir "$DEST_DIR" \
+  --plot-dir "$PLOT_DIR" \
+  --steps 1 2 3 4
+echo "✓ Run 7 complete"
 echo ""
 
 
@@ -149,4 +175,6 @@ echo "  Config 2: σ_temporal=0.005, σ_pixel=0.2   → JSONs + plots"
 echo "  Config 3: σ_temporal=0.004, σ_pixel=0.2   → JSONs + plots"
 echo "  Config 4: σ_temporal=0.003, σ_pixel=0.2   → JSONs + plots"
 echo "  Config 5: σ_temporal=0.003, σ_pixel=0.15  → JSONs + plots"
+echo "  Config 6: σ_temporal=0.004, σ_pixel=0.1   → JSONs + plots"
+echo "  Config 7: σ_temporal=0.002, σ_pixel=0.2   → JSONs + plots"
 echo ""
