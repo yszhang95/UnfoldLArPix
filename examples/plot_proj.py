@@ -22,7 +22,7 @@ def align_voxel_blocks(
     fine_voxels: np.ndarray,
     coarse_voxels: np.ndarray,
     bin_size: int | np.ndarray,
-    bound_to_upper: bool = True
+    bound_to_upper: bool = False
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
   """
   Pad and align fine/coarse voxel blocks so they share a lower corner and have
@@ -33,6 +33,8 @@ def align_voxel_blocks(
   ndims = fine_voxels.ndim
   if ndims != coarse_voxels.ndim:
     raise ValueError("Fine and coarse blocks must have the same dimensionality.")
+  if bound_to_upper:
+      raise ValueError("bound_to_upper is deprecated. The shift was done in deconv script.")
 
   fine_lower = np.asarray(fine_lower_corner, dtype=int)
   coarse_lower = np.asarray(coarse_lower_corner, dtype=int)
@@ -49,7 +51,7 @@ def align_voxel_blocks(
     raise ValueError("bin_size must be positive.")
 
   if bound_to_upper:
-      coarse_lower = coarse_lower - bin_size
+      coarse_lower[-1] = coarse_lower[-1] - bin_size[-1]
 
   fine_shape = np.array(fine_voxels.shape, dtype=int)
   coarse_shape = np.array(coarse_voxels.shape, dtype=int)
