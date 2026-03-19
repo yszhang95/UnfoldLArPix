@@ -133,7 +133,7 @@ def organize_files(
     For each pattern identifier:
     - Creates subdirectory: dest_dir/{identifier}/
     - Creates nested directories: data/0/
-    - Copies both JSON files to the subdirectory
+    - Copies both JSON files to data/0/ inside the subdirectory
     
     Parameters
     ----------
@@ -156,9 +156,9 @@ def organize_files(
             data_dir.mkdir(parents=True, exist_ok=True)
             print(f"Created directory structure: {data_dir}")
         
-        # Copy files
+        # Copy files into data/0
         for json_file in files:
-            dest_file = pattern_dir / json_file.name
+            dest_file = data_dir / json_file.name
             
             if dry_run:
                 print(f"[DRY RUN] Would copy: {json_file} -> {dest_file}")
