@@ -6,7 +6,7 @@ Filters and displays voxels with charge > threshold from deconv_q array.
 
 import numpy as np
 import plotly.graph_objects as go
-from dash import Dash, dcc, html, Input, Output, State, callback_context
+from dash import Dash, dcc, html, Input, Output, State, callback_context, no_update
 import dash_bootstrap_components as dbc
 from pathlib import Path
 import os
@@ -154,7 +154,7 @@ app.layout = dbc.Container([
                 className="w-100 mt-2",
                 size="sm"
             ),
-        ], width=12, md=2),
+        ], width=12, md=3),
         dbc.Col([
             html.Label(""),
             dbc.Button(
@@ -164,7 +164,55 @@ app.layout = dbc.Container([
                 className="w-100 mt-2",
                 size="sm"
             ),
-        ], width=12, md=2),
+        ], width=12, md=3),
+    ], className="mb-2"),
+
+    dbc.Row([
+        dbc.Col([
+            html.Label("Time Start:"),
+            dcc.Input(
+                id='input-time-start',
+                type='number',
+                placeholder='Start tick',
+                value=-3000,
+                className="form-control",
+                debounce=True
+            ),
+        ], width=12, md=3),
+        dbc.Col([
+            html.Label("Time End:"),
+            dcc.Input(
+                id='input-time-end',
+                type='number',
+                placeholder='End tick',
+                value=0,
+                className="form-control",
+                debounce=True
+            ),
+        ], width=12, md=3),
+        dbc.Col([
+            html.Label(""),
+            dbc.Button(
+                "Reset Time",
+                id='reset-time-btn',
+                color="secondary",
+                className="w-100 mt-2",
+                size="sm"
+            ),
+        ], width=12, md=3),
+        dbc.Col([
+            html.Label(""),
+            dbc.Button(
+                "Zoom to Hits",
+                id='zoom-hits-btn',
+                color="info",
+                className="w-100 mt-2",
+                size="sm"
+            ),
+        ], width=12, md=3),
+    ], className="mb-2"),
+
+    dbc.Row([
         dbc.Col([
             html.Label(""),
             dbc.Button(
@@ -174,7 +222,17 @@ app.layout = dbc.Container([
                 className="w-100 mt-2",
                 size="sm"
             ),
-        ], width=12, md=2),
+        ], width=12, md=6),
+        dbc.Col([
+            html.Label(""),
+            dbc.Button(
+                "Binned Truth: OFF",
+                id='binned-truth-btn',
+                color="secondary",
+                className="w-100 mt-2",
+                size="sm"
+            ),
+        ], width=12, md=6),
     ], className="mb-3"),
 
     dbc.Row([
@@ -192,6 +250,7 @@ app.layout = dbc.Container([
     dcc.Store(id='loaded-data-store'),
     dcc.Store(id='selected-coords-store', data={}),
     dcc.Store(id='truth-shift-store', data=0),
+    dcc.Store(id='binned-truth-store', data=False),
 ], fluid=True, className="p-4")
 
 
@@ -371,7 +430,7 @@ def update_display(loaded_data, threshold, is_log):
 
             # Shape of deconv_q
             nx_c, ny_c, nt_c = deconv_q.shape
-            
+
             # Determine overlapping spatial range
             # Global coordinates: x = boffset[0] + ix
             # Fine coordinates: fx = x - smear_offset[0] = ix + boffset[0] - smear_offset[0]
@@ -380,40 +439,40 @@ def update_display(loaded_data, threshold, is_log):
             dt0 = int(boffset[2] - smear_offset[2])
 
             # We want to extract a sub-block of smeared_true that corresponds to deconv_q
-            # and then bin it. 
-            
+            # and then bin it.
+
             # Initialize binned truth with zeros
             smear_binned = np.zeros_like(deconv_q)
             valid_mask = np.zeros_like(deconv_q, dtype=bool)
-            
+
             # Determine valid source and destination ranges
             # Source (smeared_true)
             fx_s = max(0, dx)
             fy_s = max(0, dy)
-            
+
             # End points
             fx_e = min(smeared_true.shape[0], dx + nx_c)
             fy_e = min(smeared_true.shape[1], dy + ny_c)
-            
+
             k_start = max(0, int(np.ceil(-dt0 / dt)))
             k_end = min(nt_c, int(np.floor((smeared_true.shape[2] - dt0) / dt)))
-            
+
             if fx_e > fx_s and fy_e > fy_s and k_end > k_start:
                 # Extract relevant spatial slice
                 # For time, we extract exactly the fine bins that will be summed into coarse bins [k_start, k_end)
                 fine_t_start = dt0 + k_start * dt
                 fine_t_end = dt0 + k_end * dt
-                
+
                 sub_smear = smeared_true[fx_s:fx_e, fy_s:fy_e, fine_t_start:fine_t_end]
-                
+
                 # Reshape and sum to bin in time
                 # shape becomes (nx_sub, ny_sub, nt_sub_c, dt)
                 nx_sub = fx_e - fx_s
                 ny_sub = fy_e - fy_s
                 nt_sub_c = k_end - k_start
-                
+
                 sub_binned = sub_smear.reshape(nx_sub, ny_sub, nt_sub_c, dt).sum(axis=-1)
-                
+
                 # Map back to smear_binned
                 ix_d = fx_s - dx
                 iy_d = fy_s - dy
@@ -422,13 +481,13 @@ def update_display(loaded_data, threshold, is_log):
 
             # Calculate residuals for ALL voxels where deconv_q > threshold
             mask_active = (deconv_q > threshold)
-            
+
             # For voxels where truth is not valid (edges), smear_binned is 0,
             # so (deconv_q - smear_binned) correctly gives deconv_q.
             deconv_active = deconv_q[mask_active].flatten()
             smear_active = smear_binned[mask_active].flatten()
             residuals = (deconv_active - smear_active)
-            
+
             if residuals.size > 0:
                 fig_residual.add_trace(go.Histogram(
                     x=residuals,
@@ -448,7 +507,7 @@ def update_display(loaded_data, threshold, is_log):
                 # 2D Correlation Histogram
                 x_data = smear_active
                 y_data = deconv_active
-                
+
                 # Axes are always linear
                 x_label = "Binned Smeared True Charge"
                 y_label = "Deconvolved Charge"
@@ -457,13 +516,13 @@ def update_display(loaded_data, threshold, is_log):
                 # For log scale, we use a custom logarithmic colorscale if is_log is True
                 # because Plotly's coloraxis does not support type='log' directly.
                 # However, go.Histogram2d doesn't allow us to log the z-values (counts) easily
-                # without pre-calculating them. 
+                # without pre-calculating them.
                 # Alternative: Use pre-calculated histogram with Heatmap.
 
                 hist, xedges, yedges = np.histogram2d(x_data, y_data, bins=50)
                 # Transpose for Heatmap (z is [row][col], row=y, col=x)
                 z_data = hist.T
-                
+
                 # Mask zeros for log scale
                 if is_log:
                     z_display = np.where(z_data > 0, np.log10(z_data), np.nan)
@@ -485,7 +544,7 @@ def update_display(loaded_data, threshold, is_log):
                     showscale=True,
                     hoverinfo='x+y+z',
                 ))
-                
+
                 # Add 1:1 line
                 if x_data.size > 0:
                     max_val = max(x_data.max(), y_data.max())
@@ -616,14 +675,68 @@ def update_selected_coords(clickData, plot_nclicks, pxl_x, pxl_y, loaded_data):
 
 
 @app.callback(
-    Output('input-pxl-x', 'value'),
-    Output('input-pxl-y', 'value'),
-    Input('clear-coords-btn', 'n_clicks'),
+    [Output('input-pxl-x', 'value'),
+     Output('input-pxl-y', 'value'),
+     Output('input-time-start', 'value'),
+     Output('input-time-end', 'value')],
+    [Input('clear-coords-btn', 'n_clicks'),
+     Input('reset-time-btn', 'n_clicks'),
+     Input('zoom-hits-btn', 'n_clicks')],
+    [State('input-pxl-x', 'value'),
+     State('input-pxl-y', 'value'),
+     State('input-time-start', 'value'),
+     State('input-time-end', 'value'),
+     State('selected-coords-store', 'data'),
+     State('loaded-data-store', 'data'),
+     State('threshold-slider', 'value')],
     prevent_initial_call=True
 )
-def clear_coordinates(n_clicks):
-    """Clear coordinate inputs."""
-    return None, None
+def handle_control_buttons(clear_n, reset_n, zoom_n, cur_x, cur_y, cur_tstart, cur_tend, selected_coords, loaded_data, threshold):
+    """Handle coordinate and time control buttons."""
+    ctx = callback_context
+    if not ctx.triggered:
+        return no_update, no_update, no_update, no_update
+
+    button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+
+    if button_id == 'clear-coords-btn':
+        return None, None, -3000, 0
+
+    if button_id == 'reset-time-btn':
+        return cur_x, cur_y, -3000, 0
+
+    if button_id == 'zoom-hits-btn':
+        if not selected_coords or not loaded_data or not loaded_data.get('loaded'):
+            return no_update, no_update, no_update, no_update
+
+        filename = loaded_data.get('filename')
+        npz_data = _loaded_npz_cache.get(filename)
+        if not npz_data:
+            return no_update, no_update, no_update, no_update
+
+        pxl_x = selected_coords.get('pxl_x')
+        pxl_y = selected_coords.get('pxl_y')
+        boffset = npz_data.get('boffset')
+        deconv_q = npz_data.get('deconv_q')
+        dt = float(npz_data.get('adc_downsample_factor', 1))
+
+        if pxl_x is None or pxl_y is None or boffset is None or deconv_q is None:
+            return no_update, no_update, no_update, no_update
+
+        x_local = pxl_x - int(boffset[0])
+        y_local = pxl_y - int(boffset[1])
+
+        if 0 <= x_local < deconv_q.shape[0] and 0 <= y_local < deconv_q.shape[1]:
+            waveform = deconv_q[x_local, y_local, :]
+            mask = waveform > threshold
+            if np.any(mask):
+                indices = np.where(mask)[0]
+                t_min = float(boffset[2]) + indices[0] * dt
+                t_max = float(boffset[2]) + indices[-1] * dt
+                # Return range with some padding
+                return cur_x, cur_y, int(t_min - 20 * dt), int(t_max + 20 * dt)
+
+    return no_update, no_update, no_update, no_update
 
 
 @app.callback(
@@ -643,13 +756,32 @@ def toggle_truth_shift(n_clicks, current_shift):
 
 
 @app.callback(
+    Output('binned-truth-store', 'data'),
+    Output('binned-truth-btn', 'children'),
+    Output('binned-truth-btn', 'color'),
+    Input('binned-truth-btn', 'n_clicks'),
+    State('binned-truth-store', 'data'),
+    prevent_initial_call=True
+)
+def toggle_binned_truth(n_clicks, is_visible):
+    """Toggle the binned truth visibility."""
+    if is_visible:
+        return False, "Binned Truth: OFF", "secondary"
+    else:
+        return True, "Binned Truth: ON", "success"
+
+
+@app.callback(
     Output('waveform-display', 'figure'),
     Input('selected-coords-store', 'data'),
     Input('truth-shift-store', 'data'),
     Input('threshold-slider', 'value'),
+    Input('input-time-start', 'value'),
+    Input('input-time-end', 'value'),
+    Input('binned-truth-store', 'data'),
     State('loaded-data-store', 'data'),
 )
-def display_waveform(selected_coords, truth_shift, threshold, loaded_data):
+def display_waveform(selected_coords, truth_shift, threshold, t_start, t_end, binned_visible, loaded_data):
     """Display waveform for selected voxel with aligned smeared_true data."""
 
     if not selected_coords or not loaded_data or not loaded_data.get('loaded'):
@@ -741,50 +873,40 @@ def display_waveform(selected_coords, truth_shift, threshold, loaded_data):
                 ))
 
                 # Add binned smeared_true trace
-                # We want to sum smeared_true in bins of dt_deconv, aligned with deconv_q time bins.
-                # The deconv_q time bins are [t0_deconv + i*dt_deconv, t0_deconv + (i+1)*dt_deconv)
-                # smeared_true samples are at t0_smear + j*1
-                
-                # Calculate relative offset in fine ticks
-                # offset_fine = t0_deconv - t0_smear
-                
-                # To align precisely, we find which fine samples fall into each coarse bin.
-                # j-th fine sample is at t_j = t0_smear + j.
-                # It falls into i-th coarse bin if t0_deconv + i*dt_deconv <= t0_smear + j < t0_deconv + (i+1)*dt_deconv
-                
-                binned_smear = []
-                binned_times = []
-                
-                # Use the same range as deconv_waveform
-                for i in range(len(deconv_waveform)):
-                    t_start = t0_deconv + i * dt_deconv
-                    t_end = t0_deconv + (i + 1) * dt_deconv
-                    
-                    # Indices in smear_waveform that fall into this interval
-                    idx_start = int(np.ceil(t_start - t0_smear))
-                    idx_end = int(np.ceil(t_end - t0_smear))
-                    
-                    # Clamp indices
-                    idx_start = max(0, min(len(smear_waveform), idx_start))
-                    idx_end = max(0, min(len(smear_waveform), idx_end))
-                    
-                    if idx_start < idx_end:
-                        val = np.sum(smear_waveform[idx_start:idx_end])
-                        binned_smear.append(val)
-                        binned_times.append(t_start + dt_deconv) # Plot at upper bound
-                    else:
-                        # No overlapping fine samples for this coarse bin
-                        pass
+                if binned_visible:
+                    binned_smear = []
+                    binned_times = []
 
-                if binned_smear:
-                    fig.add_trace(go.Scatter(
-                        x=binned_times,
-                        y=binned_smear,
-                        mode='lines+markers',
-                        name=f'smeared_true_binned (sum over {int(dt_deconv)} ticks)',
-                        line=dict(color='orange', width=3),
-                        marker=dict(size=6, symbol='square'),
-                    ))
+                    # Use the same range as deconv_waveform
+                    for i in range(len(deconv_waveform)):
+                        t_start_bin = t0_deconv + i * dt_deconv
+                        t_end_bin = t0_deconv + (i + 1) * dt_deconv
+
+                        # Indices in smear_waveform that fall into this interval
+                        idx_start = int(np.ceil(t_start_bin - t0_smear))
+                        idx_end = int(np.ceil(t_end_bin - t0_smear))
+
+                        # Clamp indices
+                        idx_start = max(0, min(len(smear_waveform), idx_start))
+                        idx_end = max(0, min(len(smear_waveform), idx_end))
+
+                        if idx_start < idx_end:
+                            val = np.sum(smear_waveform[idx_start:idx_end])
+                            binned_smear.append(val)
+                            binned_times.append(t_start_bin + dt_deconv) # Plot at upper bound
+                        else:
+                            # No overlapping fine samples for this coarse bin
+                            pass
+
+                    if binned_smear:
+                        fig.add_trace(go.Scatter(
+                            x=binned_times,
+                            y=binned_smear,
+                            mode='lines+markers',
+                            name=f'smeared_true_binned (sum over {int(dt_deconv)} ticks)',
+                            line=dict(color='orange', width=3),
+                            marker=dict(size=6, symbol='square'),
+                        ))
             else:
                 # Smeared position out of bounds
                 fig.add_annotation(
@@ -803,6 +925,9 @@ def display_waveform(selected_coords, truth_shift, threshold, loaded_data):
             hovermode='x unified',
             legend=dict(x=0.01, y=0.99),
         )
+
+        # Apply manual time range if provided
+        fig.update_xaxes(range=[t_start, t_end])
 
         return fig
 
