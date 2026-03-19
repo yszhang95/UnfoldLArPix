@@ -128,33 +128,45 @@ for ievent in range(1):
       fine_voxels=smeared_true,
       coarse_voxels=deconv_q,
       bin_size=f['adc_hold_delay'],
-      bound_to_upper=True
+      bound_to_upper=False
   )
   print(new_offset, f['boffset'], f['smear_offset'], aligned_smear.shape, aligned_deconv_q.shape, smear_summed.shape)
   fig, axs = plt.subplots(1, 3, figsize=(18, 6))
   axs[0].hist(smear_summed.flatten() - aligned_deconv_q.flatten(), bins=40, range=(-5, 5), alpha=0.5)
-  axs[0].set_xlabel('Smeared - Deconvolved')
+  axs[0].set_xlabel('Smeared - Deconvolved [ke-/pixel/1.5us]')
   axs[0].set_title('All padded hits')
   axs[1].hist((smear_summed - aligned_deconv_q)[smear_summed > threshold].flatten(), bins=40, range=(-5, 5), alpha=0.5, label='Smear sum > {}'.format(threshold))
   axs[1].legend()
-  axs[1].set_xlabel('Smeared - Deconvolved')
+  axs[1].set_xlabel('Smeared - Deconvolved [ke-/pixel/1.5us]')
   axs[2].hist((smear_summed - aligned_deconv_q)[(smear_summed < threshold) & (smear_summed > 0.1)].flatten(), bins=40, range=(-5, 5), alpha=0.5, label='Smear sum > 0.1 & < {}'.format(threshold))
   axs[2].legend()
-  axs[2].set_xlabel('Smeared - Deconvolved')
+  axs[2].set_xlabel('Smeared - Deconvolved [ke-/pixel/1.5us]')
   plt.tight_layout()
   fig.savefig(f'{prefix}_hist_diff.png')
   plt.close(fig)
 
+  # New plot: Difference for deconv_q > threshold
+  fig_diff_deconv, ax_diff_deconv = plt.subplots(figsize=(8, 6))
+  mask_deconv = (aligned_deconv_q > threshold)
+  if np.any(mask_deconv):
+      ax_diff_deconv.hist((smear_summed - aligned_deconv_q)[mask_deconv].flatten(), bins=40, range=(-5, 5), alpha=0.7)
+      ax_diff_deconv.set_title(f'Smeared - Deconvolved (for Deconv > {threshold})')
+      ax_diff_deconv.set_xlabel('Smeared Sum - Deconvolved Q [ke-/pixel/1.5us]')
+      ax_diff_deconv.set_ylabel('Count')
+      fig_diff_deconv.tight_layout()
+      fig_diff_deconv.savefig(f'{prefix}_hist_diff_deconv_mask.png')
+  plt.close(fig_diff_deconv)
+
   from matplotlib.colors import LogNorm
-  fig2d, ax2d = plt.subplots(figsize=(8, 6))
-  h, xedges, yedges, img = ax2d.hist2d(smear_summed.flatten(), aligned_deconv_q.flatten(),
-                                        bins=40, range=[[0, 10], [0, 10]], norm=LogNorm())
-  fig2d.colorbar(img, ax=ax2d)
-  ax2d.set_xlabel('Smeared True (summed)')
-  ax2d.set_ylabel('Deconvolved')
-  ax2d.set_title('2D Histogram: Smeared True vs Deconvolved (aligned)')
-  fig2d.savefig(f'{prefix}_hist_2d.png')
-  plt.close(fig2d)
+  # fig2d, ax2d = plt.subplots(figsize=(8, 6))
+  # h, xedges, yedges, img = ax2d.hist2d(smear_summed.flatten(), aligned_deconv_q.flatten(),
+  #                                       bins=40, range=[[0, 10], [0, 10]], norm=LogNorm())
+  # fig2d.colorbar(img, ax=ax2d)
+  # ax2d.set_xlabel('Smeared True (summed)')
+  # ax2d.set_ylabel('Deconvolved')
+  # ax2d.set_title('2D Histogram: Smeared True vs Deconvolved (aligned)')
+  # fig2d.savefig(f'{prefix}_hist_2d.png')
+  # plt.close(fig2d)
 
   # Build hits grid on same coarse grid as aligned_deconv_q
   adc_hold_delay = int(f['adc_hold_delay'])
@@ -165,8 +177,8 @@ for ievent in range(1):
       smear_summed[mask], aligned_deconv_q[mask],
       bins=40, range=[[0, 10], [0, 10]], norm=LogNorm())
   fig2dh.colorbar(img, ax=ax2dh)
-  ax2dh.set_xlabel('True Charge (smeared)')
-  ax2dh.set_ylabel('Hits Charge')
+  ax2dh.set_xlabel('True Charge (smeared) [ke-/pixel/1.5us]')
+  ax2dh.set_ylabel('Hits Charge [ke-/pixel/1.5us]')
   ax2dh.set_title(f'True Charge vs Hits (voxels with hits > {threshold})')
   fig2dh.savefig(f'{prefix}_hist_2d_hits.png')
   plt.close(fig2dh)
@@ -219,7 +231,7 @@ for ievent in range(1):
           fig_peak_signed, ax_peak_signed = plt.subplots(figsize=(8, 6))
           bins_signed = np.arange(signed_dists.min() - 0.5, signed_dists.max() + 1.5, 1.0) if signed_dists.size > 0 else [0]
           ax_peak_signed.hist(signed_dists, bins=bins_signed, alpha=0.7)
-          ax_peak_signed.set_xlabel('Signed peak index distance (smeared_peak - deconv_peak) [bins]')
+          ax_peak_signed.set_xlabel('Signed peak index distance (smeared_peak - deconv_peak) [coarse bins]')
           ax_peak_signed.set_ylabel('Count')
           ax_peak_signed.set_title(f'Peak index signed distance (n={signed_dists.size}) for smeared_true > {threshold}')
 
@@ -246,7 +258,7 @@ for ievent in range(1):
                   # Scatter plot
                   fig_scatter, ax_scatter = plt.subplots(figsize=(8, 6))
                   ax_scatter.scatter(signed_dists, true_charge_at_peak, alpha=0.6)
-                  ax_scatter.set_xlabel('Signed peak index distance (smeared_peak - deconv_peak) [coarse]')
+                  ax_scatter.set_xlabel('Signed peak index distance (smeared_peak - deconv_peak) [coarse bins]')
                   ax_scatter.set_ylabel('Smeared true charge at smeared peak [units]')
                   ax_scatter.set_title(f'Signed distance vs smeared-true charge at peak (n={signed_dists.size})')
                   fig_scatter.tight_layout()
@@ -256,8 +268,8 @@ for ievent in range(1):
                   # Scatter plot: distances_scatter
                   fig_scatter, ax_scatter = plt.subplots(figsize=(8, 6))
                   ax_scatter.scatter(masked_smear_peaks, masked_deconv_peaks, alpha=0.6)
-                  ax_scatter.set_xlabel('smeared peak index (coarse)')
-                  ax_scatter.set_ylabel('deconv peak index (coarse)')
+                  ax_scatter.set_xlabel('smeared peak index (coarse bins)')
+                  ax_scatter.set_ylabel('deconv peak index (coarse bins)')
                   ax_scatter.set_title(f'Peak index correlation (n={signed_dists.size})')
                   fig_scatter.tight_layout()
                   fig_scatter.savefig(f'{prefix}_distances_scatter.png')
@@ -272,7 +284,7 @@ for ievent in range(1):
                   bins_y = np.linspace(0.0, max(1.0, y_max), 40)
                   h2, xedges2, yedges2, img2 = ax2dh_sd_tc.hist2d(signed_dists, true_charge_at_peak, bins=[bins_x, bins_y], norm=LogNorm())
                   fig2dh_sd_tc.colorbar(img2, ax=ax2dh_sd_tc)
-                  ax2dh_sd_tc.set_xlabel('Signed peak index distance (smeared_peak - deconv_peak) [coarse]')
+                  ax2dh_sd_tc.set_xlabel('Signed peak index distance (smeared_peak - deconv_peak) [coarse bins]')
                   ax2dh_sd_tc.set_ylabel('Smeared true charge at smeared peak [units]')
                   ax2dh_sd_tc.set_title(f'2D: Signed distance vs smeared-true charge at peak (n={signed_dists.size})')
                   fig2dh_sd_tc.tight_layout()
@@ -284,14 +296,3 @@ for ievent in range(1):
   except Exception as e:
       print("Failed to compute peak-distance histogram:", e)
 
-
-plt.figure(figsize=(10, 6))
-plt.hist(filtered_smeared_true, label='Smeared True Projection', range=(0, 40), bins=40, alpha=0.5)
-plt.hist(filtered_deconv_q, label='Deconvolved Projection', range=(0, 40), bins=40, alpha=0.5)
-#plt.hist(filtered_totQ, label='Total Charge from Hits', range=(0, 40), bins=40, alpha=0.5)
-plt.xlabel('Charge Projection')
-plt.ylabel('Count')
-plt.title('Comparison of Smeared True Projection and Deconvolved Projection')
-plt.legend()
-plt.grid()
-plt.savefig(f'{prefix}_hist_deconv_q.png')
