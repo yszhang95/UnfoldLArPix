@@ -101,6 +101,7 @@ def step1_deconv(cfg, cwd: Path, dry: bool) -> None:
                      "--sigma-pxl", str(sigma_pxl),
                      "--input-file", input_file,
                      "--field-response", cfg.field_response,
+                     "--tpc-id", "0",
                      "--output-suffix", output_suffix],
                     dry, cwd)
 
@@ -132,7 +133,7 @@ def step2_export(cfg, cwd: Path, dry: bool) -> None:
 
 
 def step3_copy(cfg, cwd: Path, dry: bool) -> None:
-    """Copy all exported JSONs to dest-dir."""
+    """Copy all exported JSONs and NPZs to dest-dir."""
     print(f"\n=== Step 3: Copy to {cfg.dest_dir} ===")
     dest = Path(cfg.dest_dir)
     if not dry:
@@ -146,6 +147,17 @@ def step3_copy(cfg, cwd: Path, dry: bool) -> None:
             sp = fmt_sigma_pxl(sigma_pxl).lstrip('0')
             for ver in cfg.versions:
                 output_suffix = f"{file_label}_s{ss}_sp{sp}"
+
+                # Copy NPZ
+                npz = f"deconv_positron{'_v2' if ver == 'v2' else ''}_{output_suffix}_event_0_0.npz"
+                npz_src = cwd / npz
+                print(f"  cp {npz} -> {dest}/")
+                if not dry:
+                    if npz_src.exists():
+                        shutil.copy2(npz_src, dest / npz)
+                    else:
+                        print(f"    Warning: {npz} not found")
+
                 for thr in cfg.thresholds:
                     ts = fmt_threshold(thr)
                     prefix = f"{ver}_{output_suffix}_t{ts}"
@@ -155,7 +167,10 @@ def step3_copy(cfg, cwd: Path, dry: bool) -> None:
                         dst = dest / f"0-{prefix}{suffix}.json"
                         print(f"  cp {src.name} -> {dest}/")
                         if not dry:
-                            shutil.copy2(src, dst)
+                            if src.exists():
+                                shutil.copy2(src, dst)
+                            else:
+                                print(f"    Warning: {src.name} not found")
 
 
 def step4_plots(cfg, cwd: Path, dry: bool) -> None:
@@ -258,8 +273,9 @@ def main():
     if not cfg.dry_run:
         dest = Path(cfg.dest_dir)
         if dest.exists():
-            n = len(list(dest.glob("*.json")))
-            print(f"  JSON files in {dest}: {n}")
+            n_json = len(list(dest.glob("*.json")))
+            n_npz = len(list(dest.glob("*.npz")))
+            print(f"  Files in {dest}: {n_json} JSONs, {n_npz} NPZs")
         plot_dir = Path(cfg.plot_dir)
         if plot_dir.exists():
             n = len(list(plot_dir.glob("*.png")))
