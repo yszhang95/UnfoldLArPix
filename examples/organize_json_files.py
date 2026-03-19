@@ -42,8 +42,8 @@ def extract_pattern_groups(json_files: List[Path]) -> Dict[str, List[Path]]:
     Filter JSON files by pattern and group them by extracted identifier.
     
     Matches files with patterns:
-    - 0-.*_sp(?:\d+)_spp(?:\d+)_t\d+p\d+\.json$
-    - 0-.*_sp(?:\d+)_spp(?:\d+)_t\d+p\d+_smeared\.json$
+    - 0-.*_sp(?:\\d+)_spp(?:\\d+)_t\\d+p\\d+\\.json$
+    - 0-.*_sp(?:\\d+)_spp(?:\\d+)_t\\d+p\\d+_smeared\\.json$
     
     Parameters
     ----------
