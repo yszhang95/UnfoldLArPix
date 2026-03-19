@@ -12,14 +12,18 @@ This script:
 6. Writes a "create_eventsets.py" script into the destination directory that is
    intended to be piped into an interactive Python shell to create EventSet
    objects for each matched subdirectory (alias/desc set to the subdir name).
+7. Writes a "delete_eventsets.py" script into the destination directory that is
+   intended to be piped into an interactive Python shell to delete EventSet
+   objects by alias for each matched subdirectory.
 
-The generated create_eventsets.py is designed to be executed by piping it into
-an interactive Python interpreter, e.g.:
+The generated create_eventsets.py and delete_eventsets.py scripts are designed
+to be executed by piping them into an interactive Python interpreter, e.g.:
 
     cat create_eventsets.py | python -i
+    cat delete_eventsets.py | python -i
 
-This allows the created Django objects to be inspected interactively after
-the script runs.
+This allows the created/deleted Django objects to be inspected interactively
+after the script runs.
 """
 
 import argparse
@@ -250,6 +254,74 @@ def write_create_eventsets_script(
         print(f"  cat {script_path} | python -i")
 
 
+def write_delete_eventsets_script(
+    dest_dir: Path,
+    identifiers: List[str],
+    dry_run: bool = False
+) -> None:
+    """
+    Write a script into dest_dir/delete_eventsets.py that, when piped into an
+    interactive Python shell, will delete EventSet objects for each identifier
+    using EventSet.objects.filter(alias=<alias>).delete().
+
+    The generated script contains top-level code (no main guard) so that it
+    executes immediately when piped into the interpreter. Example usage:
+
+        cat delete_eventsets.py | python -i
+
+    The script will attempt to delete EventSet objects for each identifier and
+    will print results or errors for each attempt.
+    """
+    script_path = dest_dir / "delete_eventsets.py"
+
+    # Build identifiers list literal safely
+    safe_idents = []
+    for identifier in sorted(identifiers):
+        safe = identifier.replace("\\", "\\\\").replace('"', '\\"')
+        safe_idents.append(f'"{safe}"')
+    idents_literal = "[" + ", ".join(safe_idents) + "]"
+
+    script_lines = [
+        "# Generated script intended to be piped into an interactive Python shell.",
+        "# Usage example: cat delete_eventsets.py | python -i",
+        "from events.models import EventSet",
+        "import django",
+        "",
+        f"IDENTIFIERS = {idents_literal}",
+        "",
+        "for subdir in IDENTIFIERS:",
+        "    try:",
+        "        # Delete EventSet(s) with matching alias",
+        "        deleted_count, _ = EventSet.objects.filter(alias=subdir).delete()",
+        "        print(f'Deleted {deleted_count} objects for alias={subdir}')",
+        "    except Exception as e:",
+        "        import traceback",
+        "        traceback.print_exc()",
+        "        print(f'Failed to delete EventSet(s) for {subdir}: {e}')",
+        "",
+        "# End of generated script",
+        ""
+    ]
+
+    script_content = "\n".join(script_lines)
+
+    if dry_run:
+        print(f"[DRY RUN] Would write delete_eventsets script to: {script_path}")
+        print("--- Script content start ---")
+        print(script_content)
+        print("--- Script content end ---")
+    else:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        script_path.write_text(script_content)
+        # Make the script readable/executable for convenience (execution via piping
+        # doesn't require the executable bit, but set it anyway).
+        mode = script_path.stat().st_mode
+        script_path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        print(f"Wrote delete_eventsets script to: {script_path}")
+        print("To execute (piped into an interactive Python shell):")
+        print(f"  cat {script_path} | python -i")
+
+
 def main():
     """Main entry point for the script."""
     parser = argparse.ArgumentParser(
@@ -314,15 +386,18 @@ def main():
 
     organize_files(groups, args.dest_dir, dry_run=args.dry_run)
 
-    # After organizing files, write the create_eventsets.py script into dest_dir.
-    # The generated script is top-level so it can be piped into an interactive
-    # Python shell (see write_create_eventsets_script docstring).
+    # After organizing files, write the create_eventsets.py and delete_eventsets.py
+    # scripts into dest_dir. The generated scripts are top-level so they can be
+    # piped into an interactive Python shell (see write_* docstrings).
     identifiers = list(groups.keys())
     write_create_eventsets_script(args.dest_dir, identifiers, dry_run=args.dry_run)
+    write_delete_eventsets_script(args.dest_dir, identifiers, dry_run=args.dry_run)
 
     print(f"\nProcessed {len(groups)} pattern groups successfully")
     if not args.dry_run:
-        print(f"A script to create EventSet entries was written to: {args.dest_dir / 'create_eventsets.py'}")
+        print(f"Scripts to create/delete EventSet entries were written to: {args.dest_dir}")
+        print(f"  {args.dest_dir / 'create_eventsets.py'}")
+        print(f"  {args.dest_dir / 'delete_eventsets.py'}")
 
 
 if __name__ == "__main__":
