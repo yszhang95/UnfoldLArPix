@@ -395,9 +395,11 @@ def update_display(loaded_data, threshold, color_scale):
                 smear_binned[ix_d:ix_d+nx_sub, iy_d:iy_d+ny_sub, k_start:k_end] = sub_binned
                 valid_mask[ix_d:ix_d+nx_sub, iy_d:iy_d+ny_sub, k_start:k_end] = True
 
-            # Calculate residuals ONLY for voxels where deconv_q > threshold
-            # AND the binned truth is within a valid region (avoiding edges)
-            mask_active = (deconv_q > threshold) & valid_mask
+            # Calculate residuals for ALL voxels where deconv_q > threshold
+            mask_active = (deconv_q > threshold)
+            
+            # For voxels where truth is not valid (edges), smear_binned is 0,
+            # so (deconv_q - smear_binned) correctly gives deconv_q.
             residuals = (deconv_q[mask_active] - smear_binned[mask_active]).flatten()
             
             if residuals.size > 0:
@@ -416,7 +418,7 @@ def update_display(loaded_data, threshold, color_scale):
                     height=400
                 )
             else:
-                fig_residual.add_annotation(text="No voxels in valid truth region above threshold")
+                fig_residual.add_annotation(text="No voxels above threshold")
         except Exception as e:
             import traceback
             traceback.print_exc()
