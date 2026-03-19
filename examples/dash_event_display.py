@@ -443,9 +443,10 @@ def toggle_truth_shift(n_clicks, current_shift):
     Output('waveform-display', 'figure'),
     Input('selected-coords-store', 'data'),
     Input('truth-shift-store', 'data'),
+    Input('threshold-slider', 'value'),
     State('loaded-data-store', 'data'),
 )
-def display_waveform(selected_coords, truth_shift, loaded_data):
+def display_waveform(selected_coords, truth_shift, threshold, loaded_data):
     """Display waveform for selected voxel with aligned smeared_true data."""
 
     if not selected_coords or not loaded_data or not loaded_data.get('loaded'):
@@ -495,12 +496,21 @@ def display_waveform(selected_coords, truth_shift, loaded_data):
         # Add deconv_q trace
         fig.add_trace(go.Scatter(
             x=times_deconv,
-            y=deconv_waveform / dt_deconv,  # Normalize by downsample factor
+            # y=deconv_waveform / dt_deconv,  # Normalize by downsample factor
+            y=deconv_waveform,  # per adc_hold_delay
             mode='lines+markers',
             name=f'deconv_q (global: {pxl_x}, {pxl_y}, local: {x_local}, {y_local})',
             line=dict(color='blue', width=2),
             marker=dict(size=4),
         ))
+
+        fig.add_hline(
+            y=threshold,
+            line_dash="dash",
+            annotation_text=f"threshold: {threshold:.1f}",
+            annotation_position="top left",
+            line_color="green"
+        )
 
         # Try to add smeared_true at aligned global position
         try:
@@ -519,9 +529,10 @@ def display_waveform(selected_coords, truth_shift, loaded_data):
                 shift_label = f" (shifted +{dt_deconv:.1f} ticks)" if truth_shift else ""
                 fig.add_trace(go.Scatter(
                     x=times_smear,
-                    y=smear_waveform,
+                    # y=smear_waveform,
+                    y=smear_waveform * dt_deconv, # Scale to ADC_HOLD_DELAY
                     mode='lines+markers',
-                    name=f'smeared_true (global: {pxl_x}, {pxl_y}){shift_label}',
+                    name=f'smeared_true (global: {pxl_x}, {pxl_y}){shift_label} x {dt_deconv}',
                     line=dict(color='red', width=2),
                     marker=dict(size=4),
                 ))
@@ -538,7 +549,7 @@ def display_waveform(selected_coords, truth_shift, loaded_data):
         fig.update_layout(
             title=f"Waveforms: Global pixel ({pxl_x}, {pxl_y})",
             xaxis_title="Time (ticks, 50ns)",
-            yaxis_title="Charge per 50ns",
+            yaxis_title=f"Charge per {dt_deconv} x 50ns",
             height=600,
             hovermode='x unified',
             legend=dict(x=0.01, y=0.99),
