@@ -65,18 +65,11 @@ app.layout = dbc.Container([
             ),
         ], width=12, lg=6),
         dbc.Col([
-            html.Label("Color Scale:"),
-            dcc.RadioItems(
-                id='color-scale',
-                options=[
-                    {'label': ' Linear', 'value': 'linear'},
-                    {'label': ' Log', 'value': 'log'},
-                ],
-                value='linear',
-                inline=True
-            ),
+            # Removed log scale toggle from here
         ], width=12, lg=6),
     ], className="mt-3"),
+
+    dcc.Store(id='log-scale-store', data=False), # False = Linear, True = Log
 
     dbc.Row([
         dbc.Col([
@@ -99,7 +92,25 @@ app.layout = dbc.Container([
                     dcc.Graph(id='residual-histogram', style={'height': '400px'})
                 ]
             )
-        ], width=12)
+        ], width=12, lg=6),
+        dbc.Col([
+            html.Div([
+                dbc.Button(
+                    "Log Scale: OFF",
+                    id='toggle-log-scale-btn',
+                    color="secondary",
+                    size="sm",
+                    className="mb-2"
+                ),
+                dcc.Loading(
+                    id="correlation-loading",
+                    type="default",
+                    children=[
+                        dcc.Graph(id='correlation-histogram', style={'height': '400px'})
+                    ]
+                )
+            ])
+        ], width=12, lg=6)
     ], className="mt-2"),
 
     dbc.Row([
@@ -250,30 +261,47 @@ def load_npz_file(filename):
 
 
 @app.callback(
+    Output('log-scale-store', 'data'),
+    Output('toggle-log-scale-btn', 'children'),
+    Output('toggle-log-scale-btn', 'color'),
+    Input('toggle-log-scale-btn', 'n_clicks'),
+    State('log-scale-store', 'data'),
+    prevent_initial_call=True
+)
+def toggle_log_scale(n_clicks, is_log):
+    """Toggle the log scale state and update button appearance."""
+    if is_log:
+        return False, "Log Scale: OFF", "secondary"
+    else:
+        return True, "Log Scale: ON", "success"
+
+
+@app.callback(
     Output('event-display', 'figure'),
     Output('residual-histogram', 'figure'),
+    Output('correlation-histogram', 'figure'),
     Output('stats-display', 'children'),
     Input('loaded-data-store', 'data'),
     Input('threshold-slider', 'value'),
-    Input('color-scale', 'value'),
+    Input('log-scale-store', 'data'),
 )
-def update_display(loaded_data, threshold, color_scale):
-    """Update event display and residuals histogram based on threshold and loaded data."""
+def update_display(loaded_data, threshold, is_log):
+    """Update event display, residuals histogram, and correlation histogram based on threshold and loaded data."""
 
     if not loaded_data or not loaded_data.get('loaded'):
-        return go.Figure().add_annotation(text="No data loaded"), go.Figure().add_annotation(text="No data loaded"), html.Div("No data to display")
+        return go.Figure().add_annotation(text="No data loaded"), go.Figure().add_annotation(text="No data loaded"), go.Figure().add_annotation(text="No data loaded"), html.Div("No data to display")
 
     if loaded_data.get('error'):
-        return go.Figure().add_annotation(text=f"Error: {loaded_data['error']}"), go.Figure().add_annotation(text="Error"), html.Div(f"Error: {loaded_data['error']}")
+        return go.Figure().add_annotation(text=f"Error: {loaded_data['error']}"), go.Figure().add_annotation(text="Error"), go.Figure().add_annotation(text="Error"), html.Div(f"Error: {loaded_data['error']}")
 
     # Get data from cache
     filename = loaded_data.get('filename')
     if filename not in _loaded_npz_cache:
-        return go.Figure().add_annotation(text="Data not in cache"), go.Figure().add_annotation(text="Data not in cache"), html.Div("Data not in cache")
+        return go.Figure().add_annotation(text="Data not in cache"), go.Figure().add_annotation(text="Data not in cache"), go.Figure().add_annotation(text="Data not in cache"), html.Div("Data not in cache")
 
     npz_data = _loaded_npz_cache[filename]
     if 'deconv_q' not in npz_data:
-        return go.Figure().add_annotation(text="No deconv_q in file"), go.Figure().add_annotation(text="No deconv_q in file"), html.Div("No deconv_q in file")
+        return go.Figure().add_annotation(text="No deconv_q in file"), go.Figure().add_annotation(text="No deconv_q in file"), go.Figure().add_annotation(text="No deconv_q in file"), html.Div("No deconv_q in file")
 
     deconv_q = np.array(npz_data['deconv_q'])
 
@@ -282,8 +310,9 @@ def update_display(loaded_data, threshold, color_scale):
     coords = np.where(mask)
     charges = deconv_q[mask]
 
-    # Histogram Figure (Initialize with empty)
+    # Histogram Figures
     fig_residual = go.Figure()
+    fig_correlation = go.Figure()
 
     if len(charges) == 0:
         fig = go.Figure().add_annotation(
@@ -293,18 +322,14 @@ def update_display(loaded_data, threshold, color_scale):
             html.P(f"Total voxels: {deconv_q.size}"),
             html.P(f"Voxels above threshold {threshold}: 0"),
         ])
-        return fig, fig_residual.add_annotation(text="No data above threshold"), stats
+        return fig, fig_residual.add_annotation(text="No data above threshold"), fig_correlation.add_annotation(text="No data"), stats
 
     # Prepare plot data
     x, y, z = coords
 
-    # Handle color scale
-    if color_scale == 'log':
-        color_vals = np.log10(charges + 1)
-        colorbar_title = "log10(Q+1)"
-    else:
-        color_vals = charges
-        colorbar_title = "Charge"
+    # 3D Plot always in Linear Scale (as requested)
+    color_vals = charges
+    colorbar_title = "Charge"
 
     fig = go.Figure(data=[go.Scatter3d(
         x=x,
@@ -400,7 +425,9 @@ def update_display(loaded_data, threshold, color_scale):
             
             # For voxels where truth is not valid (edges), smear_binned is 0,
             # so (deconv_q - smear_binned) correctly gives deconv_q.
-            residuals = (deconv_q[mask_active] - smear_binned[mask_active]).flatten()
+            deconv_active = deconv_q[mask_active].flatten()
+            smear_active = smear_binned[mask_active].flatten()
+            residuals = (deconv_active - smear_active)
             
             if residuals.size > 0:
                 fig_residual.add_trace(go.Histogram(
@@ -417,15 +444,84 @@ def update_display(loaded_data, threshold, color_scale):
                     bargap=0.05,
                     height=400
                 )
+
+                # 2D Correlation Histogram
+                x_data = smear_active
+                y_data = deconv_active
+                
+                # Axes are always linear
+                x_label = "Binned Smeared True Charge"
+                y_label = "Deconvolved Charge"
+                title_log = " (Log Color Scale)" if is_log else ""
+
+                # For log scale, we use a custom logarithmic colorscale if is_log is True
+                # because Plotly's coloraxis does not support type='log' directly.
+                # However, go.Histogram2d doesn't allow us to log the z-values (counts) easily
+                # without pre-calculating them. 
+                # Alternative: Use pre-calculated histogram with Heatmap.
+
+                hist, xedges, yedges = np.histogram2d(x_data, y_data, bins=50)
+                # Transpose for Heatmap (z is [row][col], row=y, col=x)
+                z_data = hist.T
+                
+                # Mask zeros for log scale
+                if is_log:
+                    z_display = np.where(z_data > 0, np.log10(z_data), np.nan)
+                    colorbar_ticks = dict(
+                        title='Count',
+                        tickvals=[0, 1, 2, 3, 4],
+                        ticktext=['1', '10', '100', '1k', '10k']
+                    )
+                else:
+                    z_display = np.where(z_data > 0, z_data, np.nan)
+                    colorbar_ticks = dict(title='Count')
+
+                fig_correlation.add_trace(go.Heatmap(
+                    x=0.5*(xedges[:-1] + xedges[1:]),
+                    y=0.5*(yedges[:-1] + yedges[1:]),
+                    z=z_display,
+                    colorscale='Viridis',
+                    colorbar=colorbar_ticks,
+                    showscale=True,
+                    hoverinfo='x+y+z',
+                ))
+                
+                # Add 1:1 line
+                if x_data.size > 0:
+                    max_val = max(x_data.max(), y_data.max())
+                    line_coords = [0, max_val]
+                else:
+                    line_coords = [0, 10]
+
+                fig_correlation.add_trace(go.Scatter(
+                    x=line_coords,
+                    y=line_coords,
+                    mode='lines',
+                    line=dict(color='white', dash='dash'),
+                    name='1:1 Line',
+                    showlegend=False
+                ))
+
+                fig_correlation.update_layout(
+                    title=f"Correlation: deconv_q vs smear_binned (Q > {threshold}){title_log}",
+                    xaxis_title=x_label,
+                    yaxis_title=y_label,
+                    xaxis_type="linear",
+                    yaxis_type="linear",
+                    height=400
+                )
             else:
                 fig_residual.add_annotation(text="No voxels above threshold")
+                fig_correlation.add_annotation(text="No voxels above threshold")
         except Exception as e:
             import traceback
             traceback.print_exc()
             print(f"Error computing residuals: {e}")
             fig_residual.add_annotation(text=f"Error computing residuals: {e}")
+            fig_correlation.add_annotation(text=f"Error computing correlation: {e}")
     else:
         fig_residual.add_annotation(text="smeared_true or alignment data missing")
+        fig_correlation.add_annotation(text="smeared_true or alignment data missing")
 
     # Statistics
     stats = dbc.Row([
@@ -447,7 +543,7 @@ def update_display(loaded_data, threshold, color_scale):
         ], width=12, md=4),
     ])
 
-    return fig, fig_residual, stats
+    return fig, fig_residual, fig_correlation, stats
 
 
 @app.callback(
