@@ -21,6 +21,7 @@ parser.add_argument("--input-file", default="data/pgun_positron_3gev_tred_noises
                     help="Input NPZ file produced by tred")
 parser.add_argument("--field-response", default="/srv/storage1/yousen/tred_workspace/response_44_v2a_full_25x25pixel_tred.npz",
                     help="Field response NPZ file")
+parser.add_argument("--effq-offset", default=0, type=int, help='activate when use truncated waveform')
 args = parser.parse_args()
 
 loader = DataLoader(args.input_file)
@@ -113,6 +114,7 @@ for event in loader.iter_events():
     hwf_block_data = blocks
     gaussian_kernel = gaussian_filter(n=hwf_block_data.shape[-1], dt=readout_config.adc_hold_delay,
                                       sigma=sigma)
+    effq_offset = args.effq_offset
 
     gaussian_kernel = gaussian_filter_3d((
         hwf_block_data.shape[0]+fr_full_k.shape[0]-1,
@@ -127,6 +129,7 @@ for event in loader.iter_events():
 
     smear_offset, smeared_true = gaus_smear_true_3d(event.effq.location, event.effq.data, width=np.array([sigma_pxl, sigma_pxl, sigma]))
     smear_offset[-1] += readout_config.adc_hold_delay
+    smear_offset[-1] += effq_offset
 
     print(f'smear_offset: {smear_offset}, boffset: {boffset}, '
           f'sum_deconv_q: {np.sum(deconv_q)}, '
