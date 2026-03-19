@@ -89,7 +89,7 @@ def align_voxel_blocks(
   reshaped = aligned_fine.reshape(refine_factor)
   print(sub_axes)
   fine_summed = reshaped.sum(axis=tuple(sub_axes))
-  
+
   output_offset = target_lower + bin_size if bound_to_upper else target_lower
   return aligned_fine, aligned_coarse, fine_summed, output_offset
 
@@ -141,6 +141,7 @@ for ievent in range(1):
   axs[2].set_xlabel('Smeared - Deconvolved')
   plt.tight_layout()
   fig.savefig(f'{prefix}_hist_diff.png')
+  plt.close(fig)
 
   from matplotlib.colors import LogNorm
   fig2d, ax2d = plt.subplots(figsize=(8, 6))
@@ -151,6 +152,7 @@ for ievent in range(1):
   ax2d.set_ylabel('Deconvolved')
   ax2d.set_title('2D Histogram: Smeared True vs Deconvolved (aligned)')
   fig2d.savefig(f'{prefix}_hist_2d.png')
+  plt.close(fig2d)
 
   # Build hits grid on same coarse grid as aligned_deconv_q
   adc_hold_delay = int(f['adc_hold_delay'])
@@ -165,6 +167,7 @@ for ievent in range(1):
   ax2dh.set_ylabel('Hits Charge')
   ax2dh.set_title(f'True Charge vs Hits (voxels with hits > {threshold})')
   fig2dh.savefig(f'{prefix}_hist_2d_hits.png')
+  plt.close(fig2dh)
 
   # New plot: histogram of distances between peak time indices of aligned smeared true and aligned deconv
   # Consider only spatial voxels where the smeared true sequence exceeds the threshold (at any time).
@@ -220,17 +223,6 @@ for ievent in range(1):
           fig_peak_signed.tight_layout()
           fig_peak_signed.savefig(f'{prefix}_hist_peak_signed_dist.png')
 
-          # Plot histogram of absolute distances
-          fig_peak_abs, ax_peak_abs = plt.subplots(figsize=(8, 6))
-          max_abs = int(abs_dists.max()) if abs_dists.size > 0 else 0
-          bins_abs = np.arange(0, max_abs + 1.5, 1.0)
-          ax_peak_abs.hist(abs_dists, bins=bins_abs, alpha=0.7)
-          ax_peak_abs.set_xlabel('Absolute peak index distance [bins]')
-          ax_peak_abs.set_ylabel('Count')
-          ax_peak_abs.set_title(f'Peak index absolute distance (n={abs_dists.size}) for smeared_true > {threshold}')
-          fig_peak_abs.tight_layout()
-          fig_peak_abs.savefig(f'{prefix}_hist_peak_abs_dist.png')
-
           # New 2D plot: signed distance vs true charge at smeared peak
           try:
               if signed_dists.size == 0:
@@ -239,11 +231,22 @@ for ievent in range(1):
                   # Scatter plot
                   fig_scatter, ax_scatter = plt.subplots(figsize=(8, 6))
                   ax_scatter.scatter(signed_dists, true_charge_at_peak, alpha=0.6)
-                  ax_scatter.set_xlabel('Signed peak index distance (smeared_peak - deconv_peak) [bins]')
+                  ax_scatter.set_xlabel('Signed peak index distance (smeared_peak - deconv_peak) [coarse]')
                   ax_scatter.set_ylabel('Smeared true charge at smeared peak [units]')
                   ax_scatter.set_title(f'Signed distance vs smeared-true charge at peak (n={signed_dists.size})')
                   fig_scatter.tight_layout()
                   fig_scatter.savefig(f'{prefix}_signed_vs_true_scatter.png')
+                  plt.close(fig_scatter)
+
+                  # Scatter plot: distances_scatter
+                  fig_scatter, ax_scatter = plt.subplots(figsize=(8, 6))
+                  ax_scatter.scatter(masked_smear_peaks, masked_deconv_peaks, alpha=0.6)
+                  ax_scatter.set_xlabel('smeared peak index (coarse)')
+                  ax_scatter.set_ylabel('deconv peak index (coarse)')
+                  ax_scatter.set_title(f'Peak index correlation (n={signed_dists.size})')
+                  fig_scatter.tight_layout()
+                  fig_scatter.savefig(f'{prefix}_distances_scatter.png')
+                  plt.close(fig_scatter)
 
                   # 2D histogram (log color)
                   fig2dh_sd_tc, ax2dh_sd_tc = plt.subplots(figsize=(8, 6))
@@ -254,11 +257,12 @@ for ievent in range(1):
                   bins_y = np.linspace(0.0, max(1.0, y_max), 40)
                   h2, xedges2, yedges2, img2 = ax2dh_sd_tc.hist2d(signed_dists, true_charge_at_peak, bins=[bins_x, bins_y], norm=LogNorm())
                   fig2dh_sd_tc.colorbar(img2, ax=ax2dh_sd_tc)
-                  ax2dh_sd_tc.set_xlabel('Signed peak index distance (smeared_peak - deconv_peak) [bins]')
+                  ax2dh_sd_tc.set_xlabel('Signed peak index distance (smeared_peak - deconv_peak) [coarse]')
                   ax2dh_sd_tc.set_ylabel('Smeared true charge at smeared peak [units]')
                   ax2dh_sd_tc.set_title(f'2D: Signed distance vs smeared-true charge at peak (n={signed_dists.size})')
                   fig2dh_sd_tc.tight_layout()
                   fig2dh_sd_tc.savefig(f'{prefix}_hist2d_signed_vs_true_charge.png')
+                  plt.close(fig2dh_sd_tc)
           except Exception as e2:
               print("Failed to produce signed_vs_true_charge plots:", e2)
 
