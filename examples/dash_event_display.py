@@ -92,6 +92,18 @@ app.layout = dbc.Container([
 
     dbc.Row([
         dbc.Col([
+            dcc.Loading(
+                id="residual-loading",
+                type="default",
+                children=[
+                    dcc.Graph(id='residual-histogram', style={'height': '400px'})
+                ]
+            )
+        ], width=12)
+    ], className="mt-2"),
+
+    dbc.Row([
+        dbc.Col([
             html.Div(id='stats-display', className="mt-3")
         ], width=12)
     ]),
@@ -239,28 +251,29 @@ def load_npz_file(filename):
 
 @app.callback(
     Output('event-display', 'figure'),
+    Output('residual-histogram', 'figure'),
     Output('stats-display', 'children'),
     Input('loaded-data-store', 'data'),
     Input('threshold-slider', 'value'),
     Input('color-scale', 'value'),
 )
 def update_display(loaded_data, threshold, color_scale):
-    """Update event display based on threshold and loaded data."""
+    """Update event display and residuals histogram based on threshold and loaded data."""
 
     if not loaded_data or not loaded_data.get('loaded'):
-        return go.Figure().add_annotation(text="No data loaded"), html.Div("No data to display")
+        return go.Figure().add_annotation(text="No data loaded"), go.Figure().add_annotation(text="No data loaded"), html.Div("No data to display")
 
     if loaded_data.get('error'):
-        return go.Figure().add_annotation(text=f"Error: {loaded_data['error']}"), html.Div(f"Error: {loaded_data['error']}")
+        return go.Figure().add_annotation(text=f"Error: {loaded_data['error']}"), go.Figure().add_annotation(text="Error"), html.Div(f"Error: {loaded_data['error']}")
 
     # Get data from cache
     filename = loaded_data.get('filename')
     if filename not in _loaded_npz_cache:
-        return go.Figure().add_annotation(text="Data not in cache"), html.Div("Data not in cache")
+        return go.Figure().add_annotation(text="Data not in cache"), go.Figure().add_annotation(text="Data not in cache"), html.Div("Data not in cache")
 
     npz_data = _loaded_npz_cache[filename]
     if 'deconv_q' not in npz_data:
-        return go.Figure().add_annotation(text="No deconv_q in file"), html.Div("No deconv_q in file")
+        return go.Figure().add_annotation(text="No deconv_q in file"), go.Figure().add_annotation(text="No deconv_q in file"), html.Div("No deconv_q in file")
 
     deconv_q = np.array(npz_data['deconv_q'])
 
@@ -268,6 +281,9 @@ def update_display(loaded_data, threshold, color_scale):
     mask = deconv_q > threshold
     coords = np.where(mask)
     charges = deconv_q[mask]
+
+    # Histogram Figure (Initialize with empty)
+    fig_residual = go.Figure()
 
     if len(charges) == 0:
         fig = go.Figure().add_annotation(
@@ -277,7 +293,7 @@ def update_display(loaded_data, threshold, color_scale):
             html.P(f"Total voxels: {deconv_q.size}"),
             html.P(f"Voxels above threshold {threshold}: 0"),
         ])
-        return fig, stats
+        return fig, fig_residual.add_annotation(text="No data above threshold"), stats
 
     # Prepare plot data
     x, y, z = coords
@@ -320,6 +336,95 @@ def update_display(loaded_data, threshold, color_scale):
         hovermode='closest',
     )
 
+    # Compute Residuals for Histogram (Vectorized for all channels)
+    if 'smeared_true' in npz_data and 'smear_offset' in npz_data and 'boffset' in npz_data:
+        try:
+            smeared_true = np.array(npz_data['smeared_true'])
+            smear_offset = np.array(npz_data['smear_offset'])
+            boffset = np.array(npz_data['boffset'])
+            dt = int(npz_data.get('adc_downsample_factor', 1))
+
+            # Shape of deconv_q
+            nx_c, ny_c, nt_c = deconv_q.shape
+            
+            # Determine overlapping spatial range
+            # Global coordinates: x = boffset[0] + ix
+            # Fine coordinates: fx = x - smear_offset[0] = ix + boffset[0] - smear_offset[0]
+            dx = int(boffset[0] - smear_offset[0])
+            dy = int(boffset[1] - smear_offset[1])
+            dt0 = int(boffset[2] - smear_offset[2])
+
+            # We want to extract a sub-block of smeared_true that corresponds to deconv_q
+            # and then bin it. 
+            
+            # Initialize binned truth with zeros
+            smear_binned = np.zeros_like(deconv_q)
+            valid_mask = np.zeros_like(deconv_q, dtype=bool)
+            
+            # Determine valid source and destination ranges
+            # Source (smeared_true)
+            fx_s = max(0, dx)
+            fy_s = max(0, dy)
+            
+            # End points
+            fx_e = min(smeared_true.shape[0], dx + nx_c)
+            fy_e = min(smeared_true.shape[1], dy + ny_c)
+            
+            k_start = max(0, int(np.ceil(-dt0 / dt)))
+            k_end = min(nt_c, int(np.floor((smeared_true.shape[2] - dt0) / dt)))
+            
+            if fx_e > fx_s and fy_e > fy_s and k_end > k_start:
+                # Extract relevant spatial slice
+                # For time, we extract exactly the fine bins that will be summed into coarse bins [k_start, k_end)
+                fine_t_start = dt0 + k_start * dt
+                fine_t_end = dt0 + k_end * dt
+                
+                sub_smear = smeared_true[fx_s:fx_e, fy_s:fy_e, fine_t_start:fine_t_end]
+                
+                # Reshape and sum to bin in time
+                # shape becomes (nx_sub, ny_sub, nt_sub_c, dt)
+                nx_sub = fx_e - fx_s
+                ny_sub = fy_e - fy_s
+                nt_sub_c = k_end - k_start
+                
+                sub_binned = sub_smear.reshape(nx_sub, ny_sub, nt_sub_c, dt).sum(axis=-1)
+                
+                # Map back to smear_binned
+                ix_d = fx_s - dx
+                iy_d = fy_s - dy
+                smear_binned[ix_d:ix_d+nx_sub, iy_d:iy_d+ny_sub, k_start:k_end] = sub_binned
+                valid_mask[ix_d:ix_d+nx_sub, iy_d:iy_d+ny_sub, k_start:k_end] = True
+
+            # Calculate residuals ONLY for voxels where deconv_q > threshold
+            # AND the binned truth is within a valid region (avoiding edges)
+            mask_active = (deconv_q > threshold) & valid_mask
+            residuals = (deconv_q[mask_active] - smear_binned[mask_active]).flatten()
+            
+            if residuals.size > 0:
+                fig_residual.add_trace(go.Histogram(
+                    x=residuals,
+                    nbinsx=100,
+                    name="Residuals",
+                    marker_color='orange',
+                    opacity=0.75
+                ))
+                fig_residual.update_layout(
+                    title=f"Residuals: deconv_q - binned_smear (for voxels > {threshold})",
+                    xaxis_title="Residual (Charge units)",
+                    yaxis_title="Count",
+                    bargap=0.05,
+                    height=400
+                )
+            else:
+                fig_residual.add_annotation(text="No voxels in valid truth region above threshold")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"Error computing residuals: {e}")
+            fig_residual.add_annotation(text=f"Error computing residuals: {e}")
+    else:
+        fig_residual.add_annotation(text="smeared_true or alignment data missing")
+
     # Statistics
     stats = dbc.Row([
         dbc.Col([
@@ -340,7 +445,7 @@ def update_display(loaded_data, threshold, color_scale):
         ], width=12, md=4),
     ])
 
-    return fig, stats
+    return fig, fig_residual, stats
 
 
 @app.callback(
