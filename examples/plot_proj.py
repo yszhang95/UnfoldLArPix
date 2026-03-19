@@ -130,17 +130,20 @@ for ievent in range(1):
       bin_size=f['adc_hold_delay'],
       bound_to_upper=False
   )
+  dtus = 0.05 * f['adc_hold_delay']
   print(new_offset, f['boffset'], f['smear_offset'], aligned_smear.shape, aligned_deconv_q.shape, smear_summed.shape)
   fig, axs = plt.subplots(1, 3, figsize=(18, 6))
+  for ax in axs:
+      ax.grid(True)
   axs[0].hist(smear_summed.flatten() - aligned_deconv_q.flatten(), bins=40, range=(-5, 5), alpha=0.5)
-  axs[0].set_xlabel('Smeared - Deconvolved [ke-/pixel/1.5us]')
+  axs[0].set_xlabel(f'Smeared - Deconvolved [ke-/pixel/{dtus}us]')
   axs[0].set_title('All padded hits')
   axs[1].hist((smear_summed - aligned_deconv_q)[smear_summed > threshold].flatten(), bins=40, range=(-5, 5), alpha=0.5, label='Smear sum > {}'.format(threshold))
   axs[1].legend()
-  axs[1].set_xlabel('Smeared - Deconvolved [ke-/pixel/1.5us]')
+  axs[1].set_xlabel(f'Smeared - Deconvolved [ke-/pixel/{dtus}us]')
   axs[2].hist((smear_summed - aligned_deconv_q)[(smear_summed < threshold) & (smear_summed > 0.1)].flatten(), bins=40, range=(-5, 5), alpha=0.5, label='Smear sum > 0.1 & < {}'.format(threshold))
   axs[2].legend()
-  axs[2].set_xlabel('Smeared - Deconvolved [ke-/pixel/1.5us]')
+  axs[2].set_xlabel(f'Smeared - Deconvolved [ke-/pixel/{dtus}us]')
   plt.tight_layout()
   fig.savefig(f'{prefix}_hist_diff.png')
   plt.close(fig)
@@ -151,8 +154,9 @@ for ievent in range(1):
   if np.any(mask_deconv):
       ax_diff_deconv.hist((smear_summed - aligned_deconv_q)[mask_deconv].flatten(), bins=40, range=(-5, 5), alpha=0.7)
       ax_diff_deconv.set_title(f'Smeared - Deconvolved (for Deconv > {threshold})')
-      ax_diff_deconv.set_xlabel('Smeared Sum - Deconvolved Q [ke-/pixel/1.5us]')
+      ax_diff_deconv.set_xlabel(f'Smeared Sum - Deconvolved Q [ke-/pixel/{dtus}us]')
       ax_diff_deconv.set_ylabel('Count')
+      ax_diff_deconv.grid(True)
       fig_diff_deconv.tight_layout()
       fig_diff_deconv.savefig(f'{prefix}_hist_diff_deconv_mask.png')
   plt.close(fig_diff_deconv)
@@ -177,8 +181,8 @@ for ievent in range(1):
       smear_summed[mask], aligned_deconv_q[mask],
       bins=40, range=[[0, 10], [0, 10]], norm=LogNorm())
   fig2dh.colorbar(img, ax=ax2dh)
-  ax2dh.set_xlabel('True Charge (smeared) [ke-/pixel/1.5us]')
-  ax2dh.set_ylabel('Hits Charge [ke-/pixel/1.5us]')
+  ax2dh.set_xlabel(f'True Charge (smeared) [ke-/pixel/{dtus}us]')
+  ax2dh.set_ylabel(f'Hits Charge [ke-/pixel/{dtus}us]')
   ax2dh.set_title(f'True Charge vs Hits (voxels with hits > {threshold})')
   fig2dh.savefig(f'{prefix}_hist_2d_hits.png')
   plt.close(fig2dh)
