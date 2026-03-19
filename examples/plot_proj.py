@@ -220,8 +220,21 @@ for ievent in range(1):
           ax_peak_signed.set_xlabel('Signed peak index distance (smeared_peak - deconv_peak) [bins]')
           ax_peak_signed.set_ylabel('Count')
           ax_peak_signed.set_title(f'Peak index signed distance (n={signed_dists.size}) for smeared_true > {threshold}')
+
+          # Add inset plot excluding masked_deconv_peaks < 10
+          from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+          mask_nozero = (masked_deconv_peaks >= 10)
+          if np.any(mask_nozero):
+              ax_inset = inset_axes(ax_peak_signed, width="40%", height="40%", loc="upper right", borderpad=2)
+              dists_nozero = signed_dists[mask_nozero]
+              bins_nozero = np.arange(dists_nozero.min() - 0.5, dists_nozero.max() + 1.5, 1.0)
+              ax_inset.hist(dists_nozero, bins=bins_nozero, alpha=0.7, color='orange')
+              ax_inset.set_title("Excluding deconv_peak < 10", fontsize=10)
+              ax_inset.tick_params(labelsize=8)
+
           fig_peak_signed.tight_layout()
           fig_peak_signed.savefig(f'{prefix}_hist_peak_signed_dist.png')
+          plt.close(fig_peak_signed)
 
           # New 2D plot: signed distance vs true charge at smeared peak
           try:
