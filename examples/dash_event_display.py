@@ -536,6 +536,52 @@ def display_waveform(selected_coords, truth_shift, threshold, loaded_data):
                     line=dict(color='red', width=2),
                     marker=dict(size=4),
                 ))
+
+                # Add binned smeared_true trace
+                # We want to sum smeared_true in bins of dt_deconv, aligned with deconv_q time bins.
+                # The deconv_q time bins are [t0_deconv + i*dt_deconv, t0_deconv + (i+1)*dt_deconv)
+                # smeared_true samples are at t0_smear + j*1
+                
+                # Calculate relative offset in fine ticks
+                # offset_fine = t0_deconv - t0_smear
+                
+                # To align precisely, we find which fine samples fall into each coarse bin.
+                # j-th fine sample is at t_j = t0_smear + j.
+                # It falls into i-th coarse bin if t0_deconv + i*dt_deconv <= t0_smear + j < t0_deconv + (i+1)*dt_deconv
+                
+                binned_smear = []
+                binned_times = []
+                
+                # Use the same range as deconv_waveform
+                for i in range(len(deconv_waveform)):
+                    t_start = t0_deconv + i * dt_deconv
+                    t_end = t0_deconv + (i + 1) * dt_deconv
+                    
+                    # Indices in smear_waveform that fall into this interval
+                    idx_start = int(np.ceil(t_start - t0_smear))
+                    idx_end = int(np.ceil(t_end - t0_smear))
+                    
+                    # Clamp indices
+                    idx_start = max(0, min(len(smear_waveform), idx_start))
+                    idx_end = max(0, min(len(smear_waveform), idx_end))
+                    
+                    if idx_start < idx_end:
+                        val = np.sum(smear_waveform[idx_start:idx_end])
+                        binned_smear.append(val)
+                        binned_times.append(t_start + dt_deconv) # Plot at upper bound
+                    else:
+                        # No overlapping fine samples for this coarse bin
+                        pass
+
+                if binned_smear:
+                    fig.add_trace(go.Scatter(
+                        x=binned_times,
+                        y=binned_smear,
+                        mode='lines+markers',
+                        name=f'smeared_true_binned (sum over {int(dt_deconv)} ticks)',
+                        line=dict(color='orange', width=3),
+                        marker=dict(size=6, symbol='square'),
+                    ))
             else:
                 # Smeared position out of bounds
                 fig.add_annotation(
