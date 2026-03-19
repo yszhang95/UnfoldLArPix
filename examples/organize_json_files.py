@@ -9,9 +9,17 @@ This script:
 3. Extracts pattern identifiers from filenames
 4. Creates organized subdirectories in the destination
 5. Copies matched JSON pairs to their respective subdirectories
-6. Writes a "create_eventsets.py" script into the destination directory that,
-   when run in a Django environment, will create EventSet objects for each
-   matched subdirectory (alias/desc set to the subdir name).
+6. Writes a "create_eventsets.py" script into the destination directory that is
+   intended to be piped into an interactive Python shell to create EventSet
+   objects for each matched subdirectory (alias/desc set to the subdir name).
+
+The generated create_eventsets.py is designed to be executed by piping it into
+an interactive Python interpreter, e.g.:
+
+    cat create_eventsets.py | python -i
+
+This allows the created Django objects to be inspected interactively after
+the script runs.
 """
 
 import argparse
@@ -173,57 +181,57 @@ def write_create_eventsets_script(
     dry_run: bool = False
 ) -> None:
     """
-    Write a script into dest_dir/create_eventsets.py that creates an EventSet
-    for each identifier. The generated script uses the snippet provided:
-    
-    from events.models import EventSet
-    from django.utils import timezone
+    Write a script into dest_dir/create_eventsets.py that, when piped into an
+    interactive Python shell, will create an EventSet for each identifier.
 
-    eventset = EventSet.objects.create(
-        event_type="positron",
-        num_events=1,
-        energy="3GeV",
-        geometry="2x2",
-        desc="{subdir}",
-        alias="{subdir}",
-        created_at=timezone.now()
-    )
+    The generated script contains top-level code (no main guard) so that it
+    executes immediately when piped into the interpreter. Example usage:
 
-    print(f"Created EventSet id={eventset.id}, alias={eventset.alias}")
+        cat create_eventsets.py | python -i
+
+    The script will attempt to create an EventSet for each identifier and will
+    print results or errors for each attempt.
     """
     script_path = dest_dir / "create_eventsets.py"
 
-    header = """#!/usr/bin/env python3
-from events.models import EventSet
-from django.utils import timezone
-
-def main():
-"""
-    body_lines: List[str] = []
+    # Build identifiers list literal safely
+    safe_idents = []
     for identifier in sorted(identifiers):
-        # sanitize the identifier for embedding in string literal
-        safe_ident = identifier.replace('"', '\\"')
-        block = f"""    # EventSet for {safe_ident}
-    eventset = EventSet.objects.create(
-        event_type="positron",
-        num_events=1,
-        energy="3GeV",
-        geometry="2x2",
-        desc="{safe_ident}",
-        alias="{safe_ident}",
-        created_at=timezone.now()
-    )
-    print(f"Created EventSet id={{eventset.id}}, alias={{eventset.alias}}")
+        # escape backslashes and quotes for safe literal embedding
+        safe = identifier.replace("\\", "\\\\").replace('"', '\\"')
+        safe_idents.append(f'"{safe}"')
+    idents_literal = "[" + ", ".join(safe_idents) + "]"
 
-"""
-        body_lines.append(block)
+    script_lines = [
+        "# Generated script intended to be piped into an interactive Python shell.",
+        "# Usage example: cat create_eventsets.py | python -i",
+        "from events.models import EventSet",
+        "from django.utils import timezone",
+        "",
+        f"IDENTIFIERS = {idents_literal}",
+        "",
+        "for subdir in IDENTIFIERS:",
+        "    try:",
+        "        eventset = EventSet.objects.create(",
+        "            event_type='positron',",
+        "            num_events=1,",
+        "            energy='3GeV',",
+        "            geometry='2x2',",
+        "            desc=subdir,",
+        "            alias=subdir,",
+        "            created_at=timezone.now(),",
+        "        )",
+        "        print(f'Created EventSet id={eventset.id}, alias={eventset.alias}')",
+        "    except Exception as e:",
+        "        import traceback",
+        "        traceback.print_exc()",
+        "        print(f'Failed to create EventSet for {subdir}: {e}')",
+        "",
+        "# End of generated script",
+        ""
+    ]
 
-    footer = """
-if __name__ == "__main__":
-    main()
-"""
-
-    script_content = header + "".join(body_lines) + footer
+    script_content = "\n".join(script_lines)
 
     if dry_run:
         print(f"[DRY RUN] Would write create_eventsets script to: {script_path}")
@@ -233,10 +241,13 @@ if __name__ == "__main__":
     else:
         dest_dir.mkdir(parents=True, exist_ok=True)
         script_path.write_text(script_content)
-        # Make the script executable
+        # Make the script readable/executable for convenience (execution via piping
+        # doesn't require the executable bit, but set it anyway).
         mode = script_path.stat().st_mode
         script_path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         print(f"Wrote create_eventsets script to: {script_path}")
+        print("To execute (piped into an interactive Python shell):")
+        print(f"  cat {script_path} | python -i")
 
 
 def main():
@@ -303,7 +314,9 @@ def main():
 
     organize_files(groups, args.dest_dir, dry_run=args.dry_run)
 
-    # After organizing files, write the create_eventsets.py script into dest_dir
+    # After organizing files, write the create_eventsets.py script into dest_dir.
+    # The generated script is top-level so it can be piped into an interactive
+    # Python shell (see write_create_eventsets_script docstring).
     identifiers = list(groups.keys())
     write_create_eventsets_script(args.dest_dir, identifiers, dry_run=args.dry_run)
 
