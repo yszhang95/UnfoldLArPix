@@ -75,6 +75,7 @@ def integrate_k(kernel: np.ndarray, kticks: int) -> np.ndarray:
 
 
 fr_full_k = integrate_k(fr_full, readout_config.adc_hold_delay)
+# fr_full_k = np.prepend(fr_full_k, 0, axis=-1)
 
 # Iterate over events grouped by (event_id, tpc_id)
 for event in loader.iter_events():
@@ -130,7 +131,8 @@ for event in loader.iter_events():
         raise ValueError()
 
     smear_offset, smeared_true = gaus_smear_true_3d(event.effq.location, event.effq.data, width=np.array([sigma_pxl, sigma_pxl, sigma]))
-    smear_offset[-1] += readout_config.adc_hold_delay
+    # smear_offset[-1] += readout_config.adc_hold_delay
+    boffset[-1] -= readout_config.adc_hold_delay
 
     print(f'smear_offset: {smear_offset}, boffset: {boffset}, '
           f'sum_deconv_q: {np.sum(deconv_q)}, '
