@@ -11,14 +11,14 @@ from unfoldlarpix.hit_to_wf import hits_to_bin_wf, convert_bin_wf_to_blocks
 from unfoldlarpix.deconv import deconv_fft, gaussian_filter, gaussian_filter_3d
 
 from unfoldlarpix import BurstSequence, BurstSequenceProcessor, MergedSequence
+# from unfoldlarpix import BurstSequenceProcessorV2, MergedSequence
 from unfoldlarpix.burst_processor import merged_sequences_to_block
 
 from unfoldlarpix.smear_truth import gaus_smear_true, gaus_smear_true_3d
 
 # Load NPZ file produced by tred
-# loader = DataLoader("data/pgun_muplus_3gev_tred_nburst4_noises.npz")
+loader = DataLoader("data/pgun_muplus_3gev_tred_nburst4_noises.npz")
 # loader = DataLoader("data/pgun_muplus_3gev_tred_nburst4_nonoises_nd_readout.npz")
-loader = DataLoader("data/pgun_positron_3gev_tred_noises_effq_nt1_thres1k_nburst256.npz")
 readout_config = loader.get_readout_config()
 
 fr_processor = FieldResponseProcessor("data/fr_4p4pitch_3.8pix_nogrid_10pathsperpixel.npz", normalized=False)
@@ -82,6 +82,13 @@ for event in loader.iter_events():
         template = np.cumsum(fr_temp),
         threshold = readout_config.threshold
         )
+    # burst_processor = BurstSequenceProcessorV2(
+    #     readout_config.adc_hold_delay,
+    #     tau = readout_config.adc_down_time,
+    #     deadtime = readout_config.csa_reset_time,
+    #     template = np.cumsum(fr_temp),
+    #     threshold = readout_config.threshold
+    #     )
     merged_seqs = burst_processor.process_hits(event.hits)
     print('compensated', sum([np.sum(m.charges) for m in merged_seqs.values()]))
     boffset, bdata = merged_sequences_to_block(merged_seqs, readout_config.adc_hold_delay, npadbin=50)
@@ -93,10 +100,10 @@ for event in loader.iter_events():
     # curr_mask = np.all(event.current.location[:,:2]==cloc[None, :], axis=1)
     # curr = np.squeeze(event.current.data[curr_mask])
 
-    # sigma = 0.005
-    # sigma_pxl = 0.2
-    sigma = 0.002
-    sigma_pxl = 0.8
+    sigma = 0.005
+    sigma_pxl = 0.2
+    # sigma = 0.002
+    # sigma_pxl = 0.8
     hwf_block_data = blocks
     gaussian_kernel = gaussian_filter(n=hwf_block_data.shape[-1], dt=readout_config.adc_hold_delay,
                                       sigma=sigma)
@@ -111,6 +118,7 @@ for event in loader.iter_events():
 
     # smear_offset, smeared_true = gaus_smear_true(event.effq.location, event.effq.data, width=sigma)
     smear_offset, smeared_true = gaus_smear_true_3d(event.effq.location, event.effq.data, width=np.array([sigma_pxl, sigma_pxl, sigma]))
+    boffset[-1] -= readout_config.adc_hold_delay
 
     print(f'smear_offset: {smear_offset}, boffset: {boffset}, '
           f'sum_deconv_q: {np.sum(deconv_q)}, '
@@ -122,7 +130,7 @@ for event in loader.iter_events():
 
 
     geometry = loader.get_geometry(event.tpc_id)
-    np.savez(f"deconv_event_{event.tpc_id}_{event.event_id}.npz",
+    np.savez(f"deconv_muplus_event_{event.tpc_id}_{event.event_id}.npz",
              deconv_q=deconv_q, boffset=boffset,
              smeared_true=smeared_true, smear_offset=smear_offset,
              effq_location=event.effq.location, effq_data=event.effq.data,

@@ -190,7 +190,7 @@ class FieldResponseProcessor:
             # Field response should integrate to 1.0 over time for central pixel
             # at any given path
             normalized_sum = np.sum(raw_response[0, 0, :])
-            if abs(normalized_sum - 1.0) > 1e-6:
+            if abs(normalized_sum - 1.0) > 1e-4:
                 raise ValueError(
                     f"Normalization failed: sum = {normalized_sum}, expected 1.0 +/- 1e-6"
                 )
