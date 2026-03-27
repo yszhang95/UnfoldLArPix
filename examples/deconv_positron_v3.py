@@ -43,19 +43,19 @@ def interval_average_to_block(ticks: np.ndarray, bursts: np.ndarray, tpad=10) ->
     loc_max = [np.max(ticks[:, i]) for i in range(ticks.shape[1])]
     loc_min = np.array(loc_min)
     loc_max = np.array(loc_max)
-    print("loc_min:", loc_min, "loc_max:", loc_max)
+    # print("loc_min:", loc_min, "loc_max:", loc_max)
     shape = [loc_max[i] - loc_min[i] + 1 for i in range(ticks.shape[1])]
-    print(shape)
+    # print(shape)
     if shape[-1] % readout_config.adc_hold_delay != 1:
         raise ValueError("The time range of the block should be divisible by adc_hold_delay.")
     shape[-1] = shape[-1] // readout_config.adc_hold_delay + bursts.shape[-1]
-    print(shape)
+    # print(shape)
     data = np.zeros(shape, dtype=bursts.dtype)
     # fill data with true charge
     for i in range(ticks.shape[0]):
         # print((ticks[i, 2] - loc_min[2])//readout_config.adc_hold_delay, ticks[i,2], loc_min[2])
         if ticks[i, 0] == 36+102 and ticks[i, 1] == 97+1:
-            print(ticks[i, 2], loc_min[2])
+            # print(ticks[i, 2], loc_min[2])
         for i3 in range(bursts.shape[-1]):
             data[ticks[i, 0] - loc_min[0],
                  ticks[i, 1] - loc_min[1],

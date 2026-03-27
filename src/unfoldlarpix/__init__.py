@@ -19,6 +19,16 @@ from .burst_processor import (
     MergedSequence,
 )
 from .burst_processor_v2 import BurstSequenceProcessorV2
+from .deconv_workflow import (
+    EventDeconvolutionResult,
+    PreparedFieldResponse,
+    build_event_output_payload,
+    create_burst_processor,
+    integrate_kernel_over_time,
+    prepare_field_response,
+    process_event_deconvolution,
+    shift_time_offset,
+)
 
 __all__ = [
     "DataLoader",
@@ -33,4 +43,12 @@ __all__ = [
     "BurstSequenceProcessor",
     "BurstSequenceProcessorV2",
     "MergedSequence",
+    "PreparedFieldResponse",
+    "EventDeconvolutionResult",
+    "integrate_kernel_over_time",
+    "prepare_field_response",
+    "create_burst_processor",
+    "process_event_deconvolution",
+    "build_event_output_payload",
+    "shift_time_offset",
 ]

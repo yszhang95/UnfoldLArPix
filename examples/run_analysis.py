@@ -55,6 +55,14 @@ def fmt_threshold(v: float) -> str:
     return str(v).replace(".", "p")
 
 
+def normalize_str_list(values: list[str] | None) -> list[str] | None:
+    """Drop empty CLI string values and trim surrounding whitespace."""
+    if values is None:
+        return None
+    cleaned = [value.strip() for value in values if value.strip()]
+    return cleaned or None
+
+
 def run(cmd: list[str], dry: bool, cwd: Path) -> None:
     print("  $", " ".join(str(c) for c in cmd))
     if not dry:
@@ -244,14 +252,18 @@ def parse_args():
 def main():
     cfg = parse_args()
     cwd = Path(cfg.cwd).resolve()
+    cfg.input_files = normalize_str_list(cfg.input_files)
 
     # Handle backwards compatibility: --input-file vs --input-files
     if cfg.input_files is not None:
         cfg.input_files = cfg.input_files
     elif cfg.input_file is not None:
-        cfg.input_files = [cfg.input_file]
+        cfg.input_files = normalize_str_list([cfg.input_file])
     else:
         cfg.input_files = ["data/pgun_positron_3gev_tred_noises_effq_nt1.npz"]
+
+    if cfg.input_files is None:
+        sys.exit("No valid --input-files were provided.")
 
     step_map = {
         1: step1_deconv,

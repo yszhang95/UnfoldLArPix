@@ -11,7 +11,6 @@ def gaus_smear_true(ticks: np.ndarray, true_charge: np.ndarray, width: float) ->
     loc_max = [np.max(ticks[:, i]) for i in range(ticks.shape[1])]
     loc_min = np.array(loc_min)
     loc_max = np.array(loc_max)
-    print("loc_min:", loc_min, "loc_max:", loc_max)
     shape = [loc_max[i] - loc_min[i] + 1 for i in range(ticks.shape[1])]
     data = np.zeros(shape, dtype=true_charge.dtype)
     # fill data with true charge
@@ -41,7 +40,6 @@ def gaus_smear_true_3d(ticks: np.ndarray, true_charge: np.ndarray, width: np.nda
     loc_max = [np.max(ticks[:, i]) for i in range(ticks.shape[1])]
     loc_min = np.array(loc_min)
     loc_max = np.array(loc_max)
-    print("loc_min:", loc_min, "loc_max:", loc_max)
     shape = [loc_max[i] - loc_min[i] + 1 for i in range(ticks.shape[1])]
     data = np.zeros(shape, dtype=true_charge.dtype)
     # fill data with true charge
