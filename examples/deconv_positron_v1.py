@@ -36,6 +36,17 @@ def parse_args() -> argparse.Namespace:
         default="/srv/storage1/yousen/tred_workspace/response_44_v2a_full_25x25pixel_tred.npz",
         help="Field response NPZ file",
     )
+    parser.add_argument(
+        "--tpc-id",
+        type=int,
+        default=0,
+        help="TPC ID to process (default: 0)",
+    )
+    parser.add_argument(
+        "--output-suffix",
+        default=None,
+        help="Optional suffix for the output NPZ filename",
+    )
     return parser.parse_args()
 
 
@@ -51,7 +62,7 @@ def main() -> None:
 
     for event in loader.iter_events():
         print(f"TPC {event.tpc_id}, Event {event.event_id}")
-        if event.tpc_id != 0:
+        if event.tpc_id != args.tpc_id:
             continue
 
         if event.effq:
@@ -91,14 +102,24 @@ def main() -> None:
         )
 
         geometry = loader.get_geometry(event.tpc_id)
+        if args.output_suffix:
+            output_filename = (
+                f"deconv_positron_{args.output_suffix}_"
+                f"event_{event.tpc_id}_{event.event_id}.npz"
+            )
+        else:
+            output_filename = f"deconv_positron_event_{event.tpc_id}_{event.event_id}.npz"
+
+        print(f"Saving to: {output_filename}")
         np.savez(
-            f"deconv_positron_event_{event.tpc_id}_{event.event_id}.npz",
+            output_filename,
             **build_event_output_payload(
                 event,
                 geometry,
                 readout_config,
                 result,
                 drift_length=prepared_response.drift_length,
+                include_hwf_block=True,
             ),
         )
 

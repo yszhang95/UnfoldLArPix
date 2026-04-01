@@ -156,17 +156,30 @@ uv run python plot_proj.py deconv_file.npz \
 Status:
 - Core utility used by `run_analysis.py`.
 
-### `plot_proj_2bin.py`
+### `plot_proj_nbins.py`
 
 Purpose:
-- Alternate plotting/validation script for a different alignment convention.
+- Alternate plotting/validation script that groups consecutive coarse time bins.
 
 Functionality:
 - Similar role to `plot_proj.py`
-- Uses a different coarse/fine bin alignment mode
+- Adds `--nbins` to sum every `n` consecutive coarse time bins before plotting
+- Produces grouped-bin histogram and 2D comparison plots
 
 Status:
 - Specialized comparison tool, not the default plot script.
+
+### `plot_proj_2bin.py`
+
+Purpose:
+- Compatibility wrapper for `plot_proj_nbins.py`.
+
+Functionality:
+- Forwards the same CLI arguments to `plot_proj_nbins.py`
+- Defaults `--nbins 2`
+
+Status:
+- Legacy alias kept for convenience.
 
 ### `organize_json_files.py`
 
