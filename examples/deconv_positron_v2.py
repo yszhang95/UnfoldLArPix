@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+from pathlib import Path
 
 import numpy as np
 
@@ -47,6 +48,11 @@ def parse_args() -> argparse.Namespace:
         "--output-suffix",
         default="",
         help="Suffix to append to output filename (e.g., 's0p0005_sp10')",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=".",
+        help="Directory for the output NPZ file",
     )
     return parser.parse_args()
 
@@ -128,10 +134,12 @@ def main() -> None:
             f"deconv_positron_v2_{args.output_suffix}_"
             f"event_{event.tpc_id}_{event.event_id}.npz"
         )
-        print(f"Saving to: {output_filename}")
+        output_path = Path(args.output_dir).expanduser() / output_filename
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"Saving to: {output_path}")
         geometry = loader.get_geometry(event.tpc_id)
         np.savez(
-            output_filename,
+            output_path,
             **build_event_output_payload(
                 event,
                 geometry,

@@ -93,6 +93,7 @@ def step1_deconv(cfg, cwd: Path, dry: bool) -> None:
     """Run deconv scripts for every (sigma, sigma_pxl) pair and input file."""
     print("\n=== Step 1: Deconvolution ===")
     input_files = cfg.input_files if isinstance(cfg.input_files, list) else [cfg.input_files]
+    output_dir = Path(cfg.dest_dir)
 
     for input_file in input_files:
         file_label = extract_file_label(input_file)
@@ -110,6 +111,7 @@ def step1_deconv(cfg, cwd: Path, dry: bool) -> None:
                      "--input-file", input_file,
                      "--field-response", cfg.field_response,
                      "--tpc-id", "0",
+                     "--output-dir", str(output_dir),
                      "--output-suffix", output_suffix],
                     dry, cwd)
 
@@ -118,6 +120,7 @@ def step2_export(cfg, cwd: Path, dry: bool) -> None:
     """Export JSON files (deconv + smeared) for every combination x threshold."""
     print("\n=== Step 2: JSON export ===")
     out_dir = cfg.output_matrix
+    output_dir = Path(cfg.dest_dir)
     input_files = cfg.input_files if isinstance(cfg.input_files, list) else [cfg.input_files]
 
     for input_file in input_files:
@@ -127,11 +130,11 @@ def step2_export(cfg, cwd: Path, dry: bool) -> None:
             sp = fmt_sigma_pxl(sigma_pxl).lstrip('0')
             for ver in cfg.versions:
                 output_suffix = f"{file_label}_s{ss}_sp{sp}"
-                npz = f"deconv_positron{'_v2' if ver == 'v2' else ''}_{output_suffix}_event_0_0.npz"
+                npz = output_dir / f"deconv_positron{'_v2' if ver == 'v2' else ''}_{output_suffix}_event_0_0.npz"
                 for thr in cfg.thresholds:
                     ts = fmt_threshold(thr)
                     prefix = f"{ver}_{output_suffix}_t{ts}"
-                    run([sys.executable, "deconv_xyz.py", npz,
+                    run([sys.executable, "deconv_xyz.py", str(npz),
                          "--tpc-id", "0", "--event-id", "0",
                          "--threshold", str(thr),
                          "--prefix", prefix,
@@ -141,8 +144,12 @@ def step2_export(cfg, cwd: Path, dry: bool) -> None:
 
 
 def step3_copy(cfg, cwd: Path, dry: bool) -> None:
-    """Copy all exported JSONs and NPZs to dest-dir."""
-    print(f"\n=== Step 3: Copy to {cfg.dest_dir} ===")
+    """Optionally mirror JSON files into the flat dest-dir root."""
+    print(f"\n=== Step 3: Optional flattening -> {cfg.dest_dir} ===")
+    if not getattr(cfg, "copy_artifacts", False):
+        print("  Skipping flatten/copy step to avoid duplicate artifacts.")
+        return
+
     dest = Path(cfg.dest_dir)
     if not dry:
         dest.mkdir(parents=True, exist_ok=True)
@@ -156,22 +163,11 @@ def step3_copy(cfg, cwd: Path, dry: bool) -> None:
             for ver in cfg.versions:
                 output_suffix = f"{file_label}_s{ss}_sp{sp}"
 
-                # Copy NPZ
-                npz = f"deconv_positron{'_v2' if ver == 'v2' else ''}_{output_suffix}_event_0_0.npz"
-                npz_src = cwd / npz
-                print(f"  cp {npz} -> {dest}/")
-                if not dry:
-                    if npz_src.exists():
-                        shutil.copy2(npz_src, dest / npz)
-                    else:
-                        print(f"    Warning: {npz} not found")
-
                 for thr in cfg.thresholds:
                     ts = fmt_threshold(thr)
                     prefix = f"{ver}_{output_suffix}_t{ts}"
-                    src_dir = Path(cfg.output_matrix) / "data" / "0"
                     for suffix in ("", "_smeared"):
-                        src = src_dir / f"0-{prefix}{suffix}.json"
+                        src = Path(cfg.output_matrix) / "data" / "0" / f"0-{prefix}{suffix}.json"
                         dst = dest / f"0-{prefix}{suffix}.json"
                         print(f"  cp {src.name} -> {dest}/")
                         if not dry:
@@ -188,6 +184,7 @@ def step4_plots(cfg, cwd: Path, dry: bool) -> None:
     if not dry:
         plot_dir.mkdir(parents=True, exist_ok=True)
     input_files = cfg.input_files if isinstance(cfg.input_files, list) else [cfg.input_files]
+    output_dir = Path(cfg.dest_dir)
 
     for input_file in input_files:
         file_label = extract_file_label(input_file)
@@ -196,9 +193,9 @@ def step4_plots(cfg, cwd: Path, dry: bool) -> None:
             sp = fmt_sigma_pxl(sigma_pxl).lstrip('0')
             for ver in cfg.versions:
                 output_suffix = f"{file_label}_s{ss}_sp{sp}"
-                npz = f"deconv_positron{'_v2' if ver == 'v2' else ''}_{output_suffix}_event_0_0.npz"
+                npz = output_dir / f"deconv_positron{'_v2' if ver == 'v2' else ''}_{output_suffix}_event_0_0.npz"
                 prefix = plot_dir / f"{ver}_{output_suffix}"
-                run([sys.executable, "plot_proj.py", npz,
+                run([sys.executable, "plot_proj.py", str(npz),
                      "--threshold", str(cfg.plot_threshold),
                      "--prefix", str(prefix)],
                     dry, cwd)
@@ -224,7 +221,7 @@ def parse_args():
                    help="Processor versions to run")
     p.add_argument("--steps", nargs="+", type=int, default=[1, 2, 3, 4],
                    choices=[1, 2, 3, 4], metavar="N",
-                   help="Which pipeline steps to run (1=deconv 2=export 3=copy 4=plots)")
+                   help="Which pipeline steps to run (1=deconv 2=export 3=optional flattening 4=plots)")
     p.add_argument("--output-matrix", default="output_matrix",
                    help="Intermediate JSON output directory for deconv_xyz")
     p.add_argument("--dest-dir", default="raw_positron/data/0",
@@ -233,6 +230,8 @@ def parse_args():
                    help="Output directory for histogram plots (step 4)")
     p.add_argument("--plot-threshold", type=float, default=0.5,
                    help="Threshold passed to plot_proj.py")
+    p.add_argument("--copy-artifacts", action="store_true",
+                   help="Mirror JSONs into dest-dir root (disabled by default to avoid duplicates)")
     p.add_argument("--input-file",
                    default=None,
                    help="(Deprecated: use --input-files) Input NPZ file produced by tred")
@@ -276,6 +275,7 @@ def main():
     print(f"  sigmas={cfg.sigmas}  sigma_pxls={cfg.sigma_pxls}")
     print(f"  thresholds={cfg.thresholds}")
     print(f"  input_files={cfg.input_files}")
+    print(f"  copy_artifacts={cfg.copy_artifacts}")
     print(f"  cwd={cwd}  dry={cfg.dry_run}")
 
     for step_num in sorted(cfg.steps):

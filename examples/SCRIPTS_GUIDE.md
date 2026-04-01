@@ -31,7 +31,7 @@ Purpose:
 Functionality:
 - Step 1: run `deconv_positron_v1.py` and/or `deconv_positron_v2.py`
 - Step 2: convert NPZ outputs to JSON with `deconv_xyz.py`
-- Step 3: copy NPZ/JSON files into a destination directory
+- Step 3: optional flattening of JSONs into a destination directory root
 - Step 4: generate QA plots with `plot_proj.py`
 
 Typical usage:
@@ -46,6 +46,10 @@ uv run python run_analysis.py \
   --dest-dir analysis_out \
   --plot-dir analysis_out/plots \
   --steps 1 2 3 4
+
+Add `--copy-artifacts` only if you want a flat mirror of the JSONs in the
+destination root. The default keeps NPZs in `dest-dir/`, JSONs in
+`output_matrix/`, and plots in `plots/` to avoid duplicates.
 ```
 
 Status:
