@@ -344,7 +344,9 @@ class BurstSequenceProcessor:
             template_section = template_section[valid_mask]
         else:
             template_times = candidate_times
-        template_section *= threshold /template_section[-1] # FIXME: Assume Cumulative Tempalte saturates at 1.
+        # Work on a local copy so bootstrap scaling does not mutate self.template
+        # through a NumPy view and leak state across pixels.
+        template_section = template_section * (threshold / template_section[-1])  # FIXME: Assume Cumulative Tempalte saturates at 1.
         template_section = np.diff(template_section, prepend=0) # integral per interval
 
         # charge per interval
