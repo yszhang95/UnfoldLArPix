@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -22,6 +23,10 @@ parser.add_argument("--input-file", default="data/pgun_positron_3gev_tred_noises
 parser.add_argument("--field-response", default="/srv/storage1/yousen/tred_workspace/response_44_v2a_full_25x25pixel_tred.npz",
                     help="Field response NPZ file")
 parser.add_argument("--effq-offset", default=0, type=int, help='activate when use truncated waveform')
+parser.add_argument("--output-dir", default=".",
+                    help="Directory for the output NPZ file")
+parser.add_argument("--tpc-id", type=int, default=None,
+                    help="Process only this TPC ID (default: process all)")
 args = parser.parse_args()
 
 loader = DataLoader(args.input_file)
@@ -53,9 +58,6 @@ def interval_average_to_block(ticks: np.ndarray, bursts: np.ndarray, tpad=10) ->
     data = np.zeros(shape, dtype=bursts.dtype)
     # fill data with true charge
     for i in range(ticks.shape[0]):
-        # print((ticks[i, 2] - loc_min[2])//readout_config.adc_hold_delay, ticks[i,2], loc_min[2])
-        if ticks[i, 0] == 36+102 and ticks[i, 1] == 97+1:
-            # print(ticks[i, 2], loc_min[2])
         for i3 in range(bursts.shape[-1]):
             data[ticks[i, 0] - loc_min[0],
                  ticks[i, 1] - loc_min[1],
@@ -89,6 +91,8 @@ fr_full_k = integrate_k(fr_full, readout_config.adc_hold_delay)
 # Iterate over events grouped by (event_id, tpc_id)
 for event in loader.iter_events():
     print(f"TPC {event.tpc_id}, Event {event.event_id}")
+    if args.tpc_id is not None and event.tpc_id != args.tpc_id:
+        continue
 
     # Access effective charge data
     if event.effq:
@@ -142,7 +146,11 @@ for event in loader.iter_events():
 
 
     geometry = loader.get_geometry(event.tpc_id)
-    np.savez(f"deconv_positron_v3_event_{event.tpc_id}_{event.event_id}.npz",
+    output_dir = Path(args.output_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"deconv_positron_v3_event_{event.tpc_id}_{event.event_id}.npz"
+    print(f"Saving to: {output_path}")
+    np.savez(output_path,
              deconv_q=deconv_q, boffset=boffset,
              hwf_block=hwf_block_data,
              hwf_block_offset=boffset,
