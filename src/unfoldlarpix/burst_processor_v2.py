@@ -4,7 +4,11 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .burst_processor import BurstSequence, MergedSequence
+from .burst_processor import (
+    BurstSequence,
+    MergedSequence,
+    TemplateCompensationAnchor,
+)
 from .data_containers import Hits
 
 
@@ -62,6 +66,7 @@ class BurstSequenceProcessorV2:
         self.threshold = threshold
 
         self.totq_per_pix: Dict[Tuple[int, int], float] = {}
+        self.template_compensation_anchors: list[TemplateCompensationAnchor] = []
 
     # ------------------------------------------------------------------
     # Helpers
@@ -69,6 +74,33 @@ class BurstSequenceProcessorV2:
 
     def _default_template(self) -> np.ndarray:
         return np.array([1, 2, 3, 4, 6, 8, 16, 36], dtype=float)
+
+    def _record_template_compensation_anchor(
+        self,
+        seq: BurstSequence,
+        *,
+        transit_threshold_idx: int,
+        transit_fraction: float,
+        is_bootstrap: bool,
+    ) -> None:
+        """Record the sequence-local peak used to anchor template compensation."""
+        peak_index = int(np.argmax(seq.charges))
+        peak_time = float(seq.t_first + peak_index * self.adc_hold_delay)
+        peak_charge = float(seq.charges[peak_index])
+        self.template_compensation_anchors.append(
+            TemplateCompensationAnchor(
+                pixel_x=seq.pixel_x,
+                pixel_y=seq.pixel_y,
+                trigger_time_idx=seq.trigger_time_idx,
+                trigger_timestamp=float(seq.trigger_time_idx),
+                sequence_peak_index=peak_index,
+                sequence_peak_time=peak_time,
+                sequence_peak_charge=peak_charge,
+                transit_threshold_idx=int(transit_threshold_idx),
+                transit_fraction=float(transit_fraction),
+                is_bootstrap=is_bootstrap,
+            )
+        )
 
     def _fractional_shift(self, charges: np.ndarray, delta_T: float) -> np.ndarray:
         """Shift *charges* by delta_T / adc_hold_delay fractional samples via FFT.
@@ -180,7 +212,7 @@ class BurstSequenceProcessorV2:
         next_seq: BurstSequence,
         threshold: float,
         template_cumulative: np.ndarray,
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, int, float]:
         """Fill the gap before *next_seq* using template interpolation.
 
         Fractional phase-shift alignment is NOT applied here; it is deferred to the
@@ -207,7 +239,7 @@ class BurstSequenceProcessorV2:
             template_cumulative: Monotonically increasing cumulative template.
 
         Returns:
-            Tuple (updated_times, updated_cumulative).
+            Tuple (updated_times, updated_cumulative, transit_threshold_idx, transit_fraction).
         """
         if threshold is None:
             raise ValueError("Template compensation requires a threshold value.")
@@ -282,7 +314,7 @@ class BurstSequenceProcessorV2:
                     f"Length mismatch: {len(updated_times)} times and "
                     f"{len(updated_cumulative)} cumulative values."
                 )
-            return updated_times, updated_cumulative
+                return updated_times, updated_cumulative, int(threshold_idx), float(transit)
 
         if not np.isclose(candidate_times[valid_mask][-1], threshold_time):
             raise ValueError(
@@ -327,7 +359,7 @@ class BurstSequenceProcessorV2:
                 f"Length mismatch: {len(updated_times)} times and "
                 f"{len(updated_cumulative)} cumulative values."
             )
-        return updated_times, updated_cumulative
+        return updated_times, updated_cumulative, int(threshold_idx), float(transit)
 
     def _append_shifted(
         self,
@@ -407,13 +439,19 @@ class BurstSequenceProcessorV2:
         dT_first = first_seq.trigger_time_idx % self.adc_hold_delay
 
         # Bootstrap: build the rising-edge template before the first sequence.
-        times, cumulative = self._template_compensation(
+        times, cumulative, threshold_idx, transit_fraction = self._template_compensation(
             None,
             None,
             0,           # no deadtime offset for the first-sequence bootstrap
             first_seq,
             self.threshold,
             self.template,
+        )
+        self._record_template_compensation_anchor(
+            first_seq,
+            transit_threshold_idx=threshold_idx,
+            transit_fraction=transit_fraction,
+            is_bootstrap=True,
         )
         # All times from bootstrap (template + first burst) share first_seq's delta_T
         delta_T_per_time = np.full(len(times), dT_first)
@@ -429,13 +467,19 @@ class BurstSequenceProcessorV2:
                 times, cumulative = self._append_shifted(cumulative, times, curr_seq)
             else:
                 # Signal was absent long enough to warrant template gap-fill.
-                times, cumulative = self._template_compensation(
+                times, cumulative, threshold_idx, transit_fraction = self._template_compensation(
                     cumulative,
                     times,
                     self.deadtime,
                     curr_seq,
                     self.threshold,
                     self.template,
+                )
+                self._record_template_compensation_anchor(
+                    curr_seq,
+                    transit_threshold_idx=threshold_idx,
+                    transit_fraction=transit_fraction,
+                    is_bootstrap=False,
                 )
 
             # New time points (template + burst) all carry curr_seq's delta_T
@@ -489,6 +533,7 @@ class BurstSequenceProcessorV2:
         Returns:
             Dict mapping (pixel_x, pixel_y) to MergedSequence.
         """
+        self.template_compensation_anchors = []
         sequences_by_pixel = self.extract_sequences_from_hits(hits)
         return {
             pixel_key: self.process_pixel_sequences(seqs)

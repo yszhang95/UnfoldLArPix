@@ -46,6 +46,22 @@ class MergedSequence:
             raise ValueError("times must be strictly monotonically increasing")
 
 
+@dataclass(frozen=True)
+class TemplateCompensationAnchor:
+    """Sequence peak used as a template-compensation anchor."""
+
+    pixel_x: int
+    pixel_y: int
+    trigger_time_idx: int
+    trigger_timestamp: float
+    sequence_peak_index: int
+    sequence_peak_time: float
+    sequence_peak_charge: float
+    transit_threshold_idx: int
+    transit_fraction: float
+    is_bootstrap: bool
+
+
 class BurstSequenceProcessor:
     """Process burst sequences with dead-time and template compensation."""
 
@@ -82,10 +98,38 @@ class BurstSequenceProcessor:
             raise ValueError("template must be monotonically increasing")
 
         self.totq_per_pix = {}
+        self.template_compensation_anchors: list[TemplateCompensationAnchor] = []
 
     def _default_template(self) -> np.ndarray:
         """Create a default exponential-like template."""
         return np.array([1, 2, 3, 4, 6, 8, 16, 36], dtype=float)
+
+    def _record_template_compensation_anchor(
+        self,
+        seq: BurstSequence,
+        *,
+        transit_threshold_idx: int,
+        transit_fraction: float,
+        is_bootstrap: bool,
+    ) -> None:
+        """Record the sequence-local peak used to anchor template compensation."""
+        peak_index = int(np.argmax(seq.charges))
+        peak_time = float(seq.t_first + peak_index * self.adc_hold_delay)
+        peak_charge = float(seq.charges[peak_index])
+        self.template_compensation_anchors.append(
+            TemplateCompensationAnchor(
+                pixel_x=seq.pixel_x,
+                pixel_y=seq.pixel_y,
+                trigger_time_idx=seq.trigger_time_idx,
+                trigger_timestamp=float(seq.trigger_time_idx),
+                sequence_peak_index=peak_index,
+                sequence_peak_time=peak_time,
+                sequence_peak_charge=peak_charge,
+                transit_threshold_idx=int(transit_threshold_idx),
+                transit_fraction=float(transit_fraction),
+                is_bootstrap=is_bootstrap,
+            )
+        )
 
     def extract_sequences_from_hits(self, hits: Hits) -> Dict[Tuple[int, int], List[BurstSequence]]:
         """Extract burst sequences from Hits container, grouped by pixel.
@@ -224,7 +268,7 @@ class BurstSequenceProcessor:
         next_seq: BurstSequence,
         threshold: float,
         template_cumulative: np.ndarray,
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, int, float]:
         """Apply template-based compensation for non-close sequences.
 
         Args:
@@ -235,7 +279,7 @@ class BurstSequenceProcessor:
             template_cumulative: Monotonically increasing cumulative template
 
         Returns:
-            Tuple of (updated_times, updated_cumulative)
+            Tuple of (updated_times, updated_cumulative, transit_threshold_idx, transit_fraction)
         """
         if threshold is None:
             raise ValueError("Template compensation requires a threshold value.")
@@ -261,7 +305,6 @@ class BurstSequenceProcessor:
             raise ValueError(f"Not enough time for template compensation, available time {tlength} is too short.")
         tlength = int(np.round(tlength))
         threshold_idx = None
-        print(tlength)
         for jidx in range(tlength, len(template_cumulative)):
             # if template_cumulative[jidx+tlength] - template_cumulative[jidx] >= transit:
                 # threshold_idx = jidx + tlength
@@ -274,6 +317,10 @@ class BurstSequenceProcessor:
             threshold_idx = np.searchsorted(template_cumulative, transit, side='left')
             template_section = template_cumulative[:threshold_idx+1][::-1][::self.adc_hold_delay][::-1]
         else:
+            if threshold_idx is None:
+                # Fall back to the latest available template section when the
+                # requested transit cannot be reached within the available gap.
+                threshold_idx = len(template_cumulative) - 1
             template_section = template_cumulative[threshold_idx-tlength:threshold_idx+1] # one more tick for downsampling
             template_section = template_section[::-1][::self.adc_hold_delay][::-1]  # Reverse, downsample, reverse back
 
@@ -298,9 +345,7 @@ class BurstSequenceProcessor:
         else:
             template_times = candidate_times
         template_section *= threshold /template_section[-1] # FIXME: Assume Cumulative Tempalte saturates at 1.
-        print('selected template', template_section)
         template_section = np.diff(template_section, prepend=0) # integral per interval
-        print('template_times', template_times, candidate_times, valid_mask)
 
         # charge per interval
         chgs = template_section[1:].tolist() + [next_seq.charges[0] - threshold] + next_seq.charges[1:].tolist()
@@ -338,7 +383,7 @@ class BurstSequenceProcessor:
         if len(updated_cumulative) != len(updated_times) + 1:
             raise ValueError("Length mismatch between updated times and cumulative after template compensation."
                              f"Got {len(updated_times)} times and {len(updated_cumulative)} cumulative values.")
-        return updated_times, updated_cumulative
+        return updated_times, updated_cumulative, int(threshold_idx), float(transit)
 
     def process_pixel_sequences(
         self,
@@ -365,13 +410,19 @@ class BurstSequenceProcessor:
 
 
         # hypothetical zeroth sequence
-        times, cumulative = self._template_compensation(
+        times, cumulative, threshold_idx, transit_fraction = self._template_compensation(
             None,
             None,
             0,
             first_seq,
             self.threshold,
             self.template
+        )
+        self._record_template_compensation_anchor(
+            first_seq,
+            transit_threshold_idx=threshold_idx,
+            transit_fraction=transit_fraction,
+            is_bootstrap=True,
         )
 
         # Process remaining sequences
@@ -414,14 +465,19 @@ class BurstSequenceProcessor:
                 #     'tolerance not ok ----------------',
                 #     times, cumulative
                 # )
-
-                times, cumulative = self._template_compensation(
+                times, cumulative, threshold_idx, transit_fraction = self._template_compensation(
                     cumulative,
                     times,
                     self.deadtime,
                     curr_seq,
                     self.threshold,
                     self.template,
+                )
+                self._record_template_compensation_anchor(
+                    curr_seq,
+                    transit_threshold_idx=threshold_idx,
+                    transit_fraction=transit_fraction,
+                    is_bootstrap=False,
                 )
                 # print(
                 #     'tolerance not ok ----------------',
@@ -452,6 +508,7 @@ class BurstSequenceProcessor:
             Dictionary mapping (pixel_x, pixel_y) to MergedSequence
         """
         # Extract sequences grouped by pixel
+        self.template_compensation_anchors = []
         sequences_by_pixel = self.extract_sequences_from_hits(hits)
 
         # Process each pixel

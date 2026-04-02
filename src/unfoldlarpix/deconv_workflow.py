@@ -6,7 +6,11 @@ from typing import Any
 
 import numpy as np
 
-from .burst_processor import BurstSequenceProcessor, merged_sequences_to_block
+from .burst_processor import (
+    BurstSequenceProcessor,
+    TemplateCompensationAnchor,
+    merged_sequences_to_block,
+)
 from .burst_processor_v2 import BurstSequenceProcessorV2
 from .data_containers import EventData, Geometry, Hits, ReadoutConfig
 from .deconv import deconv_fft, gaussian_filter_3d
@@ -43,6 +47,7 @@ class EventDeconvolutionResult:
     local_offset: tuple[int, ...]
     smeared_true: np.ndarray
     smear_offset: np.ndarray
+    template_compensation_diagnostics: dict[str, np.ndarray]
 
 
 BurstProcessorClass = type[BurstSequenceProcessor] | type[BurstSequenceProcessorV2]
@@ -114,7 +119,7 @@ def hits_to_merged_block(
     processor_cls: BurstProcessorClass = BurstSequenceProcessor,
     tau: float | None = None,
     npadbin: int = 50,
-) -> tuple[np.ndarray, np.ndarray, float]:
+) -> tuple[np.ndarray, np.ndarray, float, tuple[TemplateCompensationAnchor, ...]]:
     """Convert hit bursts into a dense 3D block for deconvolution."""
     burst_processor = create_burst_processor(
         readout_config,
@@ -131,7 +136,95 @@ def hits_to_merged_block(
         readout_config.adc_hold_delay,
         npadbin=npadbin,
     )
-    return block_offset, block_data, compensated_charge
+    return (
+        block_offset,
+        block_data,
+        compensated_charge,
+        tuple(burst_processor.template_compensation_anchors),
+    )
+
+
+def empty_template_compensation_diagnostics() -> dict[str, np.ndarray]:
+    """Return a consistent empty payload for template-compensation diagnostics."""
+    return {
+        "template_comp_peak_locations": np.empty((0, 3), dtype=float),
+        "template_comp_trigger_time_idx": np.empty((0,), dtype=int),
+        "template_comp_trigger_timestamp": np.empty((0,), dtype=float),
+        "template_comp_peak_indices": np.empty((0,), dtype=int),
+        "template_comp_peak_charges": np.empty((0,), dtype=float),
+        "template_comp_transit_threshold_idx": np.empty((0,), dtype=int),
+        "template_comp_transit_fraction": np.empty((0,), dtype=float),
+        "template_comp_is_bootstrap": np.empty((0,), dtype=bool),
+        "template_comp_effq_peak_time": np.empty((0,), dtype=float),
+        "template_comp_effq_peak_value": np.empty((0,), dtype=float),
+        "template_comp_effq_peak_distance": np.empty((0,), dtype=float),
+        "template_comp_effq_peak_distance_abs": np.empty((0,), dtype=float),
+    }
+
+
+def build_template_compensation_diagnostics(
+    event: EventData,
+    anchors: tuple[TemplateCompensationAnchor, ...],
+) -> dict[str, np.ndarray]:
+    """Summarize template-compensation anchors against per-channel effq peaks."""
+    if not anchors or event.effq is None:
+        return empty_template_compensation_diagnostics()
+
+    effq_peak_by_pixel: dict[tuple[int, int], tuple[float, float]] = {}
+    for location, values in zip(event.effq.location, event.effq.data, strict=False):
+        pixel_key = (int(location[0]), int(location[1]))
+        peak_time = float(location[2])
+        peak_value = float(values[-1])
+        current = effq_peak_by_pixel.get(pixel_key)
+        if current is None or peak_value > current[1]:
+            effq_peak_by_pixel[pixel_key] = (peak_time, peak_value)
+
+    peak_locations = []
+    trigger_times = []
+    trigger_timestamps = []
+    peak_indices = []
+    peak_charges = []
+    transit_threshold_indices = []
+    transit_fractions = []
+    is_bootstrap = []
+    effq_peak_times = []
+    effq_peak_values = []
+    effq_peak_distances = []
+
+    for anchor in anchors:
+        pixel_key = (anchor.pixel_x, anchor.pixel_y)
+        effq_peak = effq_peak_by_pixel.get(pixel_key, (np.nan, np.nan))
+        effq_peak_time = float(effq_peak[0])
+        effq_peak_value = float(effq_peak[1])
+        peak_locations.append(
+            [anchor.pixel_x, anchor.pixel_y, anchor.sequence_peak_time]
+        )
+        trigger_times.append(anchor.trigger_time_idx)
+        trigger_timestamps.append(anchor.trigger_timestamp)
+        peak_indices.append(anchor.sequence_peak_index)
+        peak_charges.append(anchor.sequence_peak_charge)
+        transit_threshold_indices.append(anchor.transit_threshold_idx)
+        transit_fractions.append(anchor.transit_fraction)
+        is_bootstrap.append(anchor.is_bootstrap)
+        effq_peak_times.append(effq_peak_time)
+        effq_peak_values.append(effq_peak_value)
+        effq_peak_distances.append(effq_peak_time - anchor.sequence_peak_time)
+
+    distances = np.asarray(effq_peak_distances, dtype=float)
+    return {
+        "template_comp_peak_locations": np.asarray(peak_locations, dtype=float),
+        "template_comp_trigger_time_idx": np.asarray(trigger_times, dtype=int),
+        "template_comp_trigger_timestamp": np.asarray(trigger_timestamps, dtype=float),
+        "template_comp_peak_indices": np.asarray(peak_indices, dtype=int),
+        "template_comp_peak_charges": np.asarray(peak_charges, dtype=float),
+        "template_comp_transit_threshold_idx": np.asarray(transit_threshold_indices, dtype=int),
+        "template_comp_transit_fraction": np.asarray(transit_fractions, dtype=float),
+        "template_comp_is_bootstrap": np.asarray(is_bootstrap, dtype=bool),
+        "template_comp_effq_peak_time": np.asarray(effq_peak_times, dtype=float),
+        "template_comp_effq_peak_value": np.asarray(effq_peak_values, dtype=float),
+        "template_comp_effq_peak_distance": distances,
+        "template_comp_effq_peak_distance_abs": np.abs(distances),
+    }
 
 
 def build_gaussian_deconv_kernel(
@@ -185,7 +278,7 @@ def process_event_deconvolution(
     if event.hits is None:
         raise ValueError("Event does not contain hit data.")
 
-    block_offset, block_data, compensated_charge = hits_to_merged_block(
+    block_offset, block_data, compensated_charge, template_comp_anchors = hits_to_merged_block(
         event.hits,
         readout_config,
         prepared_response.center_response,
@@ -214,6 +307,10 @@ def process_event_deconvolution(
         sigma_time=sigma_time,
         sigma_pixel=sigma_pixel,
     )
+    template_compensation_diagnostics = build_template_compensation_diagnostics(
+        event,
+        template_comp_anchors,
+    )
     return EventDeconvolutionResult(
         compensated_charge=compensated_charge,
         hwf_block=block_data,
@@ -222,6 +319,7 @@ def process_event_deconvolution(
         local_offset=local_offset,
         smeared_true=smeared_true,
         smear_offset=np.array(smear_offset, copy=True),
+        template_compensation_diagnostics=template_compensation_diagnostics,
     )
 
 
@@ -268,4 +366,5 @@ def build_event_output_payload(
     if include_hwf_block:
         payload["hwf_block"] = result.hwf_block
         payload["hwf_block_offset"] = block_offset
+    payload.update(result.template_compensation_diagnostics)
     return payload

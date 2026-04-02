@@ -2,6 +2,7 @@
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 parser = argparse.ArgumentParser()
 parser.add_argument('input', help='Input NPZ file')
@@ -15,6 +16,108 @@ prefix = args.prefix if args.prefix is not None else args.input.removesuffix('.n
 filtered_deconv_q = []
 filtered_smeared_true = []
 filtered_totQ = []
+
+
+def integer_like_bin_edges(values: np.ndarray) -> np.ndarray:
+  """Return stable histogram bin edges for integer-like or float-valued data."""
+  values = np.asarray(values, dtype=float)
+  if values.size == 0:
+      return np.array([-0.5, 0.5], dtype=float)
+  if np.allclose(values, np.round(values), atol=1e-9):
+      vmin = int(np.min(np.round(values)))
+      vmax = int(np.max(np.round(values)))
+      return np.arange(vmin - 0.5, vmax + 1.5, 1.0)
+  if np.isclose(values.min(), values.max()):
+      center = float(values.min())
+      return np.linspace(center - 0.5, center + 0.5, 11)
+  return np.linspace(float(values.min()), float(values.max()), 51)
+
+
+def plot_template_compensation_peak_distance(npz_data, prefix: str) -> None:
+  """Plot saved template-compensation anchor distances against effq peaks."""
+  required_keys = [
+      'template_comp_effq_peak_distance',
+      'template_comp_effq_peak_value',
+  ]
+  if any(key not in npz_data for key in required_keys):
+      print("Template-compensation diagnostics missing; skipping peak-distance plots.")
+      return
+
+  distances = np.asarray(npz_data['template_comp_effq_peak_distance'], dtype=float)
+  effq_peak_values = np.asarray(npz_data['template_comp_effq_peak_value'], dtype=float)
+  bootstrap = np.asarray(
+      npz_data['template_comp_is_bootstrap'],
+      dtype=bool,
+  ) if 'template_comp_is_bootstrap' in npz_data else np.zeros(distances.shape, dtype=bool)
+
+  valid = np.isfinite(distances) & np.isfinite(effq_peak_values)
+  if not np.any(valid):
+      print("No valid template-compensation diagnostics; skipping peak-distance plots.")
+      return
+
+  distances = distances[valid]
+  effq_peak_values = effq_peak_values[valid]
+  bootstrap = bootstrap[valid]
+  bins_x = integer_like_bin_edges(distances)
+
+  fig, ax = plt.subplots(figsize=(8, 6))
+  ax.hist(distances, bins=bins_x, alpha=0.8)
+  ax.set_xlabel('effq peak time - sequence peak time [ticks]')
+  ax.set_ylabel('Count')
+  ax.set_title(
+      'Template-compensation anchor distance '
+      f'(n={distances.size}, bootstrap={np.count_nonzero(bootstrap)})'
+  )
+  ax.grid(True, which='both', linestyle='--', alpha=0.5)
+
+  inset_range = (-4500.0, -3000.0)
+  inset_bins = np.linspace(inset_range[0], inset_range[1], 101)
+  inset_mask = (distances >= inset_range[0]) & (distances <= inset_range[1])
+  inset_distances = distances[inset_mask]
+  ax_inset = inset_axes(ax, width="38%", height="38%", loc="upper left", borderpad=2)
+  ax_inset.hist(inset_distances, bins=inset_bins, alpha=0.8, color='tab:orange')
+  ax_inset.set_xlim(*inset_range)
+  inset_mean = float(np.mean(inset_distances)) if inset_distances.size else float('nan')
+  inset_std = float(np.std(inset_distances)) if inset_distances.size else float('nan')
+  ax_inset.set_title('[-4500, -3000]', fontsize=10)
+  ax_inset.text(
+      0.03,
+      0.97,
+      (
+          f'mean={inset_mean:.1f}\nstd={inset_std:.1f}'
+          if np.isfinite(inset_mean) and np.isfinite(inset_std)
+          else 'mean=n/a\nstd=n/a'
+      ),
+      transform=ax_inset.transAxes,
+      ha='left',
+      va='top',
+      fontsize=9,
+      bbox={'boxstyle': 'round,pad=0.2', 'facecolor': 'white', 'alpha': 0.8, 'edgecolor': 'none'},
+  )
+  ax_inset.tick_params(labelsize=8)
+  ax_inset.grid(True, which='both', linestyle='--', alpha=0.4)
+
+  fig.tight_layout()
+  fig.savefig(f'{prefix}_hist_template_comp_peak_distance.png')
+  plt.close(fig)
+
+  fig2d, ax2d = plt.subplots(figsize=(8, 6))
+  bins_y_max = max(1.0, float(np.max(effq_peak_values)))
+  bins_y = np.linspace(0.0, bins_y_max, 40)
+  h, xedges, yedges, img = ax2d.hist2d(
+      distances,
+      effq_peak_values,
+      bins=[bins_x, bins_y],
+      norm=LogNorm(),
+  )
+  fig2d.colorbar(img, ax=ax2d)
+  ax2d.set_xlabel('effq peak time - sequence peak time [ticks]')
+  ax2d.set_ylabel('Peak effq in channel [ke-]')
+  ax2d.set_title('Peak effq vs template-compensation anchor distance')
+  fig2d.tight_layout()
+  fig2d.savefig(f'{prefix}_hist2d_template_comp_peak_distance_vs_effq_peak.png')
+  plt.close(fig2d)
+
 
 def align_voxel_blocks(
     fine_lower_corner: np.ndarray,
@@ -308,3 +411,7 @@ for ievent in range(1):
   except Exception as e:
       print("Failed to compute peak-distance histogram:", e)
 
+  try:
+      plot_template_compensation_peak_distance(f, prefix)
+  except Exception as e:
+      print("Failed to compute template-compensation peak-distance plots:", e)
