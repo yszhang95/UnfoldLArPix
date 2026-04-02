@@ -365,6 +365,8 @@ def build_event_output_payload(
     }
     if include_hwf_block:
         payload["hwf_block"] = result.hwf_block
-        payload["hwf_block_offset"] = block_offset
+        # Preserve the original merged-block offset. The manual time shift is
+        # only for the deconvolved block (`boffset`), not for the saved HWF.
+        payload["hwf_block_offset"] = np.array(result.hwf_block_offset, copy=True)
     payload.update(result.template_compensation_diagnostics)
     return payload
