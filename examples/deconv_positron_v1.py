@@ -127,6 +127,7 @@ def main() -> None:
                 readout_config,
                 result,
                 drift_length=prepared_response.drift_length,
+                boffset_time_shift=-readout_config.adc_hold_delay,
                 include_hwf_block=True,
             ),
         )
