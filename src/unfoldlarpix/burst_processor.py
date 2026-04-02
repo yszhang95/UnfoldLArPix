@@ -354,12 +354,11 @@ class BurstSequenceProcessor:
         # if not first_seq and trigger_time_idx >= last_time:
         #     print(trigger_time_idx, last_time)
         #     raise ValueError("TBD")
-        # FIXME: this is wrong
-        if not first_seq and trigger_time_idx > last_time:
-            print(trigger_time_idx, last_time)
-            raise ValueError("TBD")
-        # FIXME: this is wrong
-        elif not first_seq and trigger_time_idx == last_time:
+        # FIXME: The start-time handling here is still heuristic. We no longer
+        # raise when trigger_time_idx > last_time because that is the normal
+        # non-overlap case for separated sequences, but the exact boundary
+        # treatment for touching/overlapping starts should be re-derived.
+        if not first_seq and trigger_time_idx == last_time:
             delta_t = last_time - trigger_time_idx
             chgs[0] = template_section[0] * delta_t / self.adc_hold_delay + chgs[0]
         elif not first_seq and trigger_time_idx < last_time:
