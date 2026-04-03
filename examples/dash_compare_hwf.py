@@ -30,6 +30,7 @@ COMPARABLE_KEYS = {"hwf_block", "deconv_q", "smeared_true"}
 PANEL_LABELS = {
     "merged": "Merged Burst",
     "deconv": "deconv_q / Truth",
+    "truthfine": "smeared_true Fine",
     "hits": "Hits",
 }
 
@@ -623,6 +624,7 @@ def make_status_card(
                     "Scales: "
                     f"merged x{scales['merged']:.3g}, "
                     f"deconv x{scales['deconv']:.3g}, "
+                    f"truth-fine x{scales['truthfine']:.3g}, "
                     f"hits x{scales['hits']:.3g}",
                     className="mb-1",
                 ),
@@ -780,8 +782,9 @@ def build_deconv_truth_figure(
         add_trace(
             fig,
             spec["truth_info"],
-            name=f"{spec['label']} smeared_true fine",
+            name=f"{spec['label']} smeared_true fine x{spec['truthfine_scale']:.3g}",
             color=spec["color"],
+            scale=spec["truthfine_scale"],
             dash_style="dot",
             opacity=0.45,
         )
@@ -1471,6 +1474,7 @@ def create_app(default_paths: list[Path], search_root: Path) -> Dash:
                 "color": FILE_COLORS[0],
                 "merged_scale": scales[("merged", 1)],
                 "deconv_scale": scales[("deconv", 1)],
+                "truthfine_scale": scales[("truthfine", 1)],
                 "hits_scale": scales[("hits", 1)],
                 "data": load_npz_cached(file1),
             },
@@ -1480,6 +1484,7 @@ def create_app(default_paths: list[Path], search_root: Path) -> Dash:
                 "color": FILE_COLORS[1],
                 "merged_scale": scales[("merged", 2)],
                 "deconv_scale": scales[("deconv", 2)],
+                "truthfine_scale": scales[("truthfine", 2)],
                 "hits_scale": scales[("hits", 2)],
                 "data": load_npz_cached(file2),
             },
@@ -1571,6 +1576,7 @@ def create_app(default_paths: list[Path], search_root: Path) -> Dash:
                                 {
                                     "merged": spec["merged_scale"],
                                     "deconv": spec["deconv_scale"],
+                                    "truthfine": spec["truthfine_scale"],
                                     "hits": spec["hits_scale"],
                                 },
                                 spec["merged_info"],
