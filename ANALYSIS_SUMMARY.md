@@ -212,3 +212,22 @@ examples/
 ---
 
 **Analysis completed successfully on 2026-03-15**
+
+---
+
+## Analysis Outputs Since 2026-03-31
+
+The following analysis/output directories were generated or refreshed in the workspace after `2026-03-31`.
+
+| Path | Scope | Current contents |
+| --- | --- | --- |
+| `examples/analysis_20260331/` | single-input `v2` rerun for `nburst256` | `3` NPZ, `24` JSON, `21` PNG |
+| `examples/analysis_20260401/` | mixed `v1`/`v2` reruns and later updates | `24` NPZ, `108` JSON, `216` PNG |
+| `examples/analysis_20260402/` | refreshed `v1` + `v2` sweep after burst/template fixes | `24` NPZ, `96` JSON, `224` PNG |
+| `examples/analysis_20260402_masked18/` | downstream JSON/plot analysis of the masked fastadc file | `0` NPZ, `4` JSON, `9` PNG |
+| `examples/analysis_20260402/nbins3/plots/` | grouped `nbins=3` comparison plots for fastadc masked/unmasked files | `6` PNG |
+
+Additional generated artifact:
+
+- `data/deconv_positron_thres5k_nburst256_fastadc0p5_sp005_spp2_event_0_0_masked18_to_match_nburst256.npz`
+  masked copy of the fastadc deconvolution output with `18` unmatched triggered sequences removed to match the non-fast `nburst256` reference.
