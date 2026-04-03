@@ -563,6 +563,15 @@ def add_trace(
     )
 
 
+def integrated_waveform_charge(info: dict[str, Any]) -> float | None:
+    if info.get("status") != "ok":
+        return None
+    waveform = np.asarray(info.get("waveform", []), dtype=float)
+    if waveform.size == 0:
+        return None
+    return float(np.sum(waveform))
+
+
 def empty_figure(message: str, height: int) -> go.Figure:
     fig = go.Figure()
     fig.add_annotation(text=message, showarrow=False)
@@ -598,8 +607,12 @@ def make_status_card(
     merged_info: dict[str, Any],
     deconv_info: dict[str, Any],
     truth_info: dict[str, Any],
+    truth_binned_info: dict[str, Any],
     hits_info: dict[str, Any],
 ) -> dbc.Card:
+    true_charge = integrated_waveform_charge(truth_binned_info)
+    if true_charge is None:
+        true_charge = integrated_waveform_charge(truth_info)
     return dbc.Card(
         dbc.CardBody(
             [
@@ -616,6 +629,14 @@ def make_status_card(
                 html.P(describe_info("Merged burst", merged_info), className="mb-1"),
                 html.P(describe_info("deconv_q", deconv_info), className="mb-1"),
                 html.P(describe_info("smeared_true", truth_info), className="mb-1"),
+                html.P(
+                    (
+                        f"Integrated true charge (rebinned): {true_charge:.6g} ke-"
+                        if true_charge is not None
+                        else "Integrated true charge (rebinned): not available"
+                    ),
+                    className="mb-1",
+                ),
                 html.P(
                     f"Hits: {hits_info.get('count', 0)} waveform(s) in this channel"
                     if hits_info.get("status") == "ok"
@@ -1577,6 +1598,7 @@ def create_app(default_paths: list[Path], search_root: Path) -> Dash:
                                 spec["merged_info"],
                                 spec["deconv_info"],
                                 spec["truth_info"],
+                                spec["truth_binned_info"],
                                 spec["hits_info"],
                             ),
                             width=6,
