@@ -9,7 +9,12 @@ from matplotlib.colors import LogNorm
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("input", help="Input NPZ file")
-    parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.5,
+        help="Threshold applied after rebinning for the plot masks.",
+    )
     parser.add_argument(
         "--prefix",
         type=str,
@@ -135,7 +140,9 @@ def main() -> None:
 
     f = np.load(args.input)
     smeared_true = f["smeared_true"]
-    deconv_q = f["deconv_q"] * (f["deconv_q"] > threshold)
+    # Rebin the full deconvolved waveform first; apply threshold only when
+    # making the plots so the grouped sums preserve the full charge content.
+    deconv_q = f["deconv_q"]
 
     _, aligned_deconv_q, smear_summed, _ = align_voxel_blocks(
         fine_lower_corner=f["smear_offset"],
@@ -156,31 +163,31 @@ def main() -> None:
 
     fig, axs = plt.subplots(1, 3, figsize=(18, 6))
     diff = smear_grouped.flatten() - deconv_grouped.flatten()
-    hist_range = (-5.0 * args.nbins, 5.0 * args.nbins)
+    hist_range = (-5.0, 5.0)
     charge_range = (0.0, 10.0 * args.nbins)
 
     axs[0].hist(diff, bins=40, range=hist_range, alpha=0.5)
     axs[0].set_xlabel(f"Smeared - Deconvolved ({args.nbins}-bin sum)")
     axs[0].set_title(f"All padded hits ({args.nbins}-bin sum)")
 
-    mask_threshold = smear_grouped > threshold
+    mask_threshold = deconv_grouped > threshold
     axs[1].hist(
         diff[mask_threshold.flatten()],
         bins=40,
         range=hist_range,
         alpha=0.5,
-        label=f"Smear sum > {threshold}",
+        label=f"Deconv sum > {threshold}",
     )
     axs[1].legend()
     axs[1].set_xlabel(f"Smeared - Deconvolved ({args.nbins}-bin sum)")
 
-    mask_low = (smear_grouped < threshold) & (smear_grouped > 0.1)
+    mask_low = (deconv_grouped < threshold) & (deconv_grouped > 0.1)
     axs[2].hist(
         diff[mask_low.flatten()],
         bins=40,
         range=hist_range,
         alpha=0.5,
-        label=f"Smear sum > 0.1 & < {threshold}",
+        label=f"Deconv sum > 0.1 & < {threshold}",
     )
     axs[2].legend()
     axs[2].set_xlabel(f"Smeared - Deconvolved ({args.nbins}-bin sum)")
@@ -188,22 +195,47 @@ def main() -> None:
     fig.savefig(f"{prefix}{suffix}_hist_diff.png")
     plt.close(fig)
 
+    fig_diff_deconv, ax_diff_deconv = plt.subplots(figsize=(8, 6))
+    mask_deconv = deconv_grouped > threshold
+    if np.any(mask_deconv):
+        ax_diff_deconv.hist(
+            (smear_grouped - deconv_grouped)[mask_deconv].flatten(),
+            bins=40,
+            range=hist_range,
+            alpha=0.7,
+        )
+        ax_diff_deconv.set_title(f"Smeared - Deconvolved (for Deconv > {threshold})")
+        ax_diff_deconv.set_xlabel(f"Smeared Sum - Deconvolved Q ({args.nbins}-bin sum)")
+        ax_diff_deconv.set_ylabel("Count")
+        ax_diff_deconv.grid(True, which="both", linestyle="--", alpha=0.5)
+        fig_diff_deconv.tight_layout()
+        fig_diff_deconv.savefig(f"{prefix}{suffix}_hist_diff_deconv_mask.png")
+    plt.close(fig_diff_deconv)
+
     fig2d, ax2d = plt.subplots(figsize=(8, 6))
-    ax2d.hist2d(
-        smear_grouped.flatten(),
-        deconv_grouped.flatten(),
+    mask_2d = deconv_grouped > threshold
+    h2d = ax2d.hist2d(
+        smear_grouped[mask_2d],
+        deconv_grouped[mask_2d],
         bins=40,
-        range=[charge_range, charge_range],
+        range=[(0.0, 10.0), (0.0, 10.0)],
         norm=LogNorm(),
     )
+    fig2d.colorbar(h2d[3], ax=ax2d, label="Counts")
     ax2d.set_xlabel(f"Smeared True ({args.nbins}-bin sum)")
     ax2d.set_ylabel(f"Deconvolved ({args.nbins}-bin sum)")
-    ax2d.set_title(f"2D Histogram: {args.nbins}-bin Summed Alignment")
+    ax2d.set_xlim(0.0, 10.0)
+    ax2d.set_ylim(0.0, 10.0)
+    ax2d.set_title(
+        f"2D Histogram: {args.nbins}-bin Summed Alignment "
+        f"(deconv > {threshold})"
+    )
     fig2d.savefig(f"{prefix}{suffix}_hist_2d.png")
     plt.close(fig2d)
 
     print(
-        f"Created {prefix}{suffix}_hist_diff.png and "
+        f"Created {prefix}{suffix}_hist_diff.png, "
+        f"{prefix}{suffix}_hist_diff_deconv_mask.png, and "
         f"{prefix}{suffix}_hist_2d.png"
     )
 
