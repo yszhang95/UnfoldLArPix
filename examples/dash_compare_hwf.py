@@ -853,45 +853,27 @@ def build_hits_figure(
 def build_transit_fraction_compare_figure(file_specs: list[dict[str, Any]]) -> go.Figure:
     fig = go.Figure()
     any_entries = False
+    global_min: float | None = None
+    global_max: float | None = None
     for spec in file_specs:
         template_comp_entries = spec["template_comp_entries"]
         if template_comp_entries.get("status") != "ok":
             continue
         any_entries = True
         entries = template_comp_entries["entries"]
-        anchor_index = np.arange(len(entries), dtype=int)
         values = np.asarray([entry["transit_fraction"] for entry in entries], dtype=float)
-        customdata = np.asarray(
-            [
-                [
-                    entry["pixel_x"],
-                    entry["pixel_y"],
-                    entry["peak_time"],
-                    entry["trigger_timestamp"],
-                    entry["threshold_idx"],
-                ]
-                for entry in entries
-            ],
-            dtype=float,
-        )
+        current_min = float(np.min(values))
+        current_max = float(np.max(values))
+        global_min = current_min if global_min is None else min(global_min, current_min)
+        global_max = current_max if global_max is None else max(global_max, current_max)
         fig.add_trace(
-            go.Scatter(
-                x=anchor_index,
-                y=values,
-                mode="lines+markers",
-                marker=dict(color=spec["color"], size=5, opacity=0.8),
-                line=dict(color=spec["color"], width=2),
+            go.Histogram(
+                x=values,
                 name=f"{spec['label']} transit fraction",
-                customdata=customdata,
-                hovertemplate=(
-                    "anchor=%{x}<br>"
-                    "transit=%{y:.6g}<br>"
-                    "pixel=(%{customdata[0]:.0f}, %{customdata[1]:.0f})<br>"
-                    "peak_time=%{customdata[2]:.0f}<br>"
-                    "trigger=%{customdata[3]:.0f}<br>"
-                    "threshold_idx=%{customdata[4]:.0f}"
-                    "<extra></extra>"
-                ),
+                marker=dict(color=spec["color"]),
+                opacity=0.65,
+                bingroup="transit-fraction",
+                hovertemplate="transit_fraction=%{x:.6g}<br>count=%{y}<extra></extra>",
             )
         )
 
@@ -899,12 +881,25 @@ def build_transit_fraction_compare_figure(file_specs: list[dict[str, Any]]) -> g
         return empty_figure("Transit-fraction comparison unavailable.", 420)
 
     fig.update_layout(
-        title="Transit Fraction by Compensation Index",
-        xaxis_title="Compensation index in saved order",
-        yaxis_title="Transit fraction",
+        title="Transit Fraction Histogram",
+        xaxis_title="Transit fraction",
+        yaxis_title="Count",
         template="plotly_white",
         height=420,
+        barmode="overlay",
     )
+    if global_min is not None and global_max is not None:
+        if np.isclose(global_min, global_max):
+            start = global_min - 0.05
+            end = global_max + 0.05
+        else:
+            pad = 0.02 * (global_max - global_min)
+            start = max(0.0, global_min - pad)
+            end = min(1.0, global_max + pad)
+        fig.update_traces(
+            xbins=dict(start=start, end=end, size=max((end - start) / 50.0, 1e-4)),
+            selector=dict(type="histogram"),
+        )
     return fig
 
 
@@ -1271,17 +1266,6 @@ def create_app(default_paths: list[Path], search_root: Path) -> Dash:
                 ],
                 className="mb-3",
             ),
-            dbc.Row(
-                [
-                    dbc.Col(
-                        dcc.Loading(
-                            type="default",
-                            children=[dcc.Graph(id="delta-threshold-idx-hist-plot")],
-                        )
-                    )
-                ],
-                className="mb-3",
-            ),
             dbc.Row([dbc.Col(html.Div(id="info-display"))]),
         ],
         fluid=True,
@@ -1427,7 +1411,6 @@ def create_app(default_paths: list[Path], search_root: Path) -> Dash:
         Output("hits-plot", "figure"),
         Output("transit-fraction-compare-plot", "figure"),
         Output("threshold-idx-compare-plot", "figure"),
-        Output("delta-threshold-idx-hist-plot", "figure"),
         Output("info-display", "children"),
         Input("file-selector-1", "value"),
         Input("file-selector-2", "value"),
@@ -1445,7 +1428,7 @@ def create_app(default_paths: list[Path], search_root: Path) -> Dash:
         file2: str | None,
         _n_clicks: int | None,
         *scale_values_and_coords: Any,
-    ) -> tuple[html.Div, go.Figure, go.Figure, go.Figure, go.Figure, go.Figure, go.Figure, html.Div]:
+    ) -> tuple[html.Div, go.Figure, go.Figure, go.Figure, go.Figure, go.Figure, html.Div]:
         scale_values = scale_values_and_coords[:-2]
         pxl_x_raw = scale_values_and_coords[-2]
         pxl_y_raw = scale_values_and_coords[-1]
@@ -1463,7 +1446,6 @@ def create_app(default_paths: list[Path], search_root: Path) -> Dash:
                 empty_figure(message, 480),
                 empty_figure(message, 420),
                 empty_figure(message, 420),
-                empty_figure(message, 380),
                 html.Div(message),
             )
 
@@ -1479,7 +1461,6 @@ def create_app(default_paths: list[Path], search_root: Path) -> Dash:
                 empty_figure(message, 480),
                 empty_figure(message, 420),
                 empty_figure(message, 420),
-                empty_figure(message, 380),
                 html.Div(message),
             )
 
@@ -1578,9 +1559,6 @@ def create_app(default_paths: list[Path], search_root: Path) -> Dash:
         threshold_idx_compare_fig = build_threshold_idx_compare_figure(
             enriched_specs,
         )
-        delta_threshold_idx_hist_fig = build_delta_threshold_idx_histogram(
-            template_comp_compare_info,
-        )
 
         info_children = html.Div(
             [
@@ -1630,7 +1608,6 @@ def create_app(default_paths: list[Path], search_root: Path) -> Dash:
             hits_fig,
             transit_fraction_compare_fig,
             threshold_idx_compare_fig,
-            delta_threshold_idx_hist_fig,
             info_children,
         )
 
