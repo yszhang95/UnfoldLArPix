@@ -226,8 +226,40 @@ The following analysis/output directories were generated or refreshed in the wor
 | `examples/analysis_20260402/` | refreshed `v1` + `v2` sweep after burst/template fixes | `24` NPZ, `96` JSON, `224` PNG |
 | `examples/analysis_20260402_masked18/` | downstream JSON/plot analysis of the masked fastadc file | `0` NPZ, `4` JSON, `9` PNG |
 | `examples/analysis_20260402/nbins3/plots/` | grouped `nbins=3` comparison plots for fastadc masked/unmasked files | `6` PNG |
+| `examples/analysis_output/analysis_20260408/` | April 8 fastadc non-noise shielded studies, moved under `analysis_output` | `4` NPZ, `8` JSON, `48` PNG |
+| `examples/analysis_output/analysis_20260409/` | April 9 shield-response studies, moved under `analysis_output` | `6` NPZ, `12` JSON, `54` PNG |
 
 Additional generated artifact:
 
 - `data/deconv_positron_thres5k_nburst256_fastadc0p5_sp005_spp2_event_0_0_masked18_to_match_nburst256.npz`
   masked copy of the fastadc deconvolution output with `18` unmatched triggered sequences removed to match the non-fast `nburst256` reference.
+
+### April 8 Study
+
+- Input: `data/pgun_positron_3gev_tred_nonoises_effq_nt1_thres5k_nburst256_fastadc0p5.npz`
+- Processors: `v1`, `v2`
+- Parameters:
+  - `sigma_temporal = 0.005, 0.003`
+  - `sigma_pixel = 0.2`
+  - `tpc_id = 0`, `event_id = 0`
+  - JSON / standard-plot threshold `0.5`
+- Outputs now stored under `examples/analysis_output/analysis_20260408/`
+- Additional grouped plots:
+  - `nbins=3` plots in `examples/analysis_output/analysis_20260408/nbins3/plots/`
+  - `12` grouped PNGs total
+
+### April 9 Shield Studies
+
+- All runs used the shield field response:
+  - `/srv/storage1/yousen/tred_workspace/response_44_v2a_shield_500V_25x25pixel_tred.npz`
+- Common parameters:
+  - `sigma_temporal = 0.004`
+  - `sigma_pixel = 0.2`
+  - `tpc_id = 0`, `event_id = 0`
+  - JSON / standard-plot threshold `0.5`
+- Inputs analyzed:
+  - `data/pgun_positron_3gev_tred_noises_effq_nt1_selftrigger_shield_reset0.npz`
+  - `data/pgun_positron_3gev_tred_noises_effq_nt1_nburst8_shield_reset0.npz`
+  - `data/pgun_positron_3gev_tred_noises_effq_nt1_nburst4_shield_reset0.npz`
+- Processors: `v1`, `v2`
+- Outputs now stored under `examples/analysis_output/analysis_20260409/`
