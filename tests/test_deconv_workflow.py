@@ -112,6 +112,7 @@ class TestCreateBurstProcessor:
         assert isinstance(processor, BurstSequenceProcessor)
         np.testing.assert_allclose(processor.template, np.array([1.0, 3.0, 6.0]))
         assert processor.tau == readout_config.adc_hold_delay
+        assert processor.threshold == readout_config.threshold
 
     def test_builds_v2_processor_with_custom_tau(self, readout_config: ReadoutConfig):
         center_response = np.array([1.0, 2.0, 3.0], dtype=float)
@@ -124,18 +125,35 @@ class TestCreateBurstProcessor:
 
         assert isinstance(processor, BurstSequenceProcessorV2)
         assert processor.tau == 7
+        assert processor.threshold == readout_config.threshold
 
     def test_builds_v3_processor_with_custom_tau(self, readout_config: ReadoutConfig):
         center_response = np.array([1.0, 2.0, 3.0], dtype=float)
+        response_indu = np.array([0.5, 1.0, 1.5], dtype=float)
         processor = create_burst_processor(
             readout_config,
             center_response,
             processor_cls=BurstSequenceProcessorV3,
             tau=9,
+            response_indu=response_indu,
         )
 
         assert isinstance(processor, BurstSequenceProcessorV3)
         assert processor.tau == 9
+        assert processor.threshold == 1.2 * readout_config.threshold
+        np.testing.assert_allclose(processor.template_coll, np.array([1.0, 3.0, 6.0]))
+        np.testing.assert_allclose(processor.template_indu, np.array([0.5, 1.5, 3.0]))
+
+    def test_v3_requires_response_indu(self, readout_config: ReadoutConfig):
+        center_response = np.array([1.0, 2.0, 3.0], dtype=float)
+
+        with pytest.raises(ValueError, match="requires response_indu"):
+            create_burst_processor(
+                readout_config,
+                center_response,
+                processor_cls=BurstSequenceProcessorV3,
+                tau=9,
+            )
 
 
 class TestProcessEventDeconvolution:

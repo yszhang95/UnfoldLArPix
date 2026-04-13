@@ -104,9 +104,23 @@ def create_burst_processor(
     *,
     processor_cls: BurstProcessorClass = BurstSequenceProcessor,
     tau: float | None = None,
+    response_indu: np.ndarray | None = None,
 ):
     """Create a burst processor configured from the readout and field response."""
     tau_value = readout_config.adc_hold_delay if tau is None else tau
+    if processor_cls is BurstSequenceProcessorV3:
+        if response_indu is None:
+            raise ValueError(
+                "BurstSequenceProcessorV3 requires response_indu."
+            )
+        return processor_cls(
+            readout_config.adc_hold_delay,
+            tau=tau_value,
+            deadtime=readout_config.csa_reset_time,
+            template_coll=np.cumsum(center_response),
+            template_indu=np.cumsum(response_indu),
+            threshold=1.2 * readout_config.threshold,
+        )
     return processor_cls(
         readout_config.adc_hold_delay,
         tau=tau_value,
@@ -124,6 +138,7 @@ def hits_to_merged_block(
     processor_cls: BurstProcessorClass = BurstSequenceProcessor,
     tau: float | None = None,
     npadbin: int = 50,
+    response_indu: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float, tuple[TemplateCompensationAnchor, ...]]:
     """Convert hit bursts into a dense 3D block for deconvolution."""
     burst_processor = create_burst_processor(
@@ -131,6 +146,7 @@ def hits_to_merged_block(
         center_response,
         processor_cls=processor_cls,
         tau=tau,
+        response_indu=response_indu,
     )
     merged_sequences = burst_processor.process_hits(hits)
     compensated_charge = float(
@@ -278,6 +294,7 @@ def process_event_deconvolution(
     tau: float | None = None,
     npadbin: int = 50,
     require_zero_local_offset: bool = False,
+    template_response_indu: np.ndarray | None = None,
 ) -> EventDeconvolutionResult:
     """Run the common hit-block deconvolution workflow for one event."""
     if event.hits is None:
@@ -290,6 +307,7 @@ def process_event_deconvolution(
         processor_cls=processor_cls,
         tau=tau,
         npadbin=npadbin,
+        response_indu=template_response_indu,
     )
     gaussian_kernel = build_gaussian_deconv_kernel(
         tuple(block_data.shape),

@@ -126,6 +126,22 @@ That means the template is naturally truncated by the inter-group gap:
 - template points are inserted only in the remaining gap between two first-pass
   merged groups
 
+### Optional Collection vs Induction Template Choice
+
+V3 can also be configured with two cumulative templates:
+- `template_coll`
+- `template_indu`
+
+When pass 2 prepares to connect a merged group, it computes that group's maximum
+accumulated charge. If
+
+`max_accumulated_q > threshold`
+
+then v3 uses `template_coll`. Otherwise it uses `template_indu`.
+
+Both templates are required for v3 compensation. If you construct v3 through
+the workflow helpers, you must supply both corresponding center responses.
+
 ### Summary
 
 The v3 processing order is:

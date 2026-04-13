@@ -60,6 +60,50 @@ class BurstSequenceProcessorV3(BurstSequenceProcessor):
       naturally to the gap available before the next merged group.
     """
 
+    def __init__(
+        self,
+        adc_hold_delay: float,
+        tau: float,
+        deadtime: float,
+        template: np.ndarray = None,
+        threshold: float = None,
+        *,
+        template_coll: np.ndarray = None,
+        template_indu: np.ndarray = None,
+    ):
+        """Initialize V3 with required collection and induction templates."""
+        if template_coll is None or template_indu is None:
+            raise ValueError(
+                "BurstSequenceProcessorV3 requires both template_coll and "
+                "template_indu."
+            )
+        super().__init__(
+            adc_hold_delay=adc_hold_delay,
+            tau=tau,
+            deadtime=deadtime,
+            template=template_coll,
+            threshold=threshold,
+        )
+
+        self.template_coll = np.asarray(template_coll, dtype=float)
+        self.template_indu = np.asarray(template_indu, dtype=float)
+
+        for template_name, template_value in (
+            ("template_coll", self.template_coll),
+            ("template_indu", self.template_indu),
+        ):
+            if template_value.size == 0:
+                raise ValueError(f"{template_name} cannot be empty.")
+            if not np.all(np.diff(template_value) >= 0):
+                raise ValueError(f"{template_name} must be monotonically increasing")
+
+    def _select_template_for_group(self, group: MergedBurstGroup) -> np.ndarray:
+        """Select collection or induction template from the merged-group charge."""
+        max_accumulated_q = float(np.max(np.cumsum(group.charges)))
+        if max_accumulated_q > self.threshold:
+            return self.template_coll
+        return self.template_indu
+
     def _record_group_template_compensation_anchor(
         self,
         group: MergedBurstGroup,
@@ -293,7 +337,7 @@ class BurstSequenceProcessorV3(BurstSequenceProcessor):
                 0.0,
                 first_pass_groups[0],
                 self.threshold,
-                self.template,
+                self._select_template_for_group(first_pass_groups[0]),
             )
         )
         self._record_group_template_compensation_anchor(
@@ -311,7 +355,7 @@ class BurstSequenceProcessorV3(BurstSequenceProcessor):
                     self.deadtime,
                     group,
                     self.threshold,
-                    self.template,
+                    self._select_template_for_group(group),
                 )
             )
             self._record_group_template_compensation_anchor(

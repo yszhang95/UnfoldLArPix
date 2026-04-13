@@ -8,6 +8,17 @@ Analysis-output summaries for this period are collected in [ANALYSIS_SUMMARY.md]
 
 Repository changes since `2026-03-31` are concentrated in deconvolution diagnostics, plotting, waveform comparison, and output-layout cleanup.
 
+#### Burst Processor V3
+
+- `src/unfoldlarpix/burst_processor_v3.py`
+  - requires both `template_coll` and `template_indu`
+  - selects the compensation template from the merged-group max accumulated charge
+- `src/unfoldlarpix/deconv_workflow.py`
+  - treats `center_response` as the V3 collection response and adds `response_indu`
+  - applies the `1.2 * readout_config.threshold` default only to V3
+- `src/unfoldlarpix/README_burst_processor.md`
+  - documents the two-template V3 compensation flow
+
 #### Deconvolution / Data Products
 
 - `src/unfoldlarpix/deconv_workflow.py`

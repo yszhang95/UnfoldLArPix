@@ -11,18 +11,29 @@ TAU = 5.0
 DEADTIME = 1.0
 
 
-def make_processor(template=None, threshold=30.0, tau=TAU, deadtime=DEADTIME):
+def make_processor(
+    template=None,
+    threshold=30.0,
+    tau=TAU,
+    deadtime=DEADTIME,
+    *,
+    template_coll=None,
+    template_indu=None,
+):
     tmpl = (
         template
         if template is not None
         else np.array([1, 2, 3, 4, 6, 8, 16, 36], dtype=float)
     )
+    coll = template_coll if template_coll is not None else tmpl
+    indu = template_indu if template_indu is not None else tmpl
     return BurstSequenceProcessorV3(
         adc_hold_delay=ADC,
         tau=tau,
         deadtime=deadtime,
-        template=tmpl,
         threshold=threshold,
+        template_coll=coll,
+        template_indu=indu,
     )
 
 
@@ -54,6 +65,50 @@ class TestFirstPassGrouping:
         np.testing.assert_allclose(groups[0].charges, np.array([90.0, 100.0, 195.0, 10.0]))
         np.testing.assert_allclose(groups[1].times, np.array([70.0, 80.0]))
         np.testing.assert_allclose(groups[1].charges, np.array([50.0, 20.0]))
+
+
+class TestTemplateSelection:
+    def test_constructor_requires_both_templates(self):
+        try:
+            BurstSequenceProcessorV3(
+                adc_hold_delay=ADC,
+                tau=TAU,
+                deadtime=DEADTIME,
+                threshold=30.0,
+                template_coll=np.array([1.0, 2.0, 3.0]),
+            )
+        except ValueError as exc:
+            assert "requires both template_coll and template_indu" in str(exc)
+        else:
+            raise AssertionError("Expected constructor to require both templates")
+
+    def test_uses_collection_template_above_threshold(self):
+        coll = np.array([1.0, 10.0, 20.0], dtype=float)
+        indu = np.array([1.0, 2.0, 3.0], dtype=float)
+        proc = make_processor(
+            template_coll=coll,
+            template_indu=indu,
+            threshold=30.0,
+        )
+        group = proc._sequence_to_group(make_seq(0, [20.0, 15.0]))
+
+        selected = proc._select_template_for_group(group)
+
+        np.testing.assert_allclose(selected, coll)
+
+    def test_uses_induction_template_at_or_below_threshold(self):
+        coll = np.array([1.0, 10.0, 20.0], dtype=float)
+        indu = np.array([1.0, 2.0, 3.0], dtype=float)
+        proc = make_processor(
+            template_coll=coll,
+            template_indu=indu,
+            threshold=30.0,
+        )
+        group = proc._sequence_to_group(make_seq(0, [10.0, 20.0]))
+
+        selected = proc._select_template_for_group(group)
+
+        np.testing.assert_allclose(selected, indu)
 
 
 class TestSecondPassTemplateMerging:
@@ -100,4 +155,35 @@ class TestSecondPassTemplateMerging:
         )
         np.testing.assert_allclose(
             proc.template_compensation_anchors[1].sequence_peak_time, 73.0
+        )
+
+    def test_process_uses_selected_template_family(self):
+        coll = np.cumsum(np.ones(200, dtype=float) * 5.0)
+        indu = np.cumsum(np.ones(200, dtype=float))
+        proc_coll = make_processor(
+            template_coll=coll,
+            template_indu=indu,
+            threshold=30.0,
+        )
+        proc_indu = make_processor(
+            template_coll=coll,
+            template_indu=indu,
+            threshold=300.0,
+        )
+        seq_a = make_seq(0, [90.0, 100.0])
+        seq_b = make_seq(50, [10.0, 5.0])
+
+        merged_coll = proc_coll.process_pixel_sequences([seq_a, seq_b])
+        merged_indu = proc_indu.process_pixel_sequences([seq_a, seq_b])
+
+        bridge_mask_coll = (merged_coll.times > 20.0) & (merged_coll.times < 60.0)
+        bridge_mask_indu = (merged_indu.times > 20.0) & (merged_indu.times < 60.0)
+        assert np.any(bridge_mask_coll)
+        assert np.any(bridge_mask_indu)
+        assert len(merged_coll.charges[bridge_mask_coll]) == len(
+            merged_indu.charges[bridge_mask_indu]
+        )
+        assert not np.allclose(
+            merged_coll.charges[bridge_mask_coll],
+            merged_indu.charges[bridge_mask_indu],
         )
