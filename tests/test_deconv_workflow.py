@@ -7,6 +7,7 @@ import pytest
 
 from unfoldlarpix.burst_processor import BurstSequenceProcessor
 from unfoldlarpix.burst_processor_v2 import BurstSequenceProcessorV2
+from unfoldlarpix.burst_processor_v3 import BurstSequenceProcessorV3
 from unfoldlarpix.data_containers import EffectiveCharge, EventData, Geometry, Hits, ReadoutConfig
 from unfoldlarpix.deconv_workflow import (
     EventDeconvolutionResult,
@@ -123,6 +124,18 @@ class TestCreateBurstProcessor:
 
         assert isinstance(processor, BurstSequenceProcessorV2)
         assert processor.tau == 7
+
+    def test_builds_v3_processor_with_custom_tau(self, readout_config: ReadoutConfig):
+        center_response = np.array([1.0, 2.0, 3.0], dtype=float)
+        processor = create_burst_processor(
+            readout_config,
+            center_response,
+            processor_cls=BurstSequenceProcessorV3,
+            tau=9,
+        )
+
+        assert isinstance(processor, BurstSequenceProcessorV3)
+        assert processor.tau == 9
 
 
 class TestProcessEventDeconvolution:

@@ -12,6 +12,7 @@ from .burst_processor import (
     merged_sequences_to_block,
 )
 from .burst_processor_v2 import BurstSequenceProcessorV2
+from .burst_processor_v3 import BurstSequenceProcessorV3
 from .data_containers import EventData, Geometry, Hits, ReadoutConfig
 from .deconv import deconv_fft, gaussian_filter_3d
 from .field_response import FieldResponseProcessor
@@ -50,7 +51,11 @@ class EventDeconvolutionResult:
     template_compensation_diagnostics: dict[str, np.ndarray]
 
 
-BurstProcessorClass = type[BurstSequenceProcessor] | type[BurstSequenceProcessorV2]
+BurstProcessorClass = (
+    type[BurstSequenceProcessor]
+    | type[BurstSequenceProcessorV2]
+    | type[BurstSequenceProcessorV3]
+)
 
 
 def integrate_kernel_over_time(kernel: np.ndarray, ticks_per_bin: int) -> np.ndarray:

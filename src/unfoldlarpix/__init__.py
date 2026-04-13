@@ -19,6 +19,7 @@ from .burst_processor import (
     MergedSequence,
 )
 from .burst_processor_v2 import BurstSequenceProcessorV2
+from .burst_processor_v3 import BurstSequenceProcessorV3
 from .deconv_workflow import (
     EventDeconvolutionResult,
     PreparedFieldResponse,
@@ -42,6 +43,7 @@ __all__ = [
     "BurstSequence",
     "BurstSequenceProcessor",
     "BurstSequenceProcessorV2",
+    "BurstSequenceProcessorV3",
     "MergedSequence",
     "PreparedFieldResponse",
     "EventDeconvolutionResult",

@@ -80,6 +80,63 @@ The processor returns `MergedSequence` objects with:
 - `charges`: Differentiated charge values (final output)
 - `cumulative`: Cumulative charge array (for debugging)
 
+## V3 Algorithm
+
+`BurstSequenceProcessorV3` keeps the same two compensation ingredients as v1:
+- dead-time compensation for close-enough neighbors
+- template compensation for separated neighbors
+
+The main change is that v3 runs in two passes per pixel instead of deciding the
+final action in a single left-to-right sweep.
+
+### Pass 1: Merge Close Raw Burst Sequences
+
+All raw burst sequences for one pixel are visited in time order.
+
+For each adjacent pair:
+- if `0 < gap <= tau`, merge them immediately with dead-time compensation
+- if `gap > tau`, stop the current merged group and start a new one
+
+This produces a list of first-pass merged groups. Inside each group, close
+neighbors have already been stitched together, and their internal times are kept
+explicitly.
+
+### Pass 2: Template-Connect the Merged Groups
+
+The first-pass merged groups are then processed in time order.
+
+- The first merged group is bootstrapped with the template, the same way the
+  first sequence is initialized in v1.
+- Each later merged group is attached to the running waveform with template
+  compensation.
+
+The important difference from v1 is that template compensation is no longer
+applied between raw sequences that happen to appear after a close merge. It is
+applied only between the merged groups produced by pass 1.
+
+### Truncated Template Compensation
+
+In pass 2, the available space before the next merged group can be shorter than
+the full template support. In that case, v3 uses only the portion of the
+template that fits in the open interval before the next merged group.
+
+That means the template is naturally truncated by the inter-group gap:
+- no template points are inserted inside a close-gap region already consumed by
+  pass 1 dead-time merging
+- template points are inserted only in the remaining gap between two first-pass
+  merged groups
+
+### Summary
+
+The v3 processing order is:
+
+1. Extract raw burst sequences per pixel.
+2. First pass: merge all close-enough raw neighbors with dead-time
+   compensation.
+3. Second pass: connect the resulting merged groups with template or truncated
+   template compensation.
+4. Differentiate the final cumulative waveform to obtain output charges.
+
 ## Parameters
 
 ### `adc_hold_delay`
