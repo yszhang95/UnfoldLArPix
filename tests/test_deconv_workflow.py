@@ -101,6 +101,8 @@ class TestPrepareFieldResponse:
         assert prepared.full_response.shape == (4, 4, 4)
         assert prepared.integrated_response.shape == (4, 4, 2)
         assert prepared.center_response.shape == (4,)
+        assert prepared.response_indu.shape == (4,)
+        np.testing.assert_allclose(prepared.response_indu, np.full(4, 0.134375))
         assert prepared.drift_length == 42.0
 
 
@@ -166,6 +168,7 @@ class TestProcessEventDeconvolution:
                 np.array([3, 4, 20]),
                 np.ones((2, 2, 3), dtype=float),
                 12.5,
+                (),
             ),
         )
         monkeypatch.setattr(
@@ -199,6 +202,52 @@ class TestProcessEventDeconvolution:
         np.testing.assert_allclose(result.smeared_true, np.full((2, 2, 2), 9.0))
         assert result.local_offset == (0, 0, 0)
 
+    def test_uses_prepared_induction_response_for_v3_by_default(
+        self, monkeypatch, sample_event: EventData, readout_config
+    ):
+        prepared = prepare_stub_response()
+        captured: dict[str, np.ndarray | None] = {}
+
+        def fake_hits_to_merged_block(*args, **kwargs):
+            captured["response_indu"] = kwargs["response_indu"]
+            return (
+                np.array([3, 4, 20]),
+                np.ones((2, 2, 3), dtype=float),
+                12.5,
+                (),
+            )
+
+        monkeypatch.setattr(
+            "unfoldlarpix.deconv_workflow.hits_to_merged_block",
+            fake_hits_to_merged_block,
+        )
+        monkeypatch.setattr(
+            "unfoldlarpix.deconv_workflow.build_gaussian_deconv_kernel",
+            lambda *args, **kwargs: np.full((3, 3, 2), 2.0),
+        )
+        monkeypatch.setattr(
+            "unfoldlarpix.deconv_workflow.deconv_fft",
+            lambda measurement, kernel, filter_fft: (
+                measurement + kernel[0, 0, 0] + filter_fft[0, 0, 0],
+                (0, 0, 0),
+            ),
+        )
+        monkeypatch.setattr(
+            "unfoldlarpix.deconv_workflow.smear_effective_charge",
+            lambda *args, **kwargs: (np.array([1, 2, 3]), np.full((2, 2, 2), 9.0)),
+        )
+
+        process_event_deconvolution(
+            sample_event,
+            readout_config,
+            prepared,
+            sigma_time=0.005,
+            sigma_pixel=0.2,
+            processor_cls=BurstSequenceProcessorV3,
+        )
+
+        np.testing.assert_allclose(captured["response_indu"], prepared.response_indu)
+
     def test_requires_zero_local_offset_when_requested(
         self, monkeypatch, sample_event: EventData, readout_config
     ):
@@ -210,6 +259,7 @@ class TestProcessEventDeconvolution:
                 np.array([0, 0, 0]),
                 np.ones((1, 1, 2), dtype=float),
                 1.0,
+                (),
             ),
         )
         monkeypatch.setattr(
@@ -257,6 +307,7 @@ class TestBuildEventOutputPayload:
             local_offset=(0, 0, 0),
             smeared_true=np.full((2, 2, 2), 8.0),
             smear_offset=np.array([1, 2, 3]),
+            template_compensation_diagnostics={},
         )
 
         payload = build_event_output_payload(
@@ -270,7 +321,7 @@ class TestBuildEventOutputPayload:
         )
 
         np.testing.assert_array_equal(payload["boffset"], np.array([3, 4, 18]))
-        np.testing.assert_array_equal(payload["hwf_block_offset"], np.array([3, 4, 18]))
+        np.testing.assert_array_equal(payload["hwf_block_offset"], np.array([3, 4, 20]))
         np.testing.assert_allclose(payload["hwf_block"], np.ones((2, 2, 2)))
         assert payload["drtoa"] == 12.0
 
@@ -288,6 +339,7 @@ def prepare_stub_response():
         (),
         {
             "center_response": np.array([1.0, 2.0, 3.0], dtype=float),
+            "response_indu": np.array([0.5, 1.0, 1.5], dtype=float),
             "integrated_response": np.ones((2, 2, 3), dtype=float),
         },
     )()

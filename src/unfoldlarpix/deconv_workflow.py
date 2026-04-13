@@ -27,6 +27,7 @@ class PreparedFieldResponse:
     full_response: np.ndarray
     integrated_response: np.ndarray
     center_response: np.ndarray
+    response_indu: np.ndarray
     metadata: dict[str, Any]
 
     @property
@@ -76,6 +77,32 @@ def integrate_kernel_over_time(kernel: np.ndarray, ticks_per_bin: int) -> np.nda
     return reshaped.sum(axis=-1)
 
 
+def extract_response_indu(full_response: np.ndarray) -> np.ndarray:
+    """Return the mean response in the +/-1-pixel ring around the center pixel."""
+    full_response = np.asarray(full_response)
+    if full_response.ndim != 3:
+        raise ValueError(
+            "Induction response extraction requires a 3D field-response array."
+        )
+
+    center_x = full_response.shape[0] // 2
+    center_y = full_response.shape[1] // 2
+    x_start = max(center_x - 1, 0)
+    x_stop = min(center_x + 2, full_response.shape[0])
+    y_start = max(center_y - 1, 0)
+    y_stop = min(center_y + 2, full_response.shape[1])
+
+    neighbor_window = full_response[x_start:x_stop, y_start:y_stop, :]
+    neighbor_mask = np.ones(neighbor_window.shape[:2], dtype=bool)
+    neighbor_mask[center_x - x_start, center_y - y_start] = False
+    neighbor_traces = neighbor_window[neighbor_mask]
+    if neighbor_traces.size == 0:
+        raise ValueError(
+            "Induction response extraction requires at least one non-center neighbor."
+        )
+    return np.mean(neighbor_traces, axis=0).copy()
+
+
 def prepare_field_response(
     field_response_path: str | Path,
     adc_hold_delay: int,
@@ -88,12 +115,14 @@ def prepare_field_response(
     center_response = full_response[
         full_response.shape[0] // 2, full_response.shape[1] // 2, :
     ].copy()
+    response_indu = extract_response_indu(full_response)
     integrated_response = integrate_kernel_over_time(full_response, adc_hold_delay)
     return PreparedFieldResponse(
         processor=processor,
         full_response=full_response,
         integrated_response=integrated_response,
         center_response=center_response,
+        response_indu=response_indu,
         metadata=processor.get_metadata(),
     )
 
@@ -300,6 +329,10 @@ def process_event_deconvolution(
     if event.hits is None:
         raise ValueError("Event does not contain hit data.")
 
+    response_indu = template_response_indu
+    if response_indu is None and processor_cls is BurstSequenceProcessorV3:
+        response_indu = prepared_response.response_indu
+
     block_offset, block_data, compensated_charge, template_comp_anchors = hits_to_merged_block(
         event.hits,
         readout_config,
@@ -307,7 +340,7 @@ def process_event_deconvolution(
         processor_cls=processor_cls,
         tau=tau,
         npadbin=npadbin,
-        response_indu=template_response_indu,
+        response_indu=response_indu,
     )
     gaussian_kernel = build_gaussian_deconv_kernel(
         tuple(block_data.shape),

@@ -15,6 +15,8 @@ Repository changes since `2026-03-31` are concentrated in deconvolution diagnost
   - selects the compensation template from the merged-group max accumulated charge
 - `src/unfoldlarpix/deconv_workflow.py`
   - treats `center_response` as the V3 collection response and adds `response_indu`
+  - derives `response_indu` automatically from the `+/-1` pixel neighborhood around the center response, excluding the center pixel
+  - defaults V3 event processing to the prepared `response_indu` when no override is supplied
   - applies the `1.2 * readout_config.threshold` default only to V3
 - `src/unfoldlarpix/README_burst_processor.md`
   - documents the two-template V3 compensation flow
