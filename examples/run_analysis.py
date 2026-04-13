@@ -4,7 +4,8 @@ Deconvolution analysis pipeline for LArPix data.
 
 Steps
 -----
-  1  Run deconv_positron_v1.py and/or v2.py for all (sigma, sigma_pxl) combinations.
+  1  Run deconv_positron_v1.py, v2.py, and/or v3_burst.py for all
+     (sigma, sigma_pxl) combinations.
   2  Export wire-cell JSON files at each threshold via deconv_xyz.py,
      including smeared-true JSONs.
   3  Copy all JSONs to --dest-dir.
@@ -16,7 +17,7 @@ Usage examples
   python run_analysis.py
 
   # Custom sigma grid, only V2, steps 1-3
-  python run_analysis.py --version v2 --sigmas 0.005 0.01 --sigma-pxls 0.1 0.2 \\
+  python run_analysis.py --versions v2 --sigmas 0.005 0.01 --sigma-pxls 0.1 0.2 \\
       --steps 1 2 3
 
   # Only regenerate plots (step 4) with existing npz files
@@ -63,6 +64,24 @@ def normalize_str_list(values: list[str] | None) -> list[str] | None:
     return cleaned or None
 
 
+def deconv_script_name(version: str) -> str:
+    """Return the deconvolution entry-point script for a pipeline version."""
+    if version == "v3_burst":
+        return "deconv_positron_v3_burst.py"
+    return f"deconv_positron_{version}.py"
+
+
+def deconv_output_stem(version: str) -> str:
+    """Return the NPZ filename stem produced by a pipeline version."""
+    if version == "v1":
+        return "deconv_positron"
+    if version == "v2":
+        return "deconv_positron_v2"
+    if version == "v3_burst":
+        return "deconv_positron_v3_burst"
+    raise ValueError(f"Unsupported version: {version}")
+
+
 def run(cmd: list[str], dry: bool, cwd: Path) -> None:
     print("  $", " ".join(str(c) for c in cmd))
     if not dry:
@@ -100,7 +119,7 @@ def step1_deconv(cfg, cwd: Path, dry: bool) -> None:
         for sigma, sigma_pxl in product(cfg.sigmas, cfg.sigma_pxls):
             print(f"\n  input={input_file}  sigma={sigma}  sigma_pxl={sigma_pxl}")
             for ver in cfg.versions:
-                script = f"deconv_positron_{ver}.py"
+                script = deconv_script_name(ver)
                 # Create output suffix from file label + sigma values
                 ss = fmt_sigma(sigma).lstrip('0')  # Remove leading '0'
                 sp = fmt_sigma_pxl(sigma_pxl).lstrip('0')
@@ -130,7 +149,9 @@ def step2_export(cfg, cwd: Path, dry: bool) -> None:
             sp = fmt_sigma_pxl(sigma_pxl).lstrip('0')
             for ver in cfg.versions:
                 output_suffix = f"{file_label}_s{ss}_sp{sp}"
-                npz = output_dir / f"deconv_positron{'_v2' if ver == 'v2' else ''}_{output_suffix}_event_0_0.npz"
+                npz = output_dir / (
+                    f"{deconv_output_stem(ver)}_{output_suffix}_event_0_0.npz"
+                )
                 for thr in cfg.thresholds:
                     ts = fmt_threshold(thr)
                     prefix = f"{ver}_{output_suffix}_t{ts}"
@@ -193,7 +214,9 @@ def step4_plots(cfg, cwd: Path, dry: bool) -> None:
             sp = fmt_sigma_pxl(sigma_pxl).lstrip('0')
             for ver in cfg.versions:
                 output_suffix = f"{file_label}_s{ss}_sp{sp}"
-                npz = output_dir / f"deconv_positron{'_v2' if ver == 'v2' else ''}_{output_suffix}_event_0_0.npz"
+                npz = output_dir / (
+                    f"{deconv_output_stem(ver)}_{output_suffix}_event_0_0.npz"
+                )
                 prefix = plot_dir / f"{ver}_{output_suffix}"
                 run([sys.executable, "plot_proj.py", str(npz),
                      "--threshold", str(cfg.plot_threshold),
@@ -217,7 +240,7 @@ def parse_args():
     p.add_argument("--thresholds", nargs="+", type=float,
                    default=[0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
                    metavar="T", help="Amplitude thresholds for JSON export (ke-)")
-    p.add_argument("--versions", nargs="+", choices=["v1", "v2"], default=["v1", "v2"],
+    p.add_argument("--versions", nargs="+", choices=["v1", "v2", "v3_burst"], default=["v1", "v2"],
                    help="Processor versions to run")
     p.add_argument("--steps", nargs="+", type=int, default=[1, 2, 3, 4],
                    choices=[1, 2, 3, 4], metavar="N",
