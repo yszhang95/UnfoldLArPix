@@ -541,14 +541,13 @@ def merged_sequences_to_block(
     # calculate pixel reaches
     pixel_keys = list(merged_seqs.keys())
     pmin, pmax = np.min(pixel_keys, axis=0), np.max(pixel_keys, axis=0)
-    print(pmin, pmax)
     shape = np.zeros((3,), dtype=int)
     shape[:2] = pmax - pmin + 1
     tmin, tmax = [np.min(merged_seqs[pixel_key].times) for pixel_key in pixel_keys], [np.max(merged_seqs[pixel_key].times) for pixel_key in pixel_keys]
     tmin, tmax = np.min(tmin) - pad_length, np.max(tmax) + pad_length
     shape[2] = (int(np.ceil((tmax - tmin) / bin_size)) + 1)
-    offset = np.array([pmin[0], pmin[1], tmin])
-    print(offset)
+    spatial_offset = np.asarray(pmin, dtype=int)
+    offset = np.array([spatial_offset[0], spatial_offset[1], tmin], dtype=float)
 
     # loop over pixels and put charges into blocks
     block_charges = np.zeros(shape, dtype=float)
@@ -559,7 +558,7 @@ def merged_sequences_to_block(
         if len(np.unique(tinds)) != len(tinds):
             raise ValueError(f"Duplicate time indices found for pixel {pixel_key} after binning, cannot convert to blocks."
                              f"times: {times}, tinds: {tinds}, offset: {offset[2]}, bin_size: {bin_size}")
-        pix_inds = np.array(pixel_key) - offset[:2]
+        pix_inds = np.asarray(pixel_key, dtype=int) - spatial_offset
         block_charges[pix_inds[0], pix_inds[1], tinds.astype(int)] = charges
     block_offset = offset
 
