@@ -131,7 +131,7 @@ class TestCreateBurstProcessor:
 
     def test_builds_v3_processor_with_custom_tau(self, readout_config: ReadoutConfig):
         center_response = np.array([1.0, 2.0, 3.0], dtype=float)
-        response_indu = np.array([0.5, 1.0, 1.5], dtype=float)
+        response_indu = np.array([0.5, 1.0, -0.5, -1.0], dtype=float)
         processor = create_burst_processor(
             readout_config,
             center_response,
@@ -144,7 +144,8 @@ class TestCreateBurstProcessor:
         assert processor.tau == 9
         assert processor.threshold == 1.2 * readout_config.threshold
         np.testing.assert_allclose(processor.template_coll, np.array([1.0, 3.0, 6.0]))
-        np.testing.assert_allclose(processor.template_indu, np.array([0.5, 1.5, 3.0]))
+        np.testing.assert_allclose(processor.template_indu, np.array([0.5, 1.0, -0.5, -1.0]))
+        np.testing.assert_allclose(processor.template_indu_cumulative, np.array([0.5, 1.5]))
 
     def test_v3_requires_response_indu(self, readout_config: ReadoutConfig):
         center_response = np.array([1.0, 2.0, 3.0], dtype=float)

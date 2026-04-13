@@ -108,7 +108,20 @@ class TestTemplateSelection:
 
         selected = proc._select_template_for_group(group)
 
-        np.testing.assert_allclose(selected, indu)
+        np.testing.assert_allclose(selected, np.array([1.0, 3.0, 6.0]))
+
+    def test_bipolar_induction_template_keeps_only_positive_prefix(self):
+        coll = np.array([1.0, 10.0, 20.0], dtype=float)
+        indu = np.array([2.0, 3.0, -1.0, -4.0], dtype=float)
+        proc = make_processor(
+            template_coll=coll,
+            template_indu=indu,
+            threshold=30.0,
+        )
+
+        np.testing.assert_allclose(proc.template_indu, indu)
+        np.testing.assert_allclose(proc.template_indu_positive, np.array([2.0, 3.0]))
+        np.testing.assert_allclose(proc.template_indu_cumulative, np.array([2.0, 5.0]))
 
 
 class TestSecondPassTemplateMerging:
@@ -159,7 +172,9 @@ class TestSecondPassTemplateMerging:
 
     def test_process_uses_selected_template_family(self):
         coll = np.cumsum(np.ones(200, dtype=float) * 5.0)
-        indu = np.cumsum(np.ones(200, dtype=float))
+        indu = np.concatenate(
+            [np.ones(100, dtype=float), -np.ones(100, dtype=float)]
+        )
         proc_coll = make_processor(
             template_coll=coll,
             template_indu=indu,

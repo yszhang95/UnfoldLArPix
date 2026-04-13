@@ -13,6 +13,7 @@ Repository changes since `2026-03-31` are concentrated in deconvolution diagnost
 - `src/unfoldlarpix/burst_processor_v3.py`
   - requires both `template_coll` and `template_indu`
   - selects the compensation template from the merged-group max accumulated charge
+  - clips `template_indu` to its leading positive segment before building the induction compensation template
 - `src/unfoldlarpix/deconv_workflow.py`
   - treats `center_response` as the V3 collection response and adds `response_indu`
   - derives `response_indu` automatically from the `+/-1` pixel neighborhood around the center response, excluding the center pixel

@@ -59,6 +59,12 @@ BurstProcessorClass = (
 )
 
 
+def build_cumulative_template(response: np.ndarray) -> np.ndarray:
+    """Convert a response trace into a non-decreasing cumulative template."""
+    cumulative = np.cumsum(np.asarray(response, dtype=float))
+    return np.maximum.accumulate(cumulative)
+
+
 def integrate_kernel_over_time(kernel: np.ndarray, ticks_per_bin: int) -> np.ndarray:
     """Integrate a time-domain kernel into coarser bins."""
     if ticks_per_bin <= 0:
@@ -146,8 +152,8 @@ def create_burst_processor(
             readout_config.adc_hold_delay,
             tau=tau_value,
             deadtime=readout_config.csa_reset_time,
-            template_coll=np.cumsum(center_response),
-            template_indu=np.cumsum(response_indu),
+            template_coll=build_cumulative_template(center_response),
+            template_indu=response_indu,
             threshold=1.2 * readout_config.threshold,
         )
     return processor_cls(

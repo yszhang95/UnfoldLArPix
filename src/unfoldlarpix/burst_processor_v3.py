@@ -71,7 +71,7 @@ class BurstSequenceProcessorV3(BurstSequenceProcessor):
         template_coll: np.ndarray = None,
         template_indu: np.ndarray = None,
     ):
-        """Initialize V3 with required collection and induction templates."""
+        """Initialize V3 with collection cumulative and induction bipolar templates."""
         if template_coll is None or template_indu is None:
             raise ValueError(
                 "BurstSequenceProcessorV3 requires both template_coll and "
@@ -87,22 +87,54 @@ class BurstSequenceProcessorV3(BurstSequenceProcessor):
 
         self.template_coll = np.asarray(template_coll, dtype=float)
         self.template_indu = np.asarray(template_indu, dtype=float)
+        self.template_indu_positive = self._extract_positive_induction_prefix(
+            self.template_indu
+        )
+        self.template_indu_cumulative = self._build_induction_compensation_template(
+            self.template_indu_positive
+        )
 
-        for template_name, template_value in (
-            ("template_coll", self.template_coll),
-            ("template_indu", self.template_indu),
-        ):
-            if template_value.size == 0:
-                raise ValueError(f"{template_name} cannot be empty.")
-            if not np.all(np.diff(template_value) >= 0):
-                raise ValueError(f"{template_name} must be monotonically increasing")
+        if self.template_coll.size == 0:
+            raise ValueError("template_coll cannot be empty.")
+        if not np.all(np.diff(self.template_coll) >= 0):
+            raise ValueError("template_coll must be monotonically increasing")
+        if self.template_indu.size == 0:
+            raise ValueError("template_indu cannot be empty.")
+
+    def _extract_positive_induction_prefix(
+        self, template_indu: np.ndarray
+    ) -> np.ndarray:
+        """Keep only the leading positive part of a bipolar induction template."""
+        template_indu = np.asarray(template_indu, dtype=float)
+        if template_indu.size == 0:
+            raise ValueError("template_indu cannot be empty.")
+
+        non_positive = np.where(template_indu <= 0)[0]
+        stop_idx = int(non_positive[0]) if non_positive.size > 0 else len(template_indu)
+        positive_prefix = template_indu[:stop_idx]
+        if positive_prefix.size == 0:
+            raise ValueError(
+                "template_indu must start with a positive segment before turning "
+                "non-positive."
+            )
+        return positive_prefix
+
+    def _build_induction_compensation_template(
+        self, template_indu_positive: np.ndarray
+    ) -> np.ndarray:
+        """Build the monotone induction compensation template from its positive part."""
+        template_indu_positive = np.asarray(template_indu_positive, dtype=float)
+        if template_indu_positive.size == 0:
+            raise ValueError("template_indu positive prefix cannot be empty.")
+        compensation_template = np.cumsum(template_indu_positive)
+        return compensation_template
 
     def _select_template_for_group(self, group: MergedBurstGroup) -> np.ndarray:
         """Select collection or induction template from the merged-group charge."""
         max_accumulated_q = float(np.max(np.cumsum(group.charges)))
         if max_accumulated_q > self.threshold:
             return self.template_coll
-        return self.template_indu
+        return self.template_indu_cumulative
 
     def _record_group_template_compensation_anchor(
         self,

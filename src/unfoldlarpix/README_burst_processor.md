@@ -128,7 +128,7 @@ That means the template is naturally truncated by the inter-group gap:
 
 ### Optional Collection vs Induction Template Choice
 
-V3 can also be configured with two cumulative templates:
+V3 can also be configured with two templates:
 - `template_coll`
 - `template_indu`
 
@@ -139,8 +139,15 @@ accumulated charge. If
 
 then v3 uses `template_coll`. Otherwise it uses `template_indu`.
 
+`template_coll` is an increasing cumulative template. `template_indu` is a
+bipolar response waveform. For compensation, v3 first keeps only the leading
+positive part of `template_indu`, then integrates that clipped positive segment
+to build the monotone compensation template. The late negative tail is ignored
+for template clipping.
+
 Both templates are required for v3 compensation. If you construct v3 through
-the workflow helpers, you must supply both corresponding center responses.
+the workflow helpers, `center_response` is used as the collection response and
+`response_indu` provides the induction waveform.
 
 ### Summary
 
