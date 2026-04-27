@@ -217,7 +217,7 @@ examples/
 
 ## Analysis Outputs Since 2026-03-31
 
-The following analysis/output directories were generated or refreshed in the workspace after `2026-03-31`.
+The following analysis/output directories were generated, refreshed, or archived after `2026-03-31`.
 
 | Path | Scope | Current contents |
 | --- | --- | --- |
@@ -228,6 +228,8 @@ The following analysis/output directories were generated or refreshed in the wor
 | `examples/analysis_20260402/nbins3/plots/` | grouped `nbins=3` comparison plots for fastadc masked/unmasked files | `6` PNG |
 | `examples/analysis_output/analysis_20260408/` | April 8 fastadc non-noise shielded studies, moved under `analysis_output` | `4` NPZ, `8` JSON, `48` PNG |
 | `examples/analysis_output/analysis_20260409/` | April 9 shield-response studies, moved under `analysis_output` | `6` NPZ, `12` JSON, `54` PNG |
+| `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_20260410/` | April 10 shield-response test file study | `2` NPZ, `4` JSON, `18` PNG |
+| `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/` | loose-NPZ reproduction and cleanup archive | `6` reproduced NPZ, `12` JSON, `54` PNG, `6` legacy NPZ, `commands.sh`, `comparison_results.json`, `comparison_report.md` |
 
 Additional generated artifact:
 
@@ -263,3 +265,104 @@ Additional generated artifact:
   - `data/pgun_positron_3gev_tred_noises_effq_nt1_nburst4_shield_reset0.npz`
 - Processors: `v1`, `v2`
 - Outputs now stored under `examples/analysis_output/analysis_20260409/`
+
+### April 10 Shield Test
+
+- Input:
+  - `data/pgun_positron_3gev_tred_noises_effq_nt1_nburst4_shield.npz`
+- Field response:
+  - `/srv/storage1/yousen/tred_workspace/response_44_v2a_shield_500V_25x25pixel_tred.npz`
+- Parameters:
+  - `sigma_temporal = 0.004`
+  - `sigma_pixel = 0.2`
+  - `tpc_id = 0`, `event_id = 0`
+  - JSON / standard-plot threshold `0.5`
+- Processors: `v1`, `v2`
+- Archived path:
+  - `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_20260410/`
+- The local `examples/analysis_20260410/` workspace copy was removed after backup.
+- Current output inventory:
+  - `2` NPZ
+  - `4` JSON in `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_20260410/output_matrix/data/0/`
+  - `18` PNG in `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_20260410/plots/`
+
+### Loose Deconvolution NPZs Under `examples/`
+
+Initial audit found `22` deconvolution NPZ files directly under `examples/`. These are harder to audit than per-run directories because filenames do not always encode the full run context consistently.
+
+Hash comparison against organized analysis directories found:
+
+- `9` loose NPZ files were exact SHA256 duplicates already present in `examples/analysis_output/`; these were deleted on `2026-04-27`.
+- `1` additional loose NPZ was data-exact by NPZ member CRC against `examples/analysis_output/analysis_20260319_tpc0/`; this was deleted on `2026-04-27`.
+- `6` high-temporal-sigma loose NPZ files using `sigma_temporal=0.1`, `0.2`, and `0.5` were intentionally discarded because those temporal filters are too loose for current studies.
+- The final `6` loose NPZ files were not duplicates; they were moved into `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/legacy_loose_npz_20260427/` after comparison.
+- The local `examples/analysis_loose_repro_20260427/` workspace copy was removed after backup.
+- There are now `0` NPZ files directly under `examples/`.
+
+Loose files with exact archive matches:
+
+- deleted `deconv_positron_v2_thres5k_nburst256_fastadc0p5_sp001_spp2_event_0_0.npz` -> archived in `examples/analysis_output/analysis_20260327/`
+- deleted `deconv_positron_v2_thres5k_nburst256_fastadc0p5_sp002_spp2_event_0_0.npz` -> archived in `examples/analysis_output/analysis_20260327/`
+- deleted `deconv_positron_v2_thres5k_nburst256_fastadc0p5_sp005_spp2_event_0_0.npz` -> archived in `examples/analysis_output/analysis_20260327/`
+- deleted `deconv_positron_v2_thres5k_nburst4_fastadc0p5_sp001_spp2_event_0_0.npz` -> archived in `examples/analysis_output/analysis_20260327/`
+- deleted `deconv_positron_v2_thres5k_nburst4_fastadc0p5_sp002_spp2_event_0_0.npz` -> archived in `examples/analysis_output/analysis_20260327/`
+- deleted `deconv_positron_v2_thres5k_nburst4_fastadc0p5_sp005_spp2_event_0_0.npz` -> archived in `examples/analysis_output/analysis_20260327/`
+- deleted `deconv_positron_v2_thres5k_nburst256_sp001_spp2_event_0_0.npz` -> archived in `examples/analysis_output/analysis_20260331/`
+- deleted `deconv_positron_v2_thres5k_nburst256_sp002_spp2_event_0_0.npz` -> archived in `examples/analysis_output/analysis_20260331/`
+- deleted `deconv_positron_v2_thres5k_nburst256_sp005_spp2_event_0_0.npz` -> archived in `examples/analysis_output/analysis_20260331/`
+- deleted `deconv_positron_v2_thres5k_nburst4_sp001_spp2_event_0_0.npz` -> data-exact by NPZ member CRC in `examples/analysis_output/analysis_20260319_tpc0/`
+
+Loose high-temporal-sigma files intentionally discarded:
+
+- deleted `deconv_positron_v2_thres5k_nburst256_fastadc0p5_sp1_spp2_event_0_0.npz`
+- deleted `deconv_positron_v2_thres5k_nburst256_fastadc0p5_sp2_spp2_event_0_0.npz`
+- deleted `deconv_positron_v2_thres5k_nburst256_fastadc0p5_sp5_spp2_event_0_0.npz`
+- deleted `deconv_positron_v2_thres5k_nburst4_fastadc0p5_sp1_spp2_event_0_0.npz`
+- deleted `deconv_positron_v2_thres5k_nburst4_fastadc0p5_sp2_spp2_event_0_0.npz`
+- deleted `deconv_positron_v2_thres5k_nburst4_fastadc0p5_sp5_spp2_event_0_0.npz`
+
+Legacy files without an organized hash match:
+
+- moved `deconv_positron_thres5k_nburst256_fastadc0p5_sp005_spp2_event_0_0.npz` -> `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/legacy_loose_npz_20260427/`
+- moved `deconv_positron_thres5k_nburst256_sp005_spp2_event_0_0.npz` -> `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/legacy_loose_npz_20260427/`
+- moved `deconv_positron_thres5k_nburst64_sp005_spp2_event_0_0.npz` -> `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/legacy_loose_npz_20260427/`
+- moved `deconv_positron_v2_thres5k_nburst64_sp001_spp2_event_0_0.npz` -> `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/legacy_loose_npz_20260427/`
+- moved `deconv_positron_v2_thres5k_nburst64_sp002_spp2_event_0_0.npz` -> `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/legacy_loose_npz_20260427/`
+- moved `deconv_positron_v2_thres5k_nburst64_sp005_spp2_event_0_0.npz` -> `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/legacy_loose_npz_20260427/`
+
+The `nburst64` `v1`/`v2` tight-sigma cases were reproduced under `examples/analysis_loose_repro_20260427/` during cleanup and are archived at `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/`. The workspace copy was removed after backup. That directory contains `commands.sh`, `comparison_report.md`, `6` reproduced NPZ files, `12` JSON files, and `54` PNG files.
+
+#### Loose NPZ Plot Mapping
+
+The loose NPZ filenames still encode useful configuration information, but they are not reliable as a complete run record because field-response choice, run command, JSON thresholds, and plotting location are not consistently captured. The following table records the plot associations found by filename stem during the cleanup audit. Rows marked `archived duplicate` have already been deleted from `examples/`.
+
+| Loose NPZ pattern | Status | Corresponding plot location |
+| --- | --- | --- |
+| `deconv_positron_v2_thres5k_nburst256_fastadc0p5_sp001_spp2_event_0_0.npz` | archived duplicate | `examples/analysis_output/analysis_20260327/plots/`, `examples/analysis_output/analysis_20260401/plots/`, `examples/analysis_output/analysis_20260402/plots/` |
+| `deconv_positron_v2_thres5k_nburst256_fastadc0p5_sp002_spp2_event_0_0.npz` | archived duplicate | `examples/analysis_output/analysis_20260327/plots/`, `examples/analysis_output/analysis_20260401/plots/`, `examples/analysis_output/analysis_20260402/plots/` |
+| `deconv_positron_v2_thres5k_nburst256_fastadc0p5_sp005_spp2_event_0_0.npz` | archived duplicate | `examples/analysis_output/analysis_20260327/plots/`, `examples/analysis_output/analysis_20260401/plots/`, `examples/analysis_output/analysis_20260402/plots/`, `examples/analysis_output/analysis_20260408/plots/`, `examples/analysis_output/analysis_20260408/nbins3/plots/` |
+| `deconv_positron_v2_thres5k_nburst4_fastadc0p5_sp001_spp2_event_0_0.npz` | archived duplicate | `examples/analysis_output/analysis_20260327/plots/`, `examples/analysis_output/analysis_20260401/plots/`, `examples/analysis_output/analysis_20260402/plots/` |
+| `deconv_positron_v2_thres5k_nburst4_fastadc0p5_sp002_spp2_event_0_0.npz` | archived duplicate | `examples/analysis_output/analysis_20260327/plots/`, `examples/analysis_output/analysis_20260401/plots/`, `examples/analysis_output/analysis_20260402/plots/` |
+| `deconv_positron_v2_thres5k_nburst4_fastadc0p5_sp005_spp2_event_0_0.npz` | archived duplicate | `examples/analysis_output/analysis_20260327/plots/`, `examples/analysis_output/analysis_20260401/plots/`, `examples/analysis_output/analysis_20260402/plots/` |
+| `deconv_positron_v2_thres5k_nburst256_sp001_spp2_event_0_0.npz` | archived duplicate | `examples/analysis_output/analysis_20260331/plots/`, `examples/analysis_output/analysis_20260401/plots/`, `examples/analysis_output/analysis_20260402/plots/` |
+| `deconv_positron_v2_thres5k_nburst256_sp002_spp2_event_0_0.npz` | archived duplicate | `examples/analysis_output/analysis_20260331/plots/`, `examples/analysis_output/analysis_20260401/plots/`, `examples/analysis_output/analysis_20260402/plots/` |
+| `deconv_positron_v2_thres5k_nburst256_sp005_spp2_event_0_0.npz` | archived duplicate | `examples/analysis_output/analysis_20260331/plots/`, `examples/analysis_output/analysis_20260401/plots/`, `examples/analysis_output/analysis_20260402/plots/` |
+| `deconv_positron_thres5k_nburst256_fastadc0p5_sp005_spp2_event_0_0.npz` | moved to legacy; changed-core | `examples/analysis_output/analysis_20260401/plots/`, `examples/analysis_output/analysis_20260402/plots/`, `examples/analysis_output/analysis_20260402/nbins3/plots/`, `examples/analysis_output/analysis_20260408/plots/`, `examples/analysis_output/analysis_20260408/nbins3/plots/` |
+| `deconv_positron_thres5k_nburst256_sp005_spp2_event_0_0.npz` | moved to legacy; changed-core | `examples/analysis_output/analysis_20260401/plots/`, `examples/analysis_output/analysis_20260402/plots/` |
+| `deconv_positron_thres5k_nburst64_sp005_spp2_event_0_0.npz` | moved to legacy; reproduced in `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/` | `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/plots/` |
+| `deconv_positron_v2_thres5k_nburst256_fastadc0p5_sp1_spp2_event_0_0.npz` | deleted high-temporal-sigma file | discarded; interpreted as `sigma_temporal=0.1` |
+| `deconv_positron_v2_thres5k_nburst256_fastadc0p5_sp2_spp2_event_0_0.npz` | deleted high-temporal-sigma file | discarded; interpreted as `sigma_temporal=0.2` |
+| `deconv_positron_v2_thres5k_nburst256_fastadc0p5_sp5_spp2_event_0_0.npz` | deleted high-temporal-sigma file | discarded; interpreted as `sigma_temporal=0.5` |
+| `deconv_positron_v2_thres5k_nburst4_fastadc0p5_sp1_spp2_event_0_0.npz` | deleted high-temporal-sigma file | discarded; interpreted as `sigma_temporal=0.1` |
+| `deconv_positron_v2_thres5k_nburst4_fastadc0p5_sp2_spp2_event_0_0.npz` | deleted high-temporal-sigma file | discarded; interpreted as `sigma_temporal=0.2` |
+| `deconv_positron_v2_thres5k_nburst4_fastadc0p5_sp5_spp2_event_0_0.npz` | deleted high-temporal-sigma file | discarded; interpreted as `sigma_temporal=0.5` |
+| `deconv_positron_v2_thres5k_nburst4_sp001_spp2_event_0_0.npz` | deleted data-exact duplicate | archived in `examples/analysis_output/analysis_20260319_tpc0/`; no matching plot files found under filename stem |
+| `deconv_positron_v2_thres5k_nburst64_sp001_spp2_event_0_0.npz` | moved to legacy; reproduced in `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/` | `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/plots/` |
+| `deconv_positron_v2_thres5k_nburst64_sp002_spp2_event_0_0.npz` | moved to legacy; reproduced in `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/` | `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/plots/` |
+| `deconv_positron_v2_thres5k_nburst64_sp005_spp2_event_0_0.npz` | moved to legacy; reproduced in `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/` | `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/plots/` |
+
+Recommended organization rule:
+
+- New deconvolution outputs should be written into a dated `analysis_YYYYMMDD/` directory or moved under `examples/analysis_output/analysis_YYYYMMDD/`.
+- Direct `examples/*.npz` deconvolution outputs should be treated as temporary or legacy files only.
+- Keep the full input stem, processor version, `sigma_temporal`, `sigma_pixel`, field-response family, `tpc_id`, and `event_id` in either the directory summary or filename. For shield inputs, the summary should explicitly record the shield field-response path.
