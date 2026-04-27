@@ -263,3 +263,121 @@ Additional generated artifact:
   - `data/pgun_positron_3gev_tred_noises_effq_nt1_nburst4_shield_reset0.npz`
 - Processors: `v1`, `v2`
 - Outputs now stored under `examples/analysis_output/analysis_20260409/`
+
+## Analysis Outputs Since 2026-04-12
+
+### April 12-13 V3 Burst Workflow Updates
+
+The burst-based V3 path was brought into the main shared workflow and exercised
+through a dedicated output directory:
+
+- Output root: `analysis_20260412/`
+- Current contents:
+  - `13` NPZ files in `analysis_20260412/deconv/`
+  - `156` JSON files in `analysis_20260412/output_matrix/data/0/`
+  - `117` PNG files in `analysis_20260412/plots/`
+
+Code and workflow changes made for this study:
+
+- Added `examples/deconv_positron_v3_burst.py` as the burst-processor analogue of
+  `deconv_positron_v2.py`
+- Updated `examples/run_analysis.py` to support `--versions v3_burst`
+- Fixed V3 template preparation in `src/unfoldlarpix/deconv_workflow.py` by
+  converting response traces into non-decreasing cumulative templates before
+  passing them to `BurstSequenceProcessorV3`
+- Fixed mixed float/int block indexing in
+  `src/unfoldlarpix/burst_processor.py::merged_sequences_to_block()`
+- Standard runtime for these studies used `uv run python`; plotting required
+  `uv run --with matplotlib python`
+
+### Dataset A: `thres5k_nburst256`
+
+Input:
+- `/home/yousen/Documents/NDLAr2x2/sp_deconv_tradition/UnfoldLArPix/examples/data/pgun_positron_3gev_tred_noises_effq_nt1_thres5k_nburst256.npz`
+
+Processor:
+- `v3_burst`
+
+JSON/plot threshold:
+- `0.5 ke-`
+
+#### Sweep A1: `sigma_pixel = 0.2`
+
+| sigma_temporal | Output suffix | sum_deconv_q | deconv voxels at 0.5 ke- |
+| --- | --- | ---: | ---: |
+| 0.002 | `sp002_spp2` | 31,938.5305 | 16,380 |
+| 0.003 | `sp003_spp2` | 31,938.5217 | 16,805 |
+| 0.004 | `sp004_spp2` | 31,938.5186 | 17,232 |
+| 0.005 | `sp005_spp2` | 31,938.5174 | 18,038 |
+
+#### Sweep A2: `sigma_pixel = 0.1`
+
+| sigma_temporal | Output suffix | sum_deconv_q | deconv voxels at 0.5 ke- |
+| --- | --- | ---: | ---: |
+| 0.002 | `sp002_spp1` | 31,798.9787 | 20,404 |
+| 0.003 | `sp003_spp1` | 31,798.9699 | 20,529 |
+| 0.004 | `sp004_spp1` | 31,798.9669 | 20,712 |
+| 0.005 | `sp005_spp1` | 31,798.9656 | 20,866 |
+
+Observations for `nburst256`:
+
+- Lower `sigma_pixel` (`0.1`) produced more voxels above the `0.5 ke-`
+  threshold than `sigma_pixel = 0.2`
+- For both pixel settings, increasing `sigma_temporal` from `0.002` to `0.005`
+  increased the retained voxel count at `0.5 ke-`
+- Total deconvolved charge stayed nearly constant across the temporal sweep
+
+### Dataset B: `thres5k_nburst4`
+
+Input:
+- `/home/yousen/Documents/NDLAr2x2/sp_deconv_tradition/UnfoldLArPix/examples/data/pgun_positron_3gev_tred_noises_effq_nt1_thres5k_nburst4.npz`
+
+Processor:
+- `v3_burst`
+
+Sweep:
+- `sigma_pixel = 0.2`
+- `sigma_temporal = 0.001, 0.002, 0.003, 0.004, 0.005`
+
+| sigma_temporal | Output suffix | sum_deconv_q | deconv voxels at 0.5 ke- |
+| --- | --- | ---: | ---: |
+| 0.001 | `sp001_spp2` | 35,684.4150 | 22,249 |
+| 0.002 | `sp002_spp2` | 35,684.2961 | 23,267 |
+| 0.003 | `sp003_spp2` | 35,684.2460 | 23,817 |
+| 0.004 | `sp004_spp2` | 35,684.2244 | 24,005 |
+| 0.005 | `sp005_spp2` | 35,684.2133 | 24,183 |
+
+Observations for `nburst4`:
+
+- This input gives a substantially larger compensated charge and deconvolved
+  charge than the `nburst256` hit file used above
+- The `0.5 ke-` retained voxel count rises steadily with increasing
+  `sigma_temporal`
+- The `sigma_temporal = 0.001` point was added after the main `0.002-0.005`
+  sweep to probe the lower edge of the temporal regularization range
+
+### Artifacts Produced Under `analysis_20260412/`
+
+Main outputs:
+
+- `analysis_20260412/deconv/`
+  - `8` NPZ files for `thres5k_nburst256`
+  - `5` NPZ files for `thres5k_nburst4`
+- `analysis_20260412/output_matrix/data/0/`
+  - `12` JSON files per NPZ (`6` deconv + `6` smeared)
+- `analysis_20260412/plots/`
+  - `9` PNG files per NPZ from `plot_proj.py`
+
+Representative filenames:
+
+- `analysis_20260412/deconv/deconv_positron_v3_burst_thres5k_nburst256_sp005_spp1_event_0_0.npz`
+- `analysis_20260412/deconv/deconv_positron_v3_burst_thres5k_nburst4_sp001_spp2_event_0_0.npz`
+- `analysis_20260412/output_matrix/data/0/0-v3_burst_thres5k_nburst4_sp005_spp2_t0p5.json`
+- `analysis_20260412/plots/v3_burst_thres5k_nburst256_sp004_spp2_hist_diff.png`
+
+Notes:
+
+- All runs completed successfully end-to-end through deconvolution, JSON export,
+  and plotting
+- `plot_proj.py` emitted `tight_layout` warnings during figure generation, but
+  they were non-fatal and all expected plot files were written
