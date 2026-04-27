@@ -54,6 +54,12 @@ def parse_args() -> argparse.Namespace:
         default=".",
         help="Directory for the output NPZ file",
     )
+    parser.add_argument(
+        "--response-template",
+        choices=("center", "collection", "collection-plus-neighbors"),
+        default="center",
+        help="Field-response template used for burst compensation.",
+    )
     return parser.parse_args()
 
 
@@ -81,6 +87,7 @@ def main() -> None:
         args.field_response,
         readout_config.adc_hold_delay,
         normalized=False,
+        response_template=args.response_template.replace("-", "_"),
     )
 
     for event in loader.iter_events():

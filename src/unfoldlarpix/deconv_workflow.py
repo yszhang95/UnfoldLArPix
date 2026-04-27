@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from typing import Literal
 
 import numpy as np
 
@@ -17,6 +18,8 @@ from .deconv import deconv_fft, gaussian_filter_3d
 from .field_response import FieldResponseProcessor
 from .smear_truth import gaus_smear_true_3d
 
+ResponseTemplateMode = Literal["center", "collection", "collection_plus_neighbors"]
+
 
 @dataclass(frozen=True)
 class PreparedFieldResponse:
@@ -26,6 +29,10 @@ class PreparedFieldResponse:
     full_response: np.ndarray
     integrated_response: np.ndarray
     center_response: np.ndarray
+    collection_response: np.ndarray
+    collection_plus_neighbors_response: np.ndarray
+    selected_response: np.ndarray
+    selected_response_mode: ResponseTemplateMode
     metadata: dict[str, Any]
 
     @property
@@ -48,6 +55,9 @@ class EventDeconvolutionResult:
     smeared_true: np.ndarray
     smear_offset: np.ndarray
     template_compensation_diagnostics: dict[str, np.ndarray]
+    response_template_mode: ResponseTemplateMode = "center"
+    burst_compensation_mode: str = "v1"
+    tau: float | None = None
 
 
 BurstProcessorClass = type[BurstSequenceProcessor] | type[BurstSequenceProcessorV2]
@@ -76,6 +86,7 @@ def prepare_field_response(
     adc_hold_delay: int,
     *,
     normalized: bool = False,
+    response_template: ResponseTemplateMode = "center",
 ) -> PreparedFieldResponse:
     """Load, process, and integrate the field response for deconvolution."""
     processor = FieldResponseProcessor(field_response_path, normalized=normalized)
@@ -83,19 +94,35 @@ def prepare_field_response(
     center_response = full_response[
         full_response.shape[0] // 2, full_response.shape[1] // 2, :
     ].copy()
+    collection_response = processor.get_collection_pixel_response()
+    collection_plus_neighbors_response = processor.get_collection_neighborhood_response(
+        radius=1
+    )
+    response_by_mode: dict[ResponseTemplateMode, np.ndarray] = {
+        "center": center_response,
+        "collection": collection_response,
+        "collection_plus_neighbors": collection_plus_neighbors_response,
+    }
+    if response_template not in response_by_mode:
+        raise ValueError(f"Unsupported response_template: {response_template}")
+    selected_response = response_by_mode[response_template].copy()
     integrated_response = integrate_kernel_over_time(full_response, adc_hold_delay)
     return PreparedFieldResponse(
         processor=processor,
         full_response=full_response,
         integrated_response=integrated_response,
         center_response=center_response,
+        collection_response=collection_response,
+        collection_plus_neighbors_response=collection_plus_neighbors_response,
+        selected_response=selected_response,
+        selected_response_mode=response_template,
         metadata=processor.get_metadata(),
     )
 
 
 def create_burst_processor(
     readout_config: ReadoutConfig,
-    center_response: np.ndarray,
+    template_response: np.ndarray,
     *,
     processor_cls: BurstProcessorClass = BurstSequenceProcessor,
     tau: float | None = None,
@@ -106,7 +133,7 @@ def create_burst_processor(
         readout_config.adc_hold_delay,
         tau=tau_value,
         deadtime=readout_config.csa_reset_time,
-        template=np.cumsum(center_response),
+        template=np.cumsum(template_response),
         threshold=readout_config.threshold,
     )
 
@@ -114,7 +141,7 @@ def create_burst_processor(
 def hits_to_merged_block(
     hits: Hits,
     readout_config: ReadoutConfig,
-    center_response: np.ndarray,
+    template_response: np.ndarray,
     *,
     processor_cls: BurstProcessorClass = BurstSequenceProcessor,
     tau: float | None = None,
@@ -123,7 +150,7 @@ def hits_to_merged_block(
     """Convert hit bursts into a dense 3D block for deconvolution."""
     burst_processor = create_burst_processor(
         readout_config,
-        center_response,
+        template_response,
         processor_cls=processor_cls,
         tau=tau,
     )
@@ -281,11 +308,12 @@ def process_event_deconvolution(
     block_offset, block_data, compensated_charge, template_comp_anchors = hits_to_merged_block(
         event.hits,
         readout_config,
-        prepared_response.center_response,
+        prepared_response.selected_response,
         processor_cls=processor_cls,
         tau=tau,
         npadbin=npadbin,
     )
+    tau_value = readout_config.adc_hold_delay if tau is None else tau
     gaussian_kernel = build_gaussian_deconv_kernel(
         tuple(block_data.shape),
         tuple(prepared_response.integrated_response.shape),
@@ -320,6 +348,11 @@ def process_event_deconvolution(
         smeared_true=smeared_true,
         smear_offset=np.array(smear_offset, copy=True),
         template_compensation_diagnostics=template_compensation_diagnostics,
+        response_template_mode=prepared_response.selected_response_mode,
+        burst_compensation_mode="v2"
+        if processor_cls is BurstSequenceProcessorV2
+        else "v1",
+        tau=float(tau_value),
     )
 
 
@@ -362,6 +395,9 @@ def build_event_output_payload(
         "global_tref": event.global_tref,
         "tpc_lower": geometry.lower,
         "drtoa": drift_length,
+        "response_template_mode": result.response_template_mode,
+        "burst_compensation_mode": result.burst_compensation_mode,
+        "tau": result.tau,
     }
     if include_hwf_block:
         payload["hwf_block"] = result.hwf_block

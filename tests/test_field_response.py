@@ -174,6 +174,41 @@ class TestFieldResponseProcessor:
         # Should be cached after first access
         assert processor._processed_response is result
 
+    def test_get_collection_pixel_response_matches_processed_center(
+        self, temp_field_response_file
+    ):
+        processor = FieldResponseProcessor(temp_field_response_file)
+        response = processor.process_response()
+
+        expected = response[response.shape[0] // 2, response.shape[1] // 2, :]
+        actual = processor.get_collection_pixel_response()
+
+        np.testing.assert_allclose(actual, expected)
+
+    def test_get_collection_neighborhood_response_radius_one(
+        self, temp_field_response_file
+    ):
+        processor = FieldResponseProcessor(temp_field_response_file)
+        response = processor.process_response()
+        center_x = response.shape[0] // 2
+        center_y = response.shape[1] // 2
+
+        expected = np.mean(
+            response[center_x - 1 : center_x + 2, center_y - 1 : center_y + 2, :],
+            axis=(0, 1),
+        )
+        actual = processor.get_collection_neighborhood_response(radius=1)
+
+        np.testing.assert_allclose(actual, expected)
+
+    def test_get_collection_neighborhood_response_rejects_large_radius(
+        self, temp_field_response_file
+    ):
+        processor = FieldResponseProcessor(temp_field_response_file)
+
+        with pytest.raises(ValueError, match="exceeds the processed response plane"):
+            processor.get_collection_neighborhood_response(radius=3)
+
     def test_validate_response_normalization_tolerance(self, mock_field_response_data, tmp_path):
         """Test normalization validation with tolerance."""
         # Set sum close but not exactly 20
