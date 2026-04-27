@@ -3,6 +3,8 @@
 **Session Date:** 2026-03-15
 **Project:** UnfoldLArPix - LArPix Deconvolution Analysis Pipeline
 
+Workflow notes and job-running conventions are documented in [INSTRUCTIONS.md](INSTRUCTIONS.md).
+
 ---
 
 ## 1. Interactive Event Display Development
