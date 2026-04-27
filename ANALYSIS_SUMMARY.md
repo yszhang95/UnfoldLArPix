@@ -231,6 +231,7 @@ The following analysis/output directories were generated, refreshed, or archived
 | `examples/analysis_output/analysis_20260408/` | April 8 fastadc non-noise shielded studies, moved under `analysis_output` | `4` NPZ, `8` JSON, `48` PNG |
 | `examples/analysis_output/analysis_20260409/` | April 9 shield-response studies, moved under `analysis_output` | `6` NPZ, `12` JSON, `54` PNG |
 | `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_20260410/` | April 10 shield-response test file study | `2` NPZ, `4` JSON, `18` PNG |
+| `examples/analysis_20260427_kernel_modes/` | April 27 `nburst256` kernel-mode rerun; `center` and `collection` succeeded, `collection-plus-neighbors` failed before output creation | `12` NPZ, `24` JSON, `108` PNG, `commands.sh` |
 | `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/` | loose-NPZ reproduction and cleanup archive | `6` reproduced NPZ, `12` JSON, `54` PNG, `6` legacy NPZ, `commands.sh`, `comparison_results.json`, `comparison_report.md` |
 
 Additional generated artifact:
@@ -287,6 +288,74 @@ Additional generated artifact:
   - `2` NPZ
   - `4` JSON in `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_20260410/output_matrix/data/0/`
   - `18` PNG in `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_20260410/plots/`
+
+### April 27 Kernel-Mode `nburst256` Rerun
+
+- Input:
+  - `data/pgun_positron_3gev_tred_noises_effq_nt1_thres5k_nburst256.npz`
+- Field response:
+  - `/srv/storage1/yousen/tred_workspace/response_44_v2a_full_25x25pixel_tred.npz`
+- Parameters:
+  - `sigma_temporal = 0.005, 0.004, 0.002`
+  - `sigma_pixel = 0.2`
+  - `tpc_id = 0`, `event_id = 0`
+  - JSON / standard-plot threshold `0.5`
+- Kernel / response-template modes requested:
+  - `center`
+  - `collection`
+  - `collection-plus-neighbors`
+- Processors:
+  - `v1`, `v2` for `center`
+  - `v1`, `v2` for `collection`
+  - attempted `v1` and `v2` for `collection-plus-neighbors`, but both failed during step 1
+- Output location:
+  - `examples/analysis_20260427_kernel_modes/`
+- Command record:
+  - `examples/analysis_20260427_kernel_modes/commands.sh`
+- Note:
+  - The preferred `examples/analysis_output/analysis_20260427/` archive path points at `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/`, but that symlink target was not writable in this sandbox. The run was kept in the local dated fallback directory allowed by the repository convention.
+  - `run_analysis.py` was updated on `2026-04-27` to accept and report `--response-template`, so the kernel mode is now explicit in the pipeline command and run log.
+- Current output inventory:
+  - `12` NPZ total
+  - `24` JSON total
+  - `108` PNG total
+  - successful mode subdirectories:
+    - `examples/analysis_20260427_kernel_modes/center/`
+    - `examples/analysis_20260427_kernel_modes/collection/`
+  - no `collection-plus-neighbors/` directory was created because both processors failed before writing any artifacts
+- Failure details for `collection-plus-neighbors`:
+  - `v1`: `ValueError: template must be monotonically increasing`
+  - `v2`: `ValueError: template must be monotonically increasing`
+  - first failing commands:
+    - `deconv_positron_v1.py --response-template collection-plus-neighbors ...`
+    - `deconv_positron_v2.py --response-template collection-plus-neighbors ...`
+- Successful mode inventories:
+
+| Mode | NPZ | JSON | PNG | Status |
+| --- | ---: | ---: | ---: | --- |
+| `center` | `6` | `12` | `54` | completed |
+| `collection` | `6` | `12` | `54` | completed |
+| `collection-plus-neighbors` | `0` | `0` | `0` | failed before first NPZ |
+
+- Threshold `0.5` voxel counts by processor and temporal sigma for successful modes:
+
+| Mode | Processor | `sigma_temporal` | Deconv voxels kept | Smeared voxels kept |
+| --- | --- | ---: | ---: | ---: |
+| `center` | `v1` | `0.005` | `17,940` | `10,079` |
+| `center` | `v2` | `0.005` | `17,665` | `10,079` |
+| `center` | `v1` | `0.004` | `17,170` | `10,905` |
+| `center` | `v2` | `0.004` | `17,012` | `10,905` |
+| `center` | `v1` | `0.002` | `16,458` | `13,918` |
+| `center` | `v2` | `0.002` | `16,449` | `13,918` |
+| `collection` | `v1` | `0.005` | `17,940` | `10,079` |
+| `collection` | `v2` | `0.005` | `17,665` | `10,079` |
+| `collection` | `v1` | `0.004` | `17,170` | `10,905` |
+| `collection` | `v2` | `0.004` | `17,012` | `10,905` |
+| `collection` | `v1` | `0.002` | `16,458` | `13,918` |
+| `collection` | `v2` | `0.002` | `16,449` | `13,918` |
+
+- Comparison note:
+  - For this input and parameter grid, the successful `center` and `collection` runs have identical thresholded voxel counts and numerically identical stored arrays. The only NPZ content difference found was the recorded `response_template_mode` metadata string.
 
 ### Loose Deconvolution NPZs Under `examples/`
 
