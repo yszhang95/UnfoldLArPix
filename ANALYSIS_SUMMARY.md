@@ -231,7 +231,7 @@ The following analysis/output directories were generated, refreshed, or archived
 | `examples/analysis_output/analysis_20260408/` | April 8 fastadc non-noise shielded studies, moved under `analysis_output` | `4` NPZ, `8` JSON, `48` PNG |
 | `examples/analysis_output/analysis_20260409/` | April 9 shield-response studies, moved under `analysis_output` | `6` NPZ, `12` JSON, `54` PNG |
 | `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_20260410/` | April 10 shield-response test file study | `2` NPZ, `4` JSON, `18` PNG |
-| `examples/analysis_20260427_kernel_modes/` | April 27 `nburst256` kernel-mode rerun; `center` and `collection` succeeded, `collection-plus-neighbors` failed before output creation | `12` NPZ, `24` JSON, `108` PNG, `commands.sh` |
+| `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_20260427_kernel_modes/` | April 27 `nburst256` kernel-mode rerun for `center`, `collection`, and `collection-plus-neighbors`; SSD workspace copy removed after backup | `18` NPZ, `36` JSON, `162` PNG, `commands.sh` |
 | `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_loose_repro_20260427/` | loose-NPZ reproduction and cleanup archive | `6` reproduced NPZ, `12` JSON, `54` PNG, `6` legacy NPZ, `commands.sh`, `comparison_results.json`, `comparison_report.md` |
 
 Additional generated artifact:
@@ -304,38 +304,36 @@ Additional generated artifact:
   - `center`
   - `collection`
   - `collection-plus-neighbors`
+- Alias note:
+  - There is still no separate CLI token named `collection-plus-one` in `run_analysis.py`; the radius-1 neighborhood mode is exposed as `collection-plus-neighbors`.
 - Processors:
   - `v1`, `v2` for `center`
   - `v1`, `v2` for `collection`
-  - attempted `v1` and `v2` for `collection-plus-neighbors`, but both failed during step 1
+  - `v1`, `v2` for `collection-plus-neighbors`
 - Output location:
-  - `examples/analysis_20260427_kernel_modes/`
+  - `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_20260427_kernel_modes/`
 - Command record:
-  - `examples/analysis_20260427_kernel_modes/commands.sh`
+-  - `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_20260427_kernel_modes/commands.sh`
 - Note:
-  - The preferred `examples/analysis_output/analysis_20260427/` archive path points at `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/`, but that symlink target was not writable in this sandbox. The run was kept in the local dated fallback directory allowed by the repository convention.
   - `run_analysis.py` was updated on `2026-04-27` to accept and report `--response-template`, so the kernel mode is now explicit in the pipeline command and run log.
-- Current output inventory:
-  - `12` NPZ total
-  - `24` JSON total
-  - `108` PNG total
+  - The SSD workspace copy under `examples/analysis_20260427_kernel_modes/` was deleted after the `/srv` archive was verified by checksum.
+- Archived output inventory:
+  - `18` NPZ total
+  - `36` JSON total
+  - `162` PNG total
   - successful mode subdirectories:
-    - `examples/analysis_20260427_kernel_modes/center/`
-    - `examples/analysis_20260427_kernel_modes/collection/`
-  - no `collection-plus-neighbors/` directory was created because both processors failed before writing any artifacts
-- Failure details for `collection-plus-neighbors`:
-  - `v1`: `ValueError: template must be monotonically increasing`
-  - `v2`: `ValueError: template must be monotonically increasing`
-  - first failing commands:
-    - `deconv_positron_v1.py --response-template collection-plus-neighbors ...`
-    - `deconv_positron_v2.py --response-template collection-plus-neighbors ...`
+    - `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_20260427_kernel_modes/center/`
+    - `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_20260427_kernel_modes/collection/`
+    - `/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_20260427_kernel_modes/collection-plus-neighbors/`
+- Rerun note:
+  - `collection-plus-neighbors` was rerun successfully after code fixes on `2026-04-27`. The earlier failure was due to the template monotonicity validation path before those fixes.
 - Successful mode inventories:
 
 | Mode | NPZ | JSON | PNG | Status |
 | --- | ---: | ---: | ---: | --- |
 | `center` | `6` | `12` | `54` | completed |
 | `collection` | `6` | `12` | `54` | completed |
-| `collection-plus-neighbors` | `0` | `0` | `0` | failed before first NPZ |
+| `collection-plus-neighbors` | `6` | `12` | `54` | completed after code fix |
 
 - Threshold `0.5` voxel counts by processor and temporal sigma for successful modes:
 
@@ -353,9 +351,16 @@ Additional generated artifact:
 | `collection` | `v2` | `0.004` | `17,012` | `10,905` |
 | `collection` | `v1` | `0.002` | `16,458` | `13,918` |
 | `collection` | `v2` | `0.002` | `16,449` | `13,918` |
+| `collection-plus-neighbors` | `v1` | `0.005` | `16,483` | `10,079` |
+| `collection-plus-neighbors` | `v2` | `0.005` | `16,248` | `10,079` |
+| `collection-plus-neighbors` | `v1` | `0.004` | `15,620` | `10,905` |
+| `collection-plus-neighbors` | `v2` | `0.004` | `15,526` | `10,905` |
+| `collection-plus-neighbors` | `v1` | `0.002` | `15,518` | `13,918` |
+| `collection-plus-neighbors` | `v2` | `0.002` | `15,493` | `13,918` |
 
 - Comparison note:
   - For this input and parameter grid, the successful `center` and `collection` runs have identical thresholded voxel counts and numerically identical stored arrays. The only NPZ content difference found was the recorded `response_template_mode` metadata string.
+  - `collection-plus-neighbors` now runs successfully and produces materially different deconvolution outputs from the other two modes for the same sigma grid.
 
 ### Loose Deconvolution NPZs Under `examples/`
 
