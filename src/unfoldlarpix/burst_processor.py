@@ -7,6 +7,85 @@ import numpy as np
 from .data_containers import Hits
 
 
+TEMPLATE_SEARCH_MODES = {"monotonic", "positive_cumulative"}
+TRANSIT_FALLBACK_FRACTION = 0.95
+
+
+def validate_template_cumulative(
+    template_cumulative: np.ndarray,
+    template_search_mode: str,
+) -> None:
+    """Validate assumptions used by template threshold search."""
+    if template_search_mode not in TEMPLATE_SEARCH_MODES:
+        raise ValueError(f"Unsupported template_search_mode: {template_search_mode}")
+    if template_cumulative.size == 0:
+        raise ValueError("Template cannot be empty.")
+    if not np.all(np.isfinite(template_cumulative)):
+        raise ValueError("Template must contain only finite values.")
+    if template_search_mode == "monotonic":
+        if not np.all(np.diff(template_cumulative) >= 0):
+            raise ValueError("template must be monotonically increasing")
+    elif not np.all(template_cumulative > 0):
+        raise ValueError("template cumulative values must be positive")
+
+
+def _fallback_transition_idx(
+    template_cumulative: np.ndarray,
+    fraction: float = TRANSIT_FALLBACK_FRACTION,
+) -> int:
+    peak = float(np.max(template_cumulative))
+    if peak <= 0:
+        raise ValueError("Template cumulative peak must be positive.")
+    crossings = np.flatnonzero(template_cumulative >= fraction * peak)
+    if crossings.size:
+        return int(crossings[0])
+    return int(np.argmax(template_cumulative))
+
+
+def find_bootstrap_threshold_idx(
+    template_cumulative: np.ndarray,
+    transit: float,
+    template_search_mode: str,
+) -> int:
+    """Find the bootstrap threshold point under the selected template assumption."""
+    if template_search_mode == "monotonic":
+        threshold_idx = int(np.searchsorted(template_cumulative, transit, side="left"))
+        if threshold_idx < len(template_cumulative):
+            return threshold_idx
+        return _fallback_transition_idx(template_cumulative)
+
+    crossings = np.flatnonzero(template_cumulative >= transit)
+    if crossings.size:
+        return int(crossings[0])
+    return _fallback_transition_idx(template_cumulative)
+
+
+def find_window_threshold_idx(
+    template_cumulative: np.ndarray,
+    transit: float,
+    tlength: int,
+) -> int:
+    """Find the earliest cumulative window with enough rise.
+
+    If the requested rise is unavailable, use the first 95% transition point
+    instead of the final array element, because templates may have padded flat tails.
+    """
+    if tlength <= 0:
+        return find_bootstrap_threshold_idx(
+            template_cumulative,
+            transit,
+            "positive_cumulative",
+        )
+    if tlength < len(template_cumulative):
+        window_rise = template_cumulative[tlength:] - template_cumulative[:-tlength]
+        valid = np.flatnonzero(window_rise >= transit)
+        if valid.size:
+            return int(valid[0] + tlength)
+
+    fallback_idx = _fallback_transition_idx(template_cumulative)
+    return int(min(len(template_cumulative) - 1, max(fallback_idx, min(tlength, len(template_cumulative) - 1))))
+
+
 @dataclass
 class BurstSequence:
     """Represents a single burst sequence for a pixel."""
@@ -72,6 +151,7 @@ class BurstSequenceProcessor:
         deadtime: float,
         template: np.ndarray = None,
         threshold: float = None,
+        template_search_mode: str = "monotonic",
     ):
         """Initialize the burst sequence processor.
 
@@ -80,22 +160,21 @@ class BurstSequenceProcessor:
             tau: Threshold for determining if sequences are close enough
             delta_t: Predefined dead time (minimal time resolution unit)
             template: Optional template waveform for non-close sequence compensation.
-                     Should be monotonically increasing cumulative values.
+                     Should satisfy the selected cumulative-template search mode.
             threshold: Charge threshold that defines the template truncation point
+            template_search_mode: "monotonic" for sorted cumulative templates, or
+                                  "positive_cumulative" for positive non-monotonic
+                                  cumulative templates.
         """
         self.adc_hold_delay = adc_hold_delay
         self.tau = tau
         self.deadtime = deadtime
         self.template = np.asarray(template if template is not None else self._default_template(), dtype=float)
-        if self.template.size == 0:
-            raise ValueError("Template cannot be empty.")
+        self.template_search_mode = template_search_mode
+        validate_template_cumulative(self.template, self.template_search_mode)
         self.threshold = threshold
         if threshold is None:
             raise ValueError("Threshold value must be provided for template compensation.")
-
-        # Validate template
-        if not np.all(np.diff(self.template) >= 0):
-            raise ValueError("template must be monotonically increasing")
 
         self.totq_per_pix = {}
         self.template_compensation_anchors: list[TemplateCompensationAnchor] = []
@@ -297,6 +376,8 @@ class BurstSequenceProcessor:
         # if not np.all(np.diff(template_cumulative) >= 0):
         #     raise ValueError("Template must be monotonically increasing.")
 
+        validate_template_cumulative(template_cumulative, self.template_search_mode)
+
         # Keep only the portion of the template strictly before threshold and append the threshold point.
         transit = threshold/np.max(np.cumsum(next_seq.charges))
         transit = min(transit, 1.0)
@@ -304,28 +385,22 @@ class BurstSequenceProcessor:
         if not first_seq and tlength <= 1:
             raise ValueError(f"Not enough time for template compensation, available time {tlength} is too short.")
         tlength = int(np.round(tlength))
-        threshold_idx = None
-        for jidx in range(tlength, len(template_cumulative)):
-            # if template_cumulative[jidx+tlength] - template_cumulative[jidx] >= transit:
-                # threshold_idx = jidx + tlength
-            if template_cumulative[jidx] - template_cumulative[jidx-tlength] >= transit:
-                threshold_idx = jidx
-                break
 
         if first_seq:
-            # overwrite
-            threshold_idx = np.searchsorted(template_cumulative, transit, side='left')
+            threshold_idx = find_bootstrap_threshold_idx(
+                template_cumulative,
+                transit,
+                self.template_search_mode,
+            )
             template_section = template_cumulative[:threshold_idx+1][::-1][::self.adc_hold_delay][::-1]
         else:
-            if threshold_idx is None:
-                # Fall back to the latest available template section when the
-                # requested transit cannot be reached within the available gap.
-                threshold_idx = len(template_cumulative) - 1
+            threshold_idx = find_window_threshold_idx(
+                template_cumulative,
+                transit,
+                tlength,
+            )
             template_section = template_cumulative[threshold_idx-tlength:threshold_idx+1] # one more tick for downsampling
             template_section = template_section[::-1][::self.adc_hold_delay][::-1]  # Reverse, downsample, reverse back
-
-        if threshold_idx is None:
-            raise ValueError("Template compensation requires the template to reach the threshold within the available time.")
 
         threshold_time = next_seq.trigger_time_idx
         n_template = len(template_section)

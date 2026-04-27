@@ -6,8 +6,11 @@ import numpy as np
 
 from .burst_processor import (
     BurstSequence,
+    find_bootstrap_threshold_idx,
+    find_window_threshold_idx,
     MergedSequence,
     TemplateCompensationAnchor,
+    validate_template_cumulative,
 )
 from .data_containers import Hits
 
@@ -36,6 +39,7 @@ class BurstSequenceProcessorV2:
         deadtime: float,
         template: np.ndarray = None,
         threshold: float = None,
+        template_search_mode: str = "monotonic",
     ):
         """Initialise the processor.
 
@@ -47,9 +51,12 @@ class BurstSequenceProcessorV2:
             deadtime: Physical hardware dead-time between consecutive sequences
                       (same units as adc_hold_delay).  Subtracted from the gap when
                       computing how many template ticks fit.
-            template: Monotonically-increasing cumulative template waveform used to
-                      interpolate charge in gaps between sequences.
+            template: Cumulative template waveform used to interpolate charge in
+                      gaps between sequences.
             threshold: Charge threshold that defines the template truncation point.
+            template_search_mode: "monotonic" for sorted cumulative templates, or
+                                  "positive_cumulative" for positive non-monotonic
+                                  cumulative templates.
         """
         self.adc_hold_delay = adc_hold_delay
         self.tau = tau
@@ -57,10 +64,8 @@ class BurstSequenceProcessorV2:
         self.template = np.asarray(
             template if template is not None else self._default_template(), dtype=float
         )
-        if self.template.size == 0:
-            raise ValueError("Template cannot be empty.")
-        if not np.all(np.diff(self.template) >= 0):
-            raise ValueError("template must be monotonically increasing")
+        self.template_search_mode = template_search_mode
+        validate_template_cumulative(self.template, self.template_search_mode)
         if threshold is None:
             raise ValueError("Threshold value must be provided for template compensation.")
         self.threshold = threshold
@@ -256,6 +261,7 @@ class BurstSequenceProcessorV2:
         template_cumulative = np.asarray(template_cumulative, dtype=float)
         if template_cumulative.size == 0:
             raise ValueError("Template compensation requires a non-empty cumulative template.")
+        validate_template_cumulative(template_cumulative, self.template_search_mode)
 
         transit = threshold / np.max(np.cumsum(next_seq.charges))
         transit = min(transit, 1.0)
@@ -271,18 +277,18 @@ class BurstSequenceProcessorV2:
         # Build template section
         step = int(self.adc_hold_delay)
         if first_seq:
-            threshold_idx = int(np.searchsorted(template_cumulative, transit, side="left"))
+            threshold_idx = find_bootstrap_threshold_idx(
+                template_cumulative,
+                transit,
+                self.template_search_mode,
+            )
             template_section = template_cumulative[: threshold_idx + 1][::-1][::step][::-1]
         else:
-            threshold_idx = None
-            for jidx in range(tlength, len(template_cumulative)):
-                if template_cumulative[jidx] - template_cumulative[jidx - tlength] >= transit:
-                    threshold_idx = jidx
-                    break
-            if threshold_idx is None:
-                # Fallback: transit exceeds the maximum window rise (e.g. total charge < threshold).
-                # Use the end of the template — the best available rising edge.
-                threshold_idx = len(template_cumulative) - 1
+            threshold_idx = find_window_threshold_idx(
+                template_cumulative,
+                transit,
+                tlength,
+            )
             template_section = template_cumulative[threshold_idx - tlength : threshold_idx + 1]
             template_section = template_section[::-1][::step][::-1]
 

@@ -19,6 +19,7 @@ from .field_response import FieldResponseProcessor
 from .smear_truth import gaus_smear_true_3d
 
 ResponseTemplateMode = Literal["center", "collection", "collection_plus_neighbors"]
+TemplateSearchMode = Literal["monotonic", "positive_cumulative"]
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class PreparedFieldResponse:
     collection_plus_neighbors_response: np.ndarray
     selected_response: np.ndarray
     selected_response_mode: ResponseTemplateMode
+    template_search_mode: TemplateSearchMode
     metadata: dict[str, Any]
 
     @property
@@ -56,6 +58,7 @@ class EventDeconvolutionResult:
     smear_offset: np.ndarray
     template_compensation_diagnostics: dict[str, np.ndarray]
     response_template_mode: ResponseTemplateMode = "center"
+    template_search_mode: TemplateSearchMode = "monotonic"
     burst_compensation_mode: str = "v1"
     tau: float | None = None
 
@@ -106,6 +109,11 @@ def prepare_field_response(
     if response_template not in response_by_mode:
         raise ValueError(f"Unsupported response_template: {response_template}")
     selected_response = response_by_mode[response_template].copy()
+    template_search_mode: TemplateSearchMode = (
+        "positive_cumulative"
+        if response_template == "collection_plus_neighbors"
+        else "monotonic"
+    )
     integrated_response = integrate_kernel_over_time(full_response, adc_hold_delay)
     return PreparedFieldResponse(
         processor=processor,
@@ -116,6 +124,7 @@ def prepare_field_response(
         collection_plus_neighbors_response=collection_plus_neighbors_response,
         selected_response=selected_response,
         selected_response_mode=response_template,
+        template_search_mode=template_search_mode,
         metadata=processor.get_metadata(),
     )
 
@@ -126,6 +135,7 @@ def create_burst_processor(
     *,
     processor_cls: BurstProcessorClass = BurstSequenceProcessor,
     tau: float | None = None,
+    template_search_mode: TemplateSearchMode = "monotonic",
 ):
     """Create a burst processor configured from the readout and field response."""
     tau_value = readout_config.adc_hold_delay if tau is None else tau
@@ -135,6 +145,7 @@ def create_burst_processor(
         deadtime=readout_config.csa_reset_time,
         template=np.cumsum(template_response),
         threshold=readout_config.threshold,
+        template_search_mode=template_search_mode,
     )
 
 
@@ -145,6 +156,7 @@ def hits_to_merged_block(
     *,
     processor_cls: BurstProcessorClass = BurstSequenceProcessor,
     tau: float | None = None,
+    template_search_mode: TemplateSearchMode = "monotonic",
     npadbin: int = 50,
 ) -> tuple[np.ndarray, np.ndarray, float, tuple[TemplateCompensationAnchor, ...]]:
     """Convert hit bursts into a dense 3D block for deconvolution."""
@@ -153,6 +165,7 @@ def hits_to_merged_block(
         template_response,
         processor_cls=processor_cls,
         tau=tau,
+        template_search_mode=template_search_mode,
     )
     merged_sequences = burst_processor.process_hits(hits)
     compensated_charge = float(
@@ -311,6 +324,7 @@ def process_event_deconvolution(
         prepared_response.selected_response,
         processor_cls=processor_cls,
         tau=tau,
+        template_search_mode=prepared_response.template_search_mode,
         npadbin=npadbin,
     )
     tau_value = readout_config.adc_hold_delay if tau is None else tau
@@ -349,6 +363,7 @@ def process_event_deconvolution(
         smear_offset=np.array(smear_offset, copy=True),
         template_compensation_diagnostics=template_compensation_diagnostics,
         response_template_mode=prepared_response.selected_response_mode,
+        template_search_mode=prepared_response.template_search_mode,
         burst_compensation_mode="v2"
         if processor_cls is BurstSequenceProcessorV2
         else "v1",
@@ -396,6 +411,7 @@ def build_event_output_payload(
         "tpc_lower": geometry.lower,
         "drtoa": drift_length,
         "response_template_mode": result.response_template_mode,
+        "template_search_mode": result.template_search_mode,
         "burst_compensation_mode": result.burst_compensation_mode,
         "tau": result.tau,
     }

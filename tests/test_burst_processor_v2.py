@@ -3,7 +3,11 @@
 import numpy as np
 import pytest
 
-from unfoldlarpix.burst_processor import BurstSequence, MergedSequence
+from unfoldlarpix.burst_processor import (
+    BurstSequence,
+    find_window_threshold_idx,
+    MergedSequence,
+)
 from unfoldlarpix.burst_processor_v2 import BurstSequenceProcessorV2
 from unfoldlarpix.data_containers import Hits
 
@@ -342,6 +346,29 @@ class TestConstructor:
                 template=np.array([1, 3, 2, 4]),
                 threshold=10.0,
             )
+
+    def test_positive_cumulative_template_allows_non_monotonic_values(self):
+        proc = BurstSequenceProcessorV2(
+            adc_hold_delay=ADC,
+            tau=TAU,
+            deadtime=DEADTIME,
+            template=np.array([0.1, 0.3, 0.25, 0.4]),
+            template_search_mode="positive_cumulative",
+            threshold=10.0,
+        )
+
+        assert proc.template_search_mode == "positive_cumulative"
+
+    def test_window_threshold_fallback_uses_transition_not_padded_tail(self):
+        template = np.array([0.1, 0.5, 0.95, 1.0, 1.0, 1.0])
+
+        threshold_idx = find_window_threshold_idx(
+            template,
+            transit=2.0,
+            tlength=1,
+        )
+
+        assert threshold_idx == 2
 
     def test_empty_template_raises(self):
         with pytest.raises(ValueError, match="Template cannot be empty"):

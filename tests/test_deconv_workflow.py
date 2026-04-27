@@ -104,6 +104,7 @@ class TestPrepareFieldResponse:
         assert prepared.collection_plus_neighbors_response.shape == (4,)
         assert prepared.selected_response.shape == (4,)
         assert prepared.selected_response_mode == "center"
+        assert prepared.template_search_mode == "monotonic"
         assert prepared.drift_length == 42.0
 
     def test_prepare_field_response_selects_collection_plus_neighbors_template(
@@ -135,6 +136,11 @@ class TestPrepareFieldResponse:
             prepared.collection_plus_neighbors_response,
         )
         assert prepared.selected_response_mode == "collection_plus_neighbors"
+        assert prepared.template_search_mode == "positive_cumulative"
+        np.testing.assert_allclose(
+            prepared.selected_response,
+            prepared.full_response[1:4, 1:4, :].mean(axis=(0, 1)),
+        )
 
 
 class TestCreateBurstProcessor:
@@ -203,6 +209,7 @@ class TestProcessEventDeconvolution:
         np.testing.assert_allclose(result.smeared_true, np.full((2, 2, 2), 9.0))
         assert result.local_offset == (0, 0, 0)
         assert result.response_template_mode == "collection_plus_neighbors"
+        assert result.template_search_mode == "positive_cumulative"
         assert result.burst_compensation_mode == "v1"
         assert result.tau == readout_config.adc_hold_delay
 
@@ -283,6 +290,7 @@ class TestBuildEventOutputPayload:
         np.testing.assert_allclose(payload["hwf_block"], np.ones((2, 2, 2)))
         assert payload["drtoa"] == 12.0
         assert payload["response_template_mode"] == "center"
+        assert payload["template_search_mode"] == "monotonic"
         assert payload["burst_compensation_mode"] == "v1"
         assert payload["tau"] is None
 
@@ -302,6 +310,7 @@ def prepare_stub_response():
             "center_response": np.array([1.0, 2.0, 3.0], dtype=float),
             "selected_response": np.array([4.0, 5.0, 6.0], dtype=float),
             "selected_response_mode": "collection_plus_neighbors",
+            "template_search_mode": "positive_cumulative",
             "integrated_response": np.ones((2, 2, 3), dtype=float),
         },
     )()
