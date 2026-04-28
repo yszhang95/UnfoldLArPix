@@ -78,7 +78,7 @@ class TestIntegrateKernelOverTime:
 
 
 class TestPrepareFieldResponse:
-    def test_prepare_field_response_returns_center_and_integrated_kernel(
+    def test_prepare_field_response_returns_response_products_and_integrated_kernel(
         self, tmp_path: Path, readout_config: ReadoutConfig
     ):
         raw_response = np.zeros((2, 2, 4), dtype=float)
@@ -103,13 +103,53 @@ class TestPrepareFieldResponse:
         assert prepared.center_response.shape == (4,)
         assert prepared.response_indu.shape == (4,)
         np.testing.assert_allclose(prepared.response_indu, np.full(4, 0.134375))
+        assert prepared.collection_response.shape == (4,)
+        assert prepared.collection_plus_neighbors_response.shape == (4,)
+        assert prepared.selected_response.shape == (4,)
+        assert prepared.selected_response_mode == "center"
+        assert prepared.template_search_mode == "monotonic"
         assert prepared.drift_length == 42.0
+
+    def test_prepare_field_response_selects_collection_plus_neighbors_template(
+        self, tmp_path: Path, readout_config: ReadoutConfig
+    ):
+        raw_response = np.zeros((2, 2, 4), dtype=float)
+        raw_response[0, 0, :] = 2.5
+        raw_response[0, 1, :] = 1.0
+        raw_response[1, 0, :] = 0.5
+        raw_response[1, 1, :] = 0.25
+        npz_path = tmp_path / "field_response.npz"
+        np.savez(
+            npz_path,
+            response=raw_response,
+            npath=np.array(1),
+            drift_length=np.array(42.0),
+            bin_size=np.array(0.1),
+            time_tick=np.array(0.1),
+        )
+
+        prepared = prepare_field_response(
+            npz_path,
+            readout_config.adc_hold_delay,
+            response_template="collection_plus_neighbors",
+        )
+
+        np.testing.assert_allclose(
+            prepared.selected_response,
+            prepared.collection_plus_neighbors_response,
+        )
+        assert prepared.selected_response_mode == "collection_plus_neighbors"
+        assert prepared.template_search_mode == "positive_cumulative"
+        np.testing.assert_allclose(
+            prepared.selected_response,
+            prepared.full_response[1:4, 1:4, :].mean(axis=(0, 1)),
+        )
 
 
 class TestCreateBurstProcessor:
-    def test_builds_v1_processor_from_center_response(self, readout_config: ReadoutConfig):
-        center_response = np.array([1.0, 2.0, 3.0], dtype=float)
-        processor = create_burst_processor(readout_config, center_response)
+    def test_builds_v1_processor_from_template_response(self, readout_config: ReadoutConfig):
+        template_response = np.array([1.0, 2.0, 3.0], dtype=float)
+        processor = create_burst_processor(readout_config, template_response)
 
         assert isinstance(processor, BurstSequenceProcessor)
         np.testing.assert_allclose(processor.template, np.array([1.0, 3.0, 6.0]))
@@ -117,10 +157,10 @@ class TestCreateBurstProcessor:
         assert processor.threshold == readout_config.threshold
 
     def test_builds_v2_processor_with_custom_tau(self, readout_config: ReadoutConfig):
-        center_response = np.array([1.0, 2.0, 3.0], dtype=float)
+        template_response = np.array([1.0, 2.0, 3.0], dtype=float)
         processor = create_burst_processor(
             readout_config,
-            center_response,
+            template_response,
             processor_cls=BurstSequenceProcessorV2,
             tau=7,
         )
@@ -202,6 +242,10 @@ class TestProcessEventDeconvolution:
         np.testing.assert_array_equal(result.smear_offset, np.array([1, 2, 3]))
         np.testing.assert_allclose(result.smeared_true, np.full((2, 2, 2), 9.0))
         assert result.local_offset == (0, 0, 0)
+        assert result.response_template_mode == "collection_plus_neighbors"
+        assert result.template_search_mode == "positive_cumulative"
+        assert result.burst_compensation_mode == "v1"
+        assert result.tau == readout_config.adc_hold_delay
 
     def test_uses_prepared_induction_response_for_v3_by_default(
         self, monkeypatch, sample_event: EventData, readout_config
@@ -325,6 +369,10 @@ class TestBuildEventOutputPayload:
         np.testing.assert_array_equal(payload["hwf_block_offset"], np.array([3, 4, 20]))
         np.testing.assert_allclose(payload["hwf_block"], np.ones((2, 2, 2)))
         assert payload["drtoa"] == 12.0
+        assert payload["response_template_mode"] == "center"
+        assert payload["template_search_mode"] == "monotonic"
+        assert payload["burst_compensation_mode"] == "v1"
+        assert payload["tau"] is None
 
     def test_shift_time_offset_returns_shifted_copy(self):
         offset = np.array([1, 2, 3])
@@ -341,6 +389,9 @@ def prepare_stub_response():
         {
             "center_response": np.array([1.0, 2.0, 3.0], dtype=float),
             "response_indu": np.array([0.5, 1.0, 1.5], dtype=float),
+            "selected_response": np.array([4.0, 5.0, 6.0], dtype=float),
+            "selected_response_mode": "collection_plus_neighbors",
+            "template_search_mode": "positive_cumulative",
             "integrated_response": np.ones((2, 2, 3), dtype=float),
         },
     )()

@@ -129,6 +129,7 @@ def step1_deconv(cfg, cwd: Path, dry: bool) -> None:
                      "--sigma-pxl", str(sigma_pxl),
                      "--input-file", input_file,
                      "--field-response", cfg.field_response,
+                     "--response-template", cfg.response_template,
                      "--tpc-id", "0",
                      "--output-dir", str(output_dir),
                      "--output-suffix", output_suffix],
@@ -264,6 +265,10 @@ def parse_args():
     p.add_argument("--field-response",
                    default="/srv/storage1/yousen/tred_workspace/response_44_v2a_full_25x25pixel_tred.npz",
                    help="Field response NPZ file (passed to deconv scripts)")
+    p.add_argument("--response-template",
+                   choices=["center", "collection", "collection-plus-neighbors"],
+                   default="center",
+                   help="Kernel/response template mode passed to deconv scripts")
     p.add_argument("--cwd", default=".",
                    help="Working directory (directory containing the scripts)")
     p.add_argument("--dry-run", action="store_true",
@@ -298,6 +303,7 @@ def main():
     print(f"  sigmas={cfg.sigmas}  sigma_pxls={cfg.sigma_pxls}")
     print(f"  thresholds={cfg.thresholds}")
     print(f"  input_files={cfg.input_files}")
+    print(f"  response_template={cfg.response_template}")
     print(f"  copy_artifacts={cfg.copy_artifacts}")
     print(f"  cwd={cwd}  dry={cfg.dry_run}")
 

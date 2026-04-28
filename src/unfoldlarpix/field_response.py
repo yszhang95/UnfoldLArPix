@@ -231,6 +231,38 @@ class FieldResponseProcessor:
 
         return metadata
 
+    def get_collection_pixel_response(self) -> np.ndarray:
+        """Return the processed response for the collection pixel."""
+        response = self.response
+        if response is None:
+            raise ValueError("Processed response is unavailable.")
+        center_x = response.shape[0] // 2
+        center_y = response.shape[1] // 2
+        return response[center_x, center_y, :].copy()
+
+    def get_collection_neighborhood_response(self, radius: int = 1) -> np.ndarray:
+        """Return the average response over the collection pixel neighborhood."""
+        if radius < 0:
+            raise ValueError(f"radius must be non-negative, got {radius}")
+
+        response = self.response
+        if response is None:
+            raise ValueError("Processed response is unavailable.")
+
+        center_x = response.shape[0] // 2
+        center_y = response.shape[1] // 2
+        x_start = center_x - radius
+        x_stop = center_x + radius + 1
+        y_start = center_y - radius
+        y_stop = center_y + radius + 1
+
+        if x_start < 0 or y_start < 0 or x_stop > response.shape[0] or y_stop > response.shape[1]:
+            raise ValueError(
+                "Requested collection neighborhood exceeds the processed response plane."
+            )
+
+        return np.mean(response[x_start:x_stop, y_start:y_stop, :], axis=(0, 1))
+
     @property
     def response(self) -> np.ndarray | None:
         """Get processed response array."""

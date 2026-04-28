@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 
 from unfoldlarpix import (
-    BurstSequenceProcessorV2,
+    BurstSequenceProcessorV3,
     DataLoader,
     build_event_output_payload,
     prepare_field_response,
@@ -15,7 +15,9 @@ from unfoldlarpix import (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Deconvolve positron event data (V2)")
+    parser = argparse.ArgumentParser(
+        description="Deconvolve positron event data with BurstSequenceProcessorV3"
+    )
     parser.add_argument(
         "--sigma",
         type=float,
@@ -47,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-suffix",
         default="",
-        help="Suffix to append to output filename (e.g., 's0p0005_sp10')",
+        help="Suffix to append to output filename (e.g., 's0p005_sp0p2')",
     )
     parser.add_argument(
         "--output-dir",
@@ -116,7 +118,7 @@ def main() -> None:
             prepared_response,
             sigma_time=args.sigma,
             sigma_pixel=args.sigma_pxl,
-            processor_cls=BurstSequenceProcessorV2,
+            processor_cls=BurstSequenceProcessorV3,
             tau=readout_config.adc_hold_delay,
             npadbin=50,
             require_zero_local_offset=True,
@@ -138,7 +140,7 @@ def main() -> None:
         )
 
         output_filename = (
-            f"deconv_positron_v2_{args.output_suffix}_"
+            f"deconv_positron_v3_burst_{args.output_suffix}_"
             f"event_{event.tpc_id}_{event.event_id}.npz"
         )
         output_path = Path(args.output_dir).expanduser() / output_filename

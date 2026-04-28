@@ -5,6 +5,7 @@ cd "$(dirname "$0")"
 
 # Create output directory
 mkdir -p raw_positron/data/0
+RESPONSE_TEMPLATE=${RESPONSE_TEMPLATE:-center}
 
 # Define sigma and sigma_pxl values
 sigmas=(0.005 0.01)
@@ -23,11 +24,13 @@ for sigma in "${sigmas[@]}"; do
 
         # Run V1
         echo "Running deconv_positron_v1.py..."
-        python deconv_positron_v1.py --sigma "$sigma" --sigma-pxl "$sigma_pxl"
+        python deconv_positron_v1.py --sigma "$sigma" --sigma-pxl "$sigma_pxl" \
+            --response-template "$RESPONSE_TEMPLATE"
 
         # Run V2
         echo "Running deconv_positron_v2.py..."
-        python deconv_positron_v2.py --sigma "$sigma" --sigma-pxl "$sigma_pxl"
+        python deconv_positron_v2.py --sigma "$sigma" --sigma-pxl "$sigma_pxl" \
+            --response-template "$RESPONSE_TEMPLATE"
 
         # Generate JSON from V1 output
         echo "Generating V1 JSON..."
