@@ -126,3 +126,69 @@ Batch runs covering multiple TPC IDs for geometry consistency.
 *   **Dataset:** `thres1k_nburst256`, `thres5k_nburst256`, `thres5k_nburst4`, `thres5k_selftrigger`.
 *   **TPCs:** 0, 1, 2, 3, 5 (Event ID: 0).
 *   **Status:** Focused exclusively on **TPC 0** for final analysis; other TPC setups are ignored.
+
+---
+
+## Wiener ROI Parameter Scan (2026-05-06)
+
+**Output:** `analysis_wiener_scan_20260506/`
+**Script:** `examples/wiener_roi_scan.py`
+**Dataset:** `pgun_positron_3gev_tred_noises_effq_nt1_thres5k_nburst256.npz`  TPC 0 / event 0
+**Processor:** BurstSequenceProcessorV3  τ = adc_hold_delay = 30
+**Gaussian params:** σ_t=0.005  σ_pxl=0.2
+**Grid:** ω_c ∈ [0.001, 0.002, 0.003, 0.005]  ×  b ∈ [2, 4, 6]  (ROI applied to Gaussian deconv_q)
+
+### Key results (equiv threshold = 0.5 ke-)
+
+| Method | Ghost fraction | ΔQ std |
+|--------|---------------|--------|
+| Direct threshold 0.5 ke- | 36.42% | 0.750 |
+| Best Wiener ROI (ω_c=0.002, b=4) | 11.75% | 0.751 |
+
+Heatmaps in `heatmaps.png`; detailed table in `SCAN_LOG.md`.
+
+---
+
+## Wiener ROI Parameter Scan — recall-extended (2026-05-08)
+
+**Output:** `analysis_wiener_recall/`
+**Script:** `examples/wiener_roi_scan.py`
+**Dataset:** `pgun_positron_3gev_tred_noises_effq_nt1_thres5k_nburst256.npz`  TPC 0 / event 0
+**Processor:** BurstSequenceProcessorV3  τ = adc_hold_delay = 30
+**Gaussian params:** σ_t=0.005  σ_pxl=0.2
+**Grid:** ω_c ∈ [0.001, 0.002, 0.003, 0.005]  ×  b ∈ [2, 4, 6]  (ROI applied to Gaussian deconv_q)
+
+**New in this run:** scan reports recall metrics (charge killed by ROI cut,
+sizable-truth voxels killed at 0.1 / 0.5 / 1.0 ke-) alongside the ghost/ΔQ
+table. Motivated by the "is Gaussian (b=2) better for ROI?" question.
+
+### Reference totals (truth > 0.1 ke-)
+
+Total true charge: **31,614.5 ke-** · voxels: 17,846 (>0.1) / 10,126 (>0.5) /
+7,574 (>1.0) ke-
+
+### Key results (equiv threshold = 0.5 ke-)
+
+| Method | Ghost frac | ΔQ std | Recall | Killed Q [ke-] | Killed >0.5 ke- voxels |
+|--------|-----------:|-------:|-------:|---------------:|-----------------------:|
+| Direct threshold 0.5 ke-          | 36.42% | 0.750 | 94.14% | 1851.3 |   873 |
+| Gaussian (ω_c=0.002, b=2)         | 15.31% | 0.746 | 96.50% | 1106.6 |   437 |
+| Wiener best (ω_c=0.002, b=4)      | 11.75% | 0.751 | 96.02% | 1257.7 |   557 |
+
+**Findings:**
+
+- **Gaussian (b=2) wins on recall and sizable-voxel preservation:** preserves
+  ~150 ke- more true charge and ~120 fewer >0.5 ke- voxels killed than b=4
+  at the same ω_c.
+- **Wiener-like (b=4) wins on ghost rejection** (11.8% vs 15.3% — a 3.5 pp
+  gap from the sharper frequency cutoff suppressing more high-frequency
+  noise).
+- **Both ROI configs kill less true charge than the bare direct threshold**
+  (1107 / 1258 vs 1851 ke-). The `expand=2` neighborhood preserves
+  low-charge voxels adjacent to genuine signal that the hard threshold
+  would have rejected.
+- **Caveat:** single event. The b=2 vs b=4 comparison should be repeated
+  across multiple events before drawing a firm preference.
+
+Heatmaps: `heatmaps.png` (ghost/ΔQ/noise) + `recall_heatmaps.png` (recall,
+killed Q, killed voxels at 0.1/0.5/1.0 ke-). Detailed tables in `SCAN_LOG.md`.

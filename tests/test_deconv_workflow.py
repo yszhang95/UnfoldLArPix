@@ -293,6 +293,118 @@ class TestProcessEventDeconvolution:
 
         np.testing.assert_allclose(captured["response_indu"], prepared.response_indu)
 
+    def test_runs_wiener_roi_when_enabled(
+        self, monkeypatch, sample_event: EventData, readout_config
+    ):
+        prepared = prepare_stub_response()
+
+        # Block centered on the hit pixel (global x=3, y=4) so quiet pixels
+        # surround it; pad enough quiet pixels to satisfy min_quiet_pixels=8.
+        block_offset = np.array([2, 3, 20])
+        rng = np.random.default_rng(42)
+        block_data = rng.normal(0.0, 0.05, size=(3, 3, 8))
+
+        gaussian_deconv = np.zeros((3, 3, 8))
+        # Big Gaussian-side pulse on the hit pixel (block-local (1, 1)).
+        gaussian_deconv[1, 1, 3:6] = np.array([5.0, 8.0, 5.0])
+
+        wiener_deconv = np.copy(block_data)
+        # Sharp Wiener-side pulse on the same pixel, well above 5*0.05=0.25.
+        wiener_deconv[1, 1, 4] = 6.0
+
+        # Two deconv_fft calls happen in order: Gaussian then Wiener.
+        deconv_outputs = iter([
+            (gaussian_deconv, (0, 0, 0)),
+            (wiener_deconv, (0, 0, 0)),
+        ])
+
+        monkeypatch.setattr(
+            "unfoldlarpix.deconv_workflow.hits_to_merged_block",
+            lambda *args, **kwargs: (block_offset, block_data, 12.5, ()),
+        )
+        monkeypatch.setattr(
+            "unfoldlarpix.deconv_workflow.build_gaussian_deconv_kernel",
+            lambda *args, **kwargs: np.ones((3, 3, 4), dtype=float),
+        )
+        monkeypatch.setattr(
+            "unfoldlarpix.deconv_workflow.build_wiener_deconv_kernel",
+            lambda *args, **kwargs: np.ones((3, 3, 4), dtype=float),
+        )
+        monkeypatch.setattr(
+            "unfoldlarpix.deconv_workflow.deconv_fft",
+            lambda *args, **kwargs: next(deconv_outputs),
+        )
+        monkeypatch.setattr(
+            "unfoldlarpix.deconv_workflow.smear_effective_charge",
+            lambda *args, **kwargs: (np.array([1, 2, 3]), np.full((3, 3, 4), 9.0)),
+        )
+
+        result = process_event_deconvolution(
+            sample_event,
+            readout_config,
+            prepared,
+            sigma_time=0.005,
+            sigma_pixel=0.2,
+            enable_wiener_roi=True,
+            wiener_omega_c=0.1,
+            wiener_b=2.0,
+            roi_threshold_sigma=5.0,
+            roi_merge_gap=0,
+            roi_expand=0,
+            roi_min_quiet_pixels=4,
+        )
+
+        assert result.deconv_q_wiener is not None
+        assert result.roi_mask is not None
+        assert result.deconv_q_roi is not None
+        assert result.roi_noise_rms is not None and result.roi_noise_rms > 0
+        assert result.wiener_omega_c == 0.1
+        assert result.roi_threshold_sigma == 5.0
+
+        # ROI must contain the bin holding the Wiener spike.
+        assert result.roi_mask[1, 1, 4]
+        # ROI mask must zero out non-ROI bins of the Gaussian deconv.
+        np.testing.assert_array_equal(
+            result.deconv_q_roi, result.deconv_q * result.roi_mask
+        )
+
+    def test_wiener_roi_requires_omega_c(
+        self, monkeypatch, sample_event: EventData, readout_config
+    ):
+        prepared = prepare_stub_response()
+
+        monkeypatch.setattr(
+            "unfoldlarpix.deconv_workflow.hits_to_merged_block",
+            lambda *args, **kwargs: (
+                np.array([3, 4, 20]),
+                np.ones((2, 2, 3), dtype=float),
+                12.5,
+                (),
+            ),
+        )
+        monkeypatch.setattr(
+            "unfoldlarpix.deconv_workflow.build_gaussian_deconv_kernel",
+            lambda *args, **kwargs: np.full((3, 3, 2), 2.0),
+        )
+        monkeypatch.setattr(
+            "unfoldlarpix.deconv_workflow.deconv_fft",
+            lambda *args, **kwargs: (np.zeros((2, 2, 3)), (0, 0, 0)),
+        )
+        monkeypatch.setattr(
+            "unfoldlarpix.deconv_workflow.smear_effective_charge",
+            lambda *args, **kwargs: (np.array([1, 2, 3]), np.full((2, 2, 2), 9.0)),
+        )
+
+        with pytest.raises(ValueError, match="wiener_omega_c"):
+            process_event_deconvolution(
+                sample_event,
+                readout_config,
+                prepared,
+                sigma_time=0.005,
+                sigma_pixel=0.2,
+                enable_wiener_roi=True,
+            )
+
     def test_requires_zero_local_offset_when_requested(
         self, monkeypatch, sample_event: EventData, readout_config
     ):

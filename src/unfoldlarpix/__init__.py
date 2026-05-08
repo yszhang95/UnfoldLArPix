@@ -24,12 +24,19 @@ from .deconv_workflow import (
     EventDeconvolutionResult,
     PreparedFieldResponse,
     build_event_output_payload,
+    build_wiener_deconv_kernel,
     create_burst_processor,
     integrate_kernel_over_time,
     prepare_field_response,
     process_event_deconvolution,
     shift_time_offset,
 )
+from .roi_finder import (
+    apply_roi_mask,
+    estimate_quiet_pixel_noise,
+    find_roi_mask,
+)
+from .wiener_filter import wiener_inspired_filter_3d
 
 __all__ = [
     "DataLoader",
@@ -52,5 +59,10 @@ __all__ = [
     "create_burst_processor",
     "process_event_deconvolution",
     "build_event_output_payload",
+    "build_wiener_deconv_kernel",
     "shift_time_offset",
+    "wiener_inspired_filter_3d",
+    "estimate_quiet_pixel_noise",
+    "find_roi_mask",
+    "apply_roi_mask",
 ]

@@ -62,6 +62,43 @@ def parse_args() -> argparse.Namespace:
         default="center",
         help="Field-response template used for burst compensation.",
     )
+    parser.add_argument(
+        "--enable-wiener-roi",
+        action="store_true",
+        help="Run a Wiener-inspired deconvolution to identify ROIs and "
+        "emit a ROI-masked deconv_q.",
+    )
+    parser.add_argument(
+        "--wiener-omega-c",
+        type=float,
+        default=None,
+        help="Wiener time-axis cutoff frequency (cycles per ADC tick); "
+        "required when --enable-wiener-roi is set.",
+    )
+    parser.add_argument(
+        "--wiener-b",
+        type=float,
+        default=2.0,
+        help="Wiener rolloff exponent b in F(f)=exp(-0.5*(f/omega_c)^b).",
+    )
+    parser.add_argument(
+        "--roi-threshold-sigma",
+        type=float,
+        default=5.0,
+        help="ROI threshold in units of quiet-pixel noise RMS.",
+    )
+    parser.add_argument(
+        "--roi-merge-gap",
+        type=int,
+        default=2,
+        help="Merge ROI segments separated by <= this many below-threshold bins.",
+    )
+    parser.add_argument(
+        "--roi-expand",
+        type=int,
+        default=2,
+        help="Expand each ROI by this many bins on each side.",
+    )
     return parser.parse_args()
 
 
@@ -112,6 +149,10 @@ def main() -> None:
         print(f"  Hits shape: {event.hits.data.shape}")
         print(f"  Hits location shape: {event.hits.location.shape}")
 
+        if args.enable_wiener_roi and args.wiener_omega_c is None:
+            raise ValueError(
+                "--wiener-omega-c is required when --enable-wiener-roi is set."
+            )
         result = process_event_deconvolution(
             event,
             readout_config,
@@ -122,6 +163,12 @@ def main() -> None:
             tau=readout_config.adc_hold_delay,
             npadbin=50,
             require_zero_local_offset=True,
+            enable_wiener_roi=args.enable_wiener_roi,
+            wiener_omega_c=args.wiener_omega_c,
+            wiener_b=args.wiener_b,
+            roi_threshold_sigma=args.roi_threshold_sigma,
+            roi_merge_gap=args.roi_merge_gap,
+            roi_expand=args.roi_expand,
         )
         boffset = shift_time_offset(
             result.hwf_block_offset,
@@ -138,6 +185,13 @@ def main() -> None:
             f"sum_effq_last: {np.sum(event.effq.data[:, -1])},"
             f"sum_hits_last: {np.sum(event.hits.data[:, -1])}"
         )
+        if result.roi_mask is not None:
+            print(
+                f"  ROI: noise_rms={result.roi_noise_rms:.4g}, "
+                f"threshold={result.roi_threshold_sigma * result.roi_noise_rms:.4g}, "
+                f"n_roi_bins={int(result.roi_mask.sum())}, "
+                f"sum_deconv_q_roi={float(np.sum(result.deconv_q_roi)):.4g}"
+            )
 
         output_filename = (
             f"deconv_positron_v3_burst_{args.output_suffix}_"

@@ -17,7 +17,9 @@ from .burst_processor_v3 import BurstSequenceProcessorV3
 from .data_containers import EventData, Geometry, Hits, ReadoutConfig
 from .deconv import deconv_fft, gaussian_filter_3d
 from .field_response import FieldResponseProcessor
+from .roi_finder import apply_roi_mask, estimate_quiet_pixel_noise, find_roi_mask
 from .smear_truth import gaus_smear_true_3d
+from .wiener_filter import wiener_inspired_filter_3d
 
 ResponseTemplateMode = Literal["center", "collection", "collection_plus_neighbors"]
 TemplateSearchMode = Literal["monotonic", "positive_cumulative"]
@@ -63,6 +65,13 @@ class EventDeconvolutionResult:
     template_search_mode: TemplateSearchMode = "monotonic"
     burst_compensation_mode: str = "v1"
     tau: float | None = None
+    deconv_q_wiener: np.ndarray | None = None
+    roi_mask: np.ndarray | None = None
+    deconv_q_roi: np.ndarray | None = None
+    roi_noise_rms: float | None = None
+    wiener_omega_c: float | None = None
+    wiener_b: float | None = None
+    roi_threshold_sigma: float | None = None
 
 
 BurstProcessorClass = (
@@ -342,6 +351,28 @@ def build_gaussian_deconv_kernel(
     )
 
 
+def build_wiener_deconv_kernel(
+    block_shape: tuple[int, int, int],
+    response_shape: tuple[int, int, int],
+    adc_hold_delay: int,
+    sigma_pixel: float,
+    omega_c: float,
+    b: float,
+) -> np.ndarray:
+    """Build the 3D Wiener-inspired filter used for ROI-finding deconvolution."""
+    return wiener_inspired_filter_3d(
+        (
+            block_shape[0] + response_shape[0] - 1,
+            block_shape[1] + response_shape[1] - 1,
+            block_shape[2],
+        ),
+        dt=(1, 1, adc_hold_delay),
+        sigma_pixel=(sigma_pixel, sigma_pixel),
+        omega_c=omega_c,
+        b=b,
+    )
+
+
 def smear_effective_charge(
     event: EventData,
     *,
@@ -370,6 +401,13 @@ def process_event_deconvolution(
     npadbin: int = 50,
     require_zero_local_offset: bool = False,
     template_response_indu: np.ndarray | None = None,
+    enable_wiener_roi: bool = False,
+    wiener_omega_c: float | None = None,
+    wiener_b: float = 2.0,
+    roi_threshold_sigma: float = 5.0,
+    roi_merge_gap: int = 2,
+    roi_expand: int = 2,
+    roi_min_quiet_pixels: int = 8,
 ) -> EventDeconvolutionResult:
     """Run the common hit-block deconvolution workflow for one event."""
     if event.hits is None:
@@ -415,6 +453,44 @@ def process_event_deconvolution(
         event,
         template_comp_anchors,
     )
+
+    deconv_q_wiener: np.ndarray | None = None
+    roi_mask: np.ndarray | None = None
+    deconv_q_roi: np.ndarray | None = None
+    roi_noise_rms: float | None = None
+    if enable_wiener_roi:
+        if wiener_omega_c is None:
+            raise ValueError(
+                "wiener_omega_c is required when enable_wiener_roi=True."
+            )
+        wiener_kernel = build_wiener_deconv_kernel(
+            tuple(block_data.shape),
+            tuple(prepared_response.integrated_response.shape),
+            readout_config.adc_hold_delay,
+            sigma_pixel,
+            wiener_omega_c,
+            wiener_b,
+        )
+        deconv_q_wiener, _ = deconv_fft(
+            block_data,
+            prepared_response.integrated_response,
+            wiener_kernel,
+        )
+        roi_noise_rms = estimate_quiet_pixel_noise(
+            deconv_q_wiener,
+            np.asarray(block_offset),
+            event.hits.location[:, :2],
+            min_quiet_pixels=roi_min_quiet_pixels,
+        )
+        roi_mask = find_roi_mask(
+            deconv_q_wiener,
+            roi_noise_rms,
+            threshold_sigma=roi_threshold_sigma,
+            merge_gap=roi_merge_gap,
+            expand=roi_expand,
+        )
+        deconv_q_roi = apply_roi_mask(deconv_q, roi_mask)
+
     return EventDeconvolutionResult(
         compensated_charge=compensated_charge,
         hwf_block=block_data,
@@ -434,6 +510,13 @@ def process_event_deconvolution(
             else "v1"
         ),
         tau=float(tau_value),
+        deconv_q_wiener=deconv_q_wiener,
+        roi_mask=roi_mask,
+        deconv_q_roi=deconv_q_roi,
+        roi_noise_rms=roi_noise_rms,
+        wiener_omega_c=wiener_omega_c if enable_wiener_roi else None,
+        wiener_b=wiener_b if enable_wiener_roi else None,
+        roi_threshold_sigma=roi_threshold_sigma if enable_wiener_roi else None,
     )
 
 
@@ -486,5 +569,13 @@ def build_event_output_payload(
         # Preserve the original merged-block offset. The manual time shift is
         # only for the deconvolved block (`boffset`), not for the saved HWF.
         payload["hwf_block_offset"] = np.array(result.hwf_block_offset, copy=True)
+    if result.deconv_q_wiener is not None:
+        payload["deconv_q_wiener"] = result.deconv_q_wiener
+        payload["roi_mask"] = result.roi_mask
+        payload["deconv_q_roi"] = result.deconv_q_roi
+        payload["roi_noise_rms"] = result.roi_noise_rms
+        payload["wiener_omega_c"] = result.wiener_omega_c
+        payload["wiener_b"] = result.wiener_b
+        payload["roi_threshold_sigma"] = result.roi_threshold_sigma
     payload.update(result.template_compensation_diagnostics)
     return payload
