@@ -237,10 +237,17 @@ def main() -> None:
     pix_freq_label = "frequency [cycles / pixel]"
 
     # Spatial residual: pixel-axis FFT of (comp - v3) for each compensation pipeline.
+    # Clip to common time length when sources have different temporal extents.
     pix_res_powers: dict = {}
+    nt_min = min(aligned[n].shape[2] for n in ["v1", "v2", "v3_burst", "v3"])
+    v3_clip = aligned["v3"][..., :nt_min].astype(np.float64)
+    clipped_time_region = (
+        min(time_region[0], nt_min),
+        min(time_region[1], nt_min),
+    )
     for name in ["v1", "v2", "v3_burst"]:
-        diff_blk = aligned[name].astype(np.float64) - aligned["v3"].astype(np.float64)
-        _, _, pw = pixel_power_spectra(diff_blk, prop_axis, spatial_slices, time_region)
+        diff_blk = aligned[name][..., :nt_min].astype(np.float64) - v3_clip
+        _, _, pw = pixel_power_spectra(diff_blk, prop_axis, spatial_slices, clipped_time_region)
         pix_res_powers[name] = pw
 
     # Per-pixel integrated charge from v3 (truth-most reference)

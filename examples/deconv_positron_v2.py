@@ -60,6 +60,25 @@ def parse_args() -> argparse.Namespace:
         default="center",
         help="Field-response template used for burst compensation.",
     )
+    parser.add_argument(
+        "--template-smooth-sigma",
+        type=float,
+        default=None,
+        help="Sigma of the one-sided Gaussian applied to the template differential "
+             "at injection time, in ADC-window (bin) units. Default: unset (disabled).",
+    )
+    parser.add_argument(
+        "--template-smooth-edge",
+        choices=("renormalize", "leak"),
+        default="renormalize",
+        help="Edge-handling mode for template smoothing.",
+    )
+    parser.add_argument(
+        "--template-smooth-n-sigma",
+        type=float,
+        default=4.0,
+        help="Kernel half-width in sigma units (default: 4.0).",
+    )
     return parser.parse_args()
 
 
@@ -120,6 +139,9 @@ def main() -> None:
             tau=readout_config.adc_hold_delay,
             npadbin=50,
             require_zero_local_offset=True,
+            template_smooth_sigma_bins=args.template_smooth_sigma,
+            template_smooth_edge_mode=args.template_smooth_edge,
+            template_smooth_n_sigma=args.template_smooth_n_sigma,
         )
         boffset = shift_time_offset(
             result.hwf_block_offset,

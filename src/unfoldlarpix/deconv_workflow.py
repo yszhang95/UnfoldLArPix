@@ -177,9 +177,17 @@ def create_burst_processor(
     tau: float | None = None,
     response_indu: np.ndarray | None = None,
     template_search_mode: TemplateSearchMode = "monotonic",
+    template_smooth_sigma_bins: float | None = None,
+    template_smooth_edge_mode: str = "renormalize",
+    template_smooth_n_sigma: float = 4.0,
 ):
     """Create a burst processor configured from the readout and field response."""
     tau_value = readout_config.adc_hold_delay if tau is None else tau
+    smooth_kwargs = {
+        "template_smooth_sigma_bins": template_smooth_sigma_bins,
+        "template_smooth_edge_mode": template_smooth_edge_mode,
+        "template_smooth_n_sigma": template_smooth_n_sigma,
+    }
     if processor_cls is BurstSequenceProcessorV3:
         if response_indu is None:
             raise ValueError(
@@ -192,6 +200,7 @@ def create_burst_processor(
             template_coll=build_cumulative_template(template_response),
             template_indu=response_indu,
             threshold=1.2 * readout_config.threshold,
+            **smooth_kwargs,
         )
     return processor_cls(
         readout_config.adc_hold_delay,
@@ -200,6 +209,7 @@ def create_burst_processor(
         template=np.cumsum(template_response),
         threshold=readout_config.threshold,
         template_search_mode=template_search_mode,
+        **smooth_kwargs,
     )
 
 
@@ -213,6 +223,9 @@ def hits_to_merged_block(
     template_search_mode: TemplateSearchMode = "monotonic",
     npadbin: int = 50,
     response_indu: np.ndarray | None = None,
+    template_smooth_sigma_bins: float | None = None,
+    template_smooth_edge_mode: str = "renormalize",
+    template_smooth_n_sigma: float = 4.0,
 ) -> tuple[np.ndarray, np.ndarray, float, tuple[TemplateCompensationAnchor, ...]]:
     """Convert hit bursts into a dense 3D block for deconvolution."""
     burst_processor = create_burst_processor(
@@ -222,6 +235,9 @@ def hits_to_merged_block(
         tau=tau,
         response_indu=response_indu,
         template_search_mode=template_search_mode,
+        template_smooth_sigma_bins=template_smooth_sigma_bins,
+        template_smooth_edge_mode=template_smooth_edge_mode,
+        template_smooth_n_sigma=template_smooth_n_sigma,
     )
     merged_sequences = burst_processor.process_hits(hits)
     compensated_charge = float(
@@ -370,6 +386,9 @@ def process_event_deconvolution(
     npadbin: int = 50,
     require_zero_local_offset: bool = False,
     template_response_indu: np.ndarray | None = None,
+    template_smooth_sigma_bins: float | None = None,
+    template_smooth_edge_mode: str = "renormalize",
+    template_smooth_n_sigma: float = 4.0,
 ) -> EventDeconvolutionResult:
     """Run the common hit-block deconvolution workflow for one event."""
     if event.hits is None:
@@ -388,6 +407,9 @@ def process_event_deconvolution(
         template_search_mode=prepared_response.template_search_mode,
         npadbin=npadbin,
         response_indu=response_indu,
+        template_smooth_sigma_bins=template_smooth_sigma_bins,
+        template_smooth_edge_mode=template_smooth_edge_mode,
+        template_smooth_n_sigma=template_smooth_n_sigma,
     )
     tau_value = readout_config.adc_hold_delay if tau is None else tau
     gaussian_kernel = build_gaussian_deconv_kernel(

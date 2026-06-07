@@ -9,6 +9,68 @@ from .data_containers import Hits
 
 TEMPLATE_SEARCH_MODES = {"monotonic", "positive_cumulative"}
 TRANSIT_FALLBACK_FRACTION = 0.95
+TEMPLATE_SMOOTH_EDGE_MODES = {"renormalize", "leak"}
+
+
+def _make_one_sided_gaussian(
+    sigma_bins: float, n_sigma: float = 4.0
+) -> np.ndarray:
+    """One-sided Gaussian whose peak sits at index 0 (rightmost element).
+
+    Returns a length-(R+1) array g such that g[0] is the peak and g[-1]
+    is the leftmost tail, with all weight on offsets <= 0 (no forward
+    leak past the peak anchor). Normalised so g.sum() == 1.
+    """
+    if sigma_bins is None or sigma_bins <= 0:
+        raise ValueError("sigma_bins must be positive to build a Gaussian kernel.")
+    R = int(np.ceil(n_sigma * sigma_bins))
+    offsets = np.arange(R + 1, dtype=np.float64)
+    g = np.exp(-0.5 * (offsets / sigma_bins) ** 2)
+    g /= g.sum()
+    return g
+
+
+def _smooth_template_diff(
+    dC: np.ndarray, kernel: np.ndarray
+) -> np.ndarray:
+    """Smooth dC with a right-edge-anchored Gaussian (kernel[0] is the peak).
+
+    Each entry dC[i] redistributes its mass leftward: kernel[0] stays at
+    index i, kernel[1] moves to i-1, ..., kernel[R] to i-R. Equivalent to
+    ``dC_s[j] = sum_{k=0..R} kernel[k] * dC[j+k]`` with dC zero-padded on
+    the right. The peak bin dC_s[N-1] therefore receives only
+    ``kernel[0] * dC[N-1]`` — no forward leak past the trigger anchor.
+    Leftward tails that fall outside the array are discarded.
+    """
+    dC = np.asarray(dC, dtype=float)
+    R = kernel.size - 1
+    if R == 0:
+        return dC.copy()
+    dC_padded = np.concatenate([dC, np.zeros(R, dtype=float)])
+    return np.correlate(dC_padded, kernel, mode="valid")
+
+
+def _smooth_template_diff_leak(
+    dC: np.ndarray, kernel: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Like _smooth_template_diff but also returns the leftward overflow.
+
+    Returns (dC_s_in_gap, dC_overflow_left) where
+      len(dC_s_in_gap)      == len(dC)
+      len(dC_overflow_left) == kernel.size - 1
+    dC_overflow_left[0] corresponds to bin (trigger_bin - N - R + 1), the
+    leftmost overflow position; dC_overflow_left[-1] corresponds to bin
+    (trigger_bin - N), the bin immediately preceding dC_s.
+    Mass is conserved exactly: sum(dC_s) + sum(overflow) == sum(dC).
+    """
+    dC = np.asarray(dC, dtype=float)
+    R = kernel.size - 1
+    if R == 0:
+        return dC.copy(), np.zeros(0, dtype=float)
+    full = np.correlate(dC, kernel, mode="full")  # length N + R
+    dC_overflow_left = full[:R]
+    dC_s_in_gap = full[R:]
+    return dC_s_in_gap, dC_overflow_left
 
 
 def validate_template_cumulative(
@@ -116,6 +178,12 @@ class MergedSequence:
     times: np.ndarray        # Time points for each charge value
     charges: np.ndarray      # Charge values (after differentiation of cumulative)
     cumulative: np.ndarray   # Cumulative charge values
+    # Leftward Gaussian-smoothing overflow that should be deposited into
+    # bins preceding `template_times[0]` for each template injection.
+    # Each entry is (start_time, overflow_array) where the array's first
+    # element belongs to bin `start_time` and subsequent elements step
+    # by adc_hold_delay. Empty unless edge_mode == "leak".
+    template_overflow: List[Tuple[float, np.ndarray]] = None
 
     def __post_init__(self):
         """Validate merged sequence data."""
@@ -123,6 +191,8 @@ class MergedSequence:
             raise ValueError(f"times and charges must have the same length. Got {len(self.times)} and {len(self.charges)}")
         if not np.all(np.diff(self.times) > 0):
             raise ValueError("times must be strictly monotonically increasing")
+        if self.template_overflow is None:
+            self.template_overflow = []
 
 
 @dataclass(frozen=True)
@@ -152,6 +222,9 @@ class BurstSequenceProcessor:
         template: np.ndarray = None,
         threshold: float = None,
         template_search_mode: str = "monotonic",
+        template_smooth_sigma_bins: float | None = None,
+        template_smooth_edge_mode: str = "renormalize",
+        template_smooth_n_sigma: float = 4.0,
     ):
         """Initialize the burst sequence processor.
 
@@ -165,6 +238,17 @@ class BurstSequenceProcessor:
             template_search_mode: "monotonic" for sorted cumulative templates, or
                                   "positive_cumulative" for positive non-monotonic
                                   cumulative templates.
+            template_smooth_sigma_bins: Optional sigma (in ADC-window units) of the
+                one-sided Gaussian kernel applied to the per-bin template
+                differential at injection time. ``None`` disables smoothing
+                (bit-identical to the unfiltered processor).
+            template_smooth_edge_mode: "renormalize" (default) rescales the
+                smoothed differential to preserve the gap integral exactly.
+                "leak" lets the leftward Gaussian tails spill into the bins
+                immediately preceding the gap (mass is preserved across
+                gap+overflow but recorded-bin amplitudes are mutated).
+            template_smooth_n_sigma: Kernel half-width in sigma units. Default
+                4.0 keeps ~99.99% of the kernel mass.
         """
         self.adc_hold_delay = adc_hold_delay
         self.tau = tau
@@ -176,12 +260,61 @@ class BurstSequenceProcessor:
         if threshold is None:
             raise ValueError("Threshold value must be provided for template compensation.")
 
+        if template_smooth_edge_mode not in TEMPLATE_SMOOTH_EDGE_MODES:
+            raise ValueError(
+                f"Unsupported template_smooth_edge_mode: {template_smooth_edge_mode}. "
+                f"Must be one of {TEMPLATE_SMOOTH_EDGE_MODES}."
+            )
+        self._template_smooth_sigma_bins = template_smooth_sigma_bins
+        self._template_smooth_edge_mode = template_smooth_edge_mode
+        self._template_smooth_n_sigma = template_smooth_n_sigma
+        if template_smooth_sigma_bins is not None and template_smooth_sigma_bins > 0:
+            self._template_smooth_kernel = _make_one_sided_gaussian(
+                template_smooth_sigma_bins, template_smooth_n_sigma
+            )
+        else:
+            self._template_smooth_kernel = None
+
         self.totq_per_pix = {}
         self.template_compensation_anchors: list[TemplateCompensationAnchor] = []
+        self._pending_template_overflow: List[Tuple[float, np.ndarray]] = []
 
     def _default_template(self) -> np.ndarray:
         """Create a default exponential-like template."""
         return np.array([1, 2, 3, 4, 6, 8, 16, 36], dtype=float)
+
+    def _apply_template_smoothing(
+        self,
+        template_diff: np.ndarray,
+        template_times: np.ndarray,
+    ) -> np.ndarray:
+        """Apply the configured Gaussian smoothing to a per-bin template diff.
+
+        For ``edge_mode == "leak"``, the leftward overflow is queued in
+        ``self._pending_template_overflow`` so the caller can transfer it
+        onto the merged sequence (and ultimately into the dense block).
+        """
+        if self._template_smooth_kernel is None:
+            return template_diff
+        kernel = self._template_smooth_kernel
+        if self._template_smooth_edge_mode == "renormalize":
+            target_total = float(np.sum(template_diff))
+            smoothed = _smooth_template_diff(template_diff, kernel)
+            smoothed_total = float(np.sum(smoothed))
+            if smoothed_total > 0:
+                smoothed = smoothed * (target_total / smoothed_total)
+            return smoothed
+        if self._template_smooth_edge_mode == "leak":
+            smoothed, overflow = _smooth_template_diff_leak(template_diff, kernel)
+            if overflow.size > 0 and template_times.size > 0:
+                start_time = float(template_times[0]) - float(overflow.size) * self.adc_hold_delay
+                self._pending_template_overflow.append(
+                    (start_time, np.asarray(overflow, dtype=float))
+                )
+            return smoothed
+        raise ValueError(
+            f"Unsupported template_smooth_edge_mode: {self._template_smooth_edge_mode}"
+        )
 
     def _record_template_compensation_anchor(
         self,
@@ -424,6 +557,10 @@ class BurstSequenceProcessor:
         template_section = template_section * (threshold / template_section[-1])  # FIXME: Assume Cumulative Tempalte saturates at 1.
         template_section = np.diff(template_section, prepend=0) # integral per interval
 
+        template_section = self._apply_template_smoothing(
+            template_section, template_times
+        )
+
         # charge per interval
         chgs = template_section[1:].tolist() + [next_seq.charges[0] - threshold] + next_seq.charges[1:].tolist()
 
@@ -478,6 +615,9 @@ class BurstSequenceProcessor:
 
         # Start with first sequence
         first_seq = sequences[0]
+
+        # Reset per-pixel overflow buffer (populated by leak-mode smoothing).
+        self._pending_template_overflow = []
 
         # Initialize cumulative with first sequence
         cumulative = np.concatenate([[0], np.cumsum(first_seq.charges)])
@@ -566,12 +706,15 @@ class BurstSequenceProcessor:
         # Differentiate cumulative to get final charges
         charges = np.diff(cumulative)
 
+        overflow = self._pending_template_overflow
+        self._pending_template_overflow = []
         return MergedSequence(
             pixel_x=sequences[0].pixel_x,
             pixel_y=sequences[0].pixel_y,
             times=times,
             charges=charges,
             cumulative=cumulative,
+            template_overflow=overflow,
         )
 
     def process_hits(self, hits: Hits) -> Dict[Tuple[int, int], MergedSequence]:
@@ -635,6 +778,21 @@ def merged_sequences_to_block(
                              f"times: {times}, tinds: {tinds}, offset: {offset[2]}, bin_size: {bin_size}")
         pix_inds = np.asarray(pixel_key, dtype=int) - spatial_offset
         block_charges[pix_inds[0], pix_inds[1], tinds.astype(int)] = charges
+
+        # Deposit leak-mode smoothing overflow into bins preceding the gap.
+        for start_time, overflow in getattr(merged_seq, "template_overflow", []) or []:
+            if overflow.size == 0:
+                continue
+            overflow_times = start_time + np.arange(overflow.size) * bin_size
+            overflow_inds = ((overflow_times - offset[2]) // bin_size).astype(int)
+            in_bounds = (overflow_inds >= 0) & (overflow_inds < shape[2])
+            if not np.any(in_bounds):
+                continue
+            np.add.at(
+                block_charges[pix_inds[0], pix_inds[1]],
+                overflow_inds[in_bounds],
+                overflow[in_bounds],
+            )
     block_offset = offset
 
     return block_offset, block_charges
