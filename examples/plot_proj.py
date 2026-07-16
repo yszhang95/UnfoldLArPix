@@ -9,9 +9,14 @@ parser.add_argument('input', help='Input NPZ file')
 parser.add_argument('--threshold', type=float, default=0.5)
 parser.add_argument('--prefix', type=str, default=None,
                     help='Output filename prefix (default: input stem)')
+parser.add_argument('--use-roi', action='store_true',
+                    help='Use deconv_q_roi (Wire-Cell style: Wiener ROI mask × Gaussian charge) '
+                         'instead of deconv_q. NPZ must include deconv_q_roi.')
 args = parser.parse_args()
 threshold = args.threshold
 prefix = args.prefix if args.prefix is not None else args.input.removesuffix('.npz')
+if args.use_roi:
+    prefix = f"{prefix}_roi"
 
 filtered_deconv_q = []
 filtered_smeared_true = []
@@ -203,7 +208,16 @@ for ievent in range(1):
   f = np.load(args.input)
   # f = np.load('deconv_positron_v2_event_0_0.npz')
   smeared_true = f['smeared_true']
-  deconv_q = f['deconv_q'] * (f['deconv_q'] > threshold)
+  if args.use_roi:
+      if 'deconv_q_roi' not in f.files:
+          raise SystemExit(
+              f"--use-roi requested but 'deconv_q_roi' not in {args.input}. "
+              "Re-run deconv_positron_v3_burst.py with --enable-wiener-roi."
+          )
+      print(f"[plot_proj] Using deconv_q_roi (Wire-Cell style ROI × Gaussian).")
+      deconv_q = f['deconv_q_roi'] * (f['deconv_q_roi'] > threshold)
+  else:
+      deconv_q = f['deconv_q'] * (f['deconv_q'] > threshold)
   effq_proj = np.sum(smeared_true, axis=-1)
   deconv_proj = np.sum(deconv_q, axis=-1)
   print(np.sum(deconv_proj), deconv_proj[deconv_proj > 0].shape)
