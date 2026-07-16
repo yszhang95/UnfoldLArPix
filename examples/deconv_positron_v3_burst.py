@@ -81,6 +81,14 @@ def parse_args() -> argparse.Namespace:
         default=4.0,
         help="Kernel half-width in sigma units (default: 4.0).",
     )
+    parser.add_argument(
+        "--time-filter-npz",
+        default=None,
+        help="Path to NPZ produced by build_muon_filter.py.  When set, the "
+             "muon-derived magnitude filter |H(f)| is loaded and applied to "
+             "correct the deconvolution for imperfect template compensation. "
+             "The tag '_muonfilt' is appended to the output filename suffix.",
+    )
     return parser.parse_args()
 
 
@@ -101,6 +109,22 @@ def main() -> None:
             f"{fmt_sigma_detailed(args.sigma)}_"
             f"{fmt_sigma_pxl_detailed(args.sigma_pxl)}"
         )
+
+    # Load optional muon-derived time filter (produced by build_muon_filter.py).
+    time_filter = None
+    if args.time_filter_npz is not None:
+        filt_data = np.load(args.time_filter_npz)
+        time_filter = (
+            np.asarray(filt_data["H_mag"], dtype=np.float64),
+            np.asarray(filt_data["freqs_cycles_per_sample"], dtype=np.float64),
+        )
+        print(
+            f"Loaded muon time filter from {args.time_filter_npz}: "
+            f"{len(time_filter[0])} frequency bins, "
+            f"|H| range [{time_filter[0].min():.3f}, {time_filter[0].max():.3f}]"
+        )
+        if "_muonfilt" not in args.output_suffix:
+            args.output_suffix += "_muonfilt"
 
     loader = DataLoader(args.input_file)
     readout_config = loader.get_readout_config()
@@ -144,6 +168,7 @@ def main() -> None:
             template_smooth_sigma_bins=args.template_smooth_sigma,
             template_smooth_edge_mode=args.template_smooth_edge,
             template_smooth_n_sigma=args.template_smooth_n_sigma,
+            time_filter=time_filter,
         )
         boffset = shift_time_offset(
             result.hwf_block_offset,
