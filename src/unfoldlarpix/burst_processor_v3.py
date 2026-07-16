@@ -70,6 +70,9 @@ class BurstSequenceProcessorV3(BurstSequenceProcessor):
         *,
         template_coll: np.ndarray = None,
         template_indu: np.ndarray = None,
+        template_smooth_sigma_bins: float | None = None,
+        template_smooth_edge_mode: str = "renormalize",
+        template_smooth_n_sigma: float = 4.0,
     ):
         """Initialize V3 with collection cumulative and induction bipolar templates."""
         if template_coll is None or template_indu is None:
@@ -83,6 +86,9 @@ class BurstSequenceProcessorV3(BurstSequenceProcessor):
             deadtime=deadtime,
             template=template_coll,
             threshold=threshold,
+            template_smooth_sigma_bins=template_smooth_sigma_bins,
+            template_smooth_edge_mode=template_smooth_edge_mode,
+            template_smooth_n_sigma=template_smooth_n_sigma,
         )
 
         self.template_coll = np.asarray(template_coll, dtype=float)
@@ -316,6 +322,9 @@ class BurstSequenceProcessorV3(BurstSequenceProcessor):
         )
         template_section = template_section * (threshold / template_section[-1])
         template_charge_steps = np.diff(template_section, prepend=0.0)
+        template_charge_steps = self._apply_template_smoothing(
+            template_charge_steps, template_times
+        )
 
         merged_group_charges = (
             template_charge_steps[1:].tolist()
@@ -360,6 +369,9 @@ class BurstSequenceProcessorV3(BurstSequenceProcessor):
         if len(sequences) == 0:
             raise ValueError("sequences list cannot be empty")
 
+        # Reset per-pixel overflow buffer (populated by leak-mode smoothing).
+        self._pending_template_overflow = []
+
         first_pass_groups = self._merge_close_sequences_first_pass(sequences)
 
         times, cumulative, threshold_idx, transit_fraction = (
@@ -398,10 +410,13 @@ class BurstSequenceProcessorV3(BurstSequenceProcessor):
             )
 
         charges = np.diff(cumulative)
+        overflow = self._pending_template_overflow
+        self._pending_template_overflow = []
         return MergedSequence(
             pixel_x=sequences[0].pixel_x,
             pixel_y=sequences[0].pixel_y,
             times=times,
             charges=charges,
             cumulative=cumulative,
+            template_overflow=overflow,
         )

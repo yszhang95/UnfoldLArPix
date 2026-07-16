@@ -6,6 +6,10 @@ import numpy as np
 
 from .burst_processor import (
     BurstSequence,
+    TEMPLATE_SMOOTH_EDGE_MODES,
+    _make_one_sided_gaussian,
+    _smooth_template_diff,
+    _smooth_template_diff_leak,
     find_bootstrap_threshold_idx,
     find_window_threshold_idx,
     MergedSequence,
@@ -40,6 +44,9 @@ class BurstSequenceProcessorV2:
         template: np.ndarray = None,
         threshold: float = None,
         template_search_mode: str = "monotonic",
+        template_smooth_sigma_bins: float | None = None,
+        template_smooth_edge_mode: str = "renormalize",
+        template_smooth_n_sigma: float = 4.0,
     ):
         """Initialise the processor.
 
@@ -70,8 +77,24 @@ class BurstSequenceProcessorV2:
             raise ValueError("Threshold value must be provided for template compensation.")
         self.threshold = threshold
 
+        if template_smooth_edge_mode not in TEMPLATE_SMOOTH_EDGE_MODES:
+            raise ValueError(
+                f"Unsupported template_smooth_edge_mode: {template_smooth_edge_mode}. "
+                f"Must be one of {TEMPLATE_SMOOTH_EDGE_MODES}."
+            )
+        self._template_smooth_sigma_bins = template_smooth_sigma_bins
+        self._template_smooth_edge_mode = template_smooth_edge_mode
+        self._template_smooth_n_sigma = template_smooth_n_sigma
+        if template_smooth_sigma_bins is not None and template_smooth_sigma_bins > 0:
+            self._template_smooth_kernel = _make_one_sided_gaussian(
+                template_smooth_sigma_bins, template_smooth_n_sigma
+            )
+        else:
+            self._template_smooth_kernel = None
+
         self.totq_per_pix: Dict[Tuple[int, int], float] = {}
         self.template_compensation_anchors: list[TemplateCompensationAnchor] = []
+        self._pending_template_overflow: List[Tuple[float, np.ndarray]] = []
 
     # ------------------------------------------------------------------
     # Helpers
@@ -105,6 +128,34 @@ class BurstSequenceProcessorV2:
                 transit_fraction=float(transit_fraction),
                 is_bootstrap=is_bootstrap,
             )
+        )
+
+    def _apply_template_smoothing(
+        self,
+        template_diff: np.ndarray,
+        template_times: np.ndarray,
+    ) -> np.ndarray:
+        """Apply the configured Gaussian smoothing to a per-bin template diff."""
+        if self._template_smooth_kernel is None:
+            return template_diff
+        kernel = self._template_smooth_kernel
+        if self._template_smooth_edge_mode == "renormalize":
+            target_total = float(np.sum(template_diff))
+            smoothed = _smooth_template_diff(template_diff, kernel)
+            smoothed_total = float(np.sum(smoothed))
+            if smoothed_total > 0:
+                smoothed = smoothed * (target_total / smoothed_total)
+            return smoothed
+        if self._template_smooth_edge_mode == "leak":
+            smoothed, overflow = _smooth_template_diff_leak(template_diff, kernel)
+            if overflow.size > 0 and template_times.size > 0:
+                start_time = float(template_times[0]) - float(overflow.size) * self.adc_hold_delay
+                self._pending_template_overflow.append(
+                    (start_time, np.asarray(overflow, dtype=float))
+                )
+            return smoothed
+        raise ValueError(
+            f"Unsupported template_smooth_edge_mode: {self._template_smooth_edge_mode}"
         )
 
     def _fractional_shift(self, charges: np.ndarray, delta_T: float) -> np.ndarray:
@@ -332,6 +383,9 @@ class BurstSequenceProcessorV2:
         template_section = template_section[valid_mask]
         template_section = template_section * (threshold / template_section[-1])
         template_section_diff = np.diff(template_section, prepend=0.0)
+        template_section_diff = self._apply_template_smoothing(
+            template_section_diff, template_times
+        )
 
         # Combine template interval charges with fractional-shifted next_seq charges
         chgs = (
@@ -441,6 +495,9 @@ class BurstSequenceProcessorV2:
         if len(sequences) == 0:
             raise ValueError("sequences list cannot be empty")
 
+        # Reset per-pixel overflow buffer (populated by leak-mode smoothing).
+        self._pending_template_overflow = []
+
         first_seq = sequences[0]
         dT_first = first_seq.trigger_time_idx % self.adc_hold_delay
 
@@ -520,12 +577,35 @@ class BurstSequenceProcessorV2:
         aligned_charges = aligned_charges[keep]
         aligned_cumulative = np.concatenate([[0], np.cumsum(aligned_charges)])
 
+        overflow = self._pending_template_overflow
+        self._pending_template_overflow = []
+        # Shift overflow start_times by the same per-block delta_T offsets so
+        # they live on the common ADC grid. Each pending overflow was produced
+        # in the bootstrap or the first dT_curr context — the first block of
+        # the sequence (bootstrap) carries dT_first.
+        if overflow:
+            # All overflow entries are emitted at injection time, before the
+            # phase-shift alignment. The leftmost block's delta_T applies.
+            adjusted_overflow: List[Tuple[float, np.ndarray]] = []
+            block_starts_arr = block_starts.tolist() if hasattr(block_starts, "tolist") else list(block_starts)
+            for start_time, arr in overflow:
+                # Find which delta_T-block this overflow falls into by time.
+                # Use times array (pre-alignment) to map start_time -> block.
+                idx = int(np.searchsorted(times, start_time, side="right")) - 1
+                if idx < 0:
+                    idx = 0
+                if idx >= len(delta_T_per_time):
+                    idx = len(delta_T_per_time) - 1
+                dT = float(delta_T_per_time[idx])
+                adjusted_overflow.append((start_time - dT, arr))
+            overflow = adjusted_overflow
         return MergedSequence(
             pixel_x=sequences[0].pixel_x,
             pixel_y=sequences[0].pixel_y,
             times=aligned_times,
             charges=aligned_charges,
             cumulative=aligned_cumulative,
+            template_overflow=overflow,
         )
 
     def process_hits(

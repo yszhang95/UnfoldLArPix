@@ -186,9 +186,17 @@ def create_burst_processor(
     tau: float | None = None,
     response_indu: np.ndarray | None = None,
     template_search_mode: TemplateSearchMode = "monotonic",
+    template_smooth_sigma_bins: float | None = None,
+    template_smooth_edge_mode: str = "renormalize",
+    template_smooth_n_sigma: float = 4.0,
 ):
     """Create a burst processor configured from the readout and field response."""
     tau_value = readout_config.adc_hold_delay if tau is None else tau
+    smooth_kwargs = {
+        "template_smooth_sigma_bins": template_smooth_sigma_bins,
+        "template_smooth_edge_mode": template_smooth_edge_mode,
+        "template_smooth_n_sigma": template_smooth_n_sigma,
+    }
     if processor_cls is BurstSequenceProcessorV3:
         if response_indu is None:
             raise ValueError(
@@ -201,6 +209,7 @@ def create_burst_processor(
             template_coll=build_cumulative_template(template_response),
             template_indu=response_indu,
             threshold=1.2 * readout_config.threshold,
+            **smooth_kwargs,
         )
     return processor_cls(
         readout_config.adc_hold_delay,
@@ -209,6 +218,7 @@ def create_burst_processor(
         template=np.cumsum(template_response),
         threshold=readout_config.threshold,
         template_search_mode=template_search_mode,
+        **smooth_kwargs,
     )
 
 
@@ -222,6 +232,9 @@ def hits_to_merged_block(
     template_search_mode: TemplateSearchMode = "monotonic",
     npadbin: int = 50,
     response_indu: np.ndarray | None = None,
+    template_smooth_sigma_bins: float | None = None,
+    template_smooth_edge_mode: str = "renormalize",
+    template_smooth_n_sigma: float = 4.0,
 ) -> tuple[np.ndarray, np.ndarray, float, tuple[TemplateCompensationAnchor, ...]]:
     """Convert hit bursts into a dense 3D block for deconvolution."""
     burst_processor = create_burst_processor(
@@ -231,6 +244,9 @@ def hits_to_merged_block(
         tau=tau,
         response_indu=response_indu,
         template_search_mode=template_search_mode,
+        template_smooth_sigma_bins=template_smooth_sigma_bins,
+        template_smooth_edge_mode=template_smooth_edge_mode,
+        template_smooth_n_sigma=template_smooth_n_sigma,
     )
     merged_sequences = burst_processor.process_hits(hits)
     compensated_charge = float(
@@ -373,6 +389,44 @@ def build_wiener_deconv_kernel(
     )
 
 
+def apply_time_filter(
+    gaussian_kernel: np.ndarray,
+    h_mag: np.ndarray,
+    h_freqs: np.ndarray,
+) -> np.ndarray:
+    """Multiply a 1-D time-axis magnitude filter onto the 3-D Gaussian kernel.
+
+    ``h_mag`` and ``h_freqs`` encode a correction derived from muon data
+    (produced by ``build_muon_filter.py``) in units of cycles/ADC-sample.
+    The filter is interpolated onto the frequency grid implied by the time
+    dimension of ``gaussian_kernel`` and broadcast across both spatial axes.
+    Frequencies outside the range of ``h_freqs`` receive a correction of 1.0
+    (identity — no change).
+
+    The corrected kernel is passed as ``filter_fft`` to ``deconv_fft``, so
+    the result at each frequency bin is scaled by ``|H(f)|`` *on top of* the
+    Gaussian regularisation already encoded in ``gaussian_kernel``.
+
+    Args:
+        gaussian_kernel: 3-D filter array of shape ``(nx, ny, n_fft_t)``
+            as returned by ``build_gaussian_deconv_kernel``.
+        h_mag: 1-D non-negative magnitude correction array (≥ 0).
+        h_freqs: Corresponding frequency values in cycles/ADC-sample,
+            monotonically increasing, same length as ``h_mag``.
+
+    Returns:
+        New array of the same shape as ``gaussian_kernel`` with the time
+        filter multiplied in along the last axis.
+    """
+    n_fft_t = gaussian_kernel.shape[-1]
+    # rfft produces n_fft_t = n_t // 2 + 1 from n_t real samples.
+    n_t = (n_fft_t - 1) * 2
+    target_freqs = np.fft.rfftfreq(n_t, d=1)  # cycles/ADC-sample, in [0, 0.5]
+    # Interpolate; 1.0 outside the measured frequency range = no correction.
+    h_interp = np.interp(target_freqs, h_freqs, h_mag, left=1.0, right=1.0)
+    return gaussian_kernel * h_interp[np.newaxis, np.newaxis, :]
+
+
 def smear_effective_charge(
     event: EventData,
     *,
@@ -408,8 +462,21 @@ def process_event_deconvolution(
     roi_merge_gap: int = 2,
     roi_expand: int = 2,
     roi_min_quiet_pixels: int = 8,
+    template_smooth_sigma_bins: float | None = None,
+    template_smooth_edge_mode: str = "renormalize",
+    template_smooth_n_sigma: float = 4.0,
+    time_filter: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> EventDeconvolutionResult:
-    """Run the common hit-block deconvolution workflow for one event."""
+    """Run the common hit-block deconvolution workflow for one event.
+
+    ``time_filter``, when provided, is a ``(h_mag, h_freqs)`` pair produced by
+    ``build_muon_filter.py``.  ``h_mag`` is a 1-D magnitude correction array
+    and ``h_freqs`` gives the corresponding frequencies in cycles/ADC-sample.
+    The filter is applied *on top of* the Gaussian regularisation kernel to
+    correct for spectral distortion introduced by imperfect template
+    compensation (see ``apply_time_filter``).  Defaults to ``None`` (no
+    correction), leaving all existing behaviour unchanged.
+    """
     if event.hits is None:
         raise ValueError("Event does not contain hit data.")
 
@@ -426,6 +493,9 @@ def process_event_deconvolution(
         template_search_mode=prepared_response.template_search_mode,
         npadbin=npadbin,
         response_indu=response_indu,
+        template_smooth_sigma_bins=template_smooth_sigma_bins,
+        template_smooth_edge_mode=template_smooth_edge_mode,
+        template_smooth_n_sigma=template_smooth_n_sigma,
     )
     tau_value = readout_config.adc_hold_delay if tau is None else tau
     gaussian_kernel = build_gaussian_deconv_kernel(
@@ -435,6 +505,9 @@ def process_event_deconvolution(
         sigma_time,
         sigma_pixel,
     )
+    if time_filter is not None:
+        h_mag, h_freqs = time_filter
+        gaussian_kernel = apply_time_filter(gaussian_kernel, h_mag, h_freqs)
     deconv_q, local_offset = deconv_fft(
         block_data,
         prepared_response.integrated_response,
