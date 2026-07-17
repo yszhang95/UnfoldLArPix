@@ -47,24 +47,91 @@ def pool_block(block: np.ndarray, group_pixels: int = 1,
                      (nt + pt) // gt, gt).sum(axis=(1, 3, 5))
 
 
+def universal_rebin(npz_path: Path, truth_npz: Path | None = None,
+                    content_offset_ticks: float = 0.0):
+    """Rebin truth and reco INDEPENDENTLY onto the universal grid.
+
+    Universal time bins have edges at global multiples of adc_hold_delay
+    (anchored to tick 0 of the common clock); pixels are absolute
+    hardware indices.  The smeared truth is summed from its own fine-tick
+    grid; the reconstruction's bin contents are deposited from their
+    PHYSICAL centers (declared boffset + (k + 1/2)*B, plus an optional
+    diagnostic ``content_offset_ticks``) with a charge-conserving linear
+    split.  Neither binning depends on the other — the protocol required
+    for absolute (cross-config, cross-event) statements.
+    """
+    f = np.load(npz_path, allow_pickle=True)
+    t = np.load(truth_npz, allow_pickle=True) if truth_npz is not None else f
+    B = int(f["adc_hold_delay"])
+    smeared = np.asarray(t["smeared_true"], dtype=np.float64)
+    s_off = np.asarray(t["smear_offset"], dtype=np.int64)
+    dq = np.asarray(f["deconv_q"], dtype=np.float64)
+    b_off = np.asarray(f["boffset"], dtype=np.float64)
+
+    # ---- truth: fine ticks -> universal bins (pad front to a bin edge)
+    pre = int(s_off[2] - (s_off[2] // B) * B)
+    nt_f = smeared.shape[2] + pre
+    post = (-nt_f) % B
+    tr_fine = np.pad(smeared, ((0, 0), (0, 0), (pre, post)))
+    tr_u = tr_fine.reshape(*tr_fine.shape[:2], -1, B).sum(axis=3)
+    tr_t0 = int(s_off[2] // B)          # first universal bin index
+    tr_p0 = (int(s_off[0]), int(s_off[1]))
+
+    # ---- reco: physical bin centers -> universal bins (linear split)
+    nx, ny, ntq = dq.shape
+    centers = b_off[2] + (np.arange(ntq) + 0.5) * B + content_offset_ticks
+    fpos = centers / B - 0.5            # fractional universal-bin position
+    i0 = np.floor(fpos).astype(np.int64)
+    frac = fpos - i0
+    u_min = int(min(i0.min(), tr_t0))
+    u_max = int(max(i0.max() + 1, tr_t0 + tr_u.shape[2] - 1))
+    ntu = u_max - u_min + 1
+    p_min = (min(int(b_off[0]), tr_p0[0]), min(int(b_off[1]), tr_p0[1]))
+    p_max = (max(int(b_off[0]) + nx, tr_p0[0] + tr_u.shape[0]),
+             max(int(b_off[1]) + ny, tr_p0[1] + tr_u.shape[1]))
+    shape = (p_max[0] - p_min[0], p_max[1] - p_min[1], ntu)
+
+    reco = np.zeros(shape)
+    ox, oy = int(b_off[0]) - p_min[0], int(b_off[1]) - p_min[1]
+    for k in range(ntq):
+        col = dq[:, :, k]
+        b = i0[k] - u_min
+        reco[ox:ox + nx, oy:oy + ny, b] += col * (1.0 - frac[k])
+        reco[ox:ox + nx, oy:oy + ny, b + 1] += col * frac[k]
+    truth = np.zeros(shape)
+    tx, ty = tr_p0[0] - p_min[0], tr_p0[1] - p_min[1]
+    truth[tx:tx + tr_u.shape[0], ty:ty + tr_u.shape[1],
+          tr_t0 - u_min: tr_t0 - u_min + tr_u.shape[2]] = tr_u
+    return truth, reco
+
+
 def evaluate(npz_path: Path, corr_threshold: float = 0.5,
              active_threshold_frac: float = 0.10,
              key: str = "deconv_q",
              truth_npz: Path | None = None,
              group_pixels: int = 1,
-             group_time: int = 1) -> dict:
-    f = np.load(npz_path, allow_pickle=True)
-    t = np.load(truth_npz, allow_pickle=True) if truth_npz is not None else f
-    smeared_true = np.asarray(t["smeared_true"], dtype=np.float64)
-    smear_offset = t["smear_offset"]
-    deconv_q = np.asarray(f[key], dtype=np.float64)
-    _, aligned_dq, smear_summed, _ = align_voxel_blocks(
-        fine_lower_corner=smear_offset,
-        coarse_lower_corner=f["boffset"],
-        fine_voxels=smeared_true,
-        coarse_voxels=deconv_q,
-        bin_size=f["adc_hold_delay"],
-    )
+             group_time: int = 1,
+             universal: bool = False,
+             content_offset_ticks: float = 0.0) -> dict:
+    if universal:
+        smear_summed, aligned_dq = universal_rebin(
+            npz_path, truth_npz=truth_npz,
+            content_offset_ticks=content_offset_ticks,
+        )
+    else:
+        f = np.load(npz_path, allow_pickle=True)
+        t = (np.load(truth_npz, allow_pickle=True)
+             if truth_npz is not None else f)
+        smeared_true = np.asarray(t["smeared_true"], dtype=np.float64)
+        smear_offset = t["smear_offset"]
+        deconv_q = np.asarray(f[key], dtype=np.float64)
+        _, aligned_dq, smear_summed, _ = align_voxel_blocks(
+            fine_lower_corner=smear_offset,
+            coarse_lower_corner=f["boffset"],
+            fine_voxels=smeared_true,
+            coarse_voxels=deconv_q,
+            bin_size=f["adc_hold_delay"],
+        )
 
     aligned_dq = pool_block(aligned_dq, group_pixels, group_time)
     smear_summed = pool_block(smear_summed, group_pixels, group_time)
@@ -145,6 +212,13 @@ def main() -> None:
                         "(local charge fidelity at group scale).")
     p.add_argument("--group-time", type=int, default=1,
                    help="Sum-pool N time bins before all metrics.")
+    p.add_argument("--universal-grid", action="store_true",
+                   help="Reconstruction-INDEPENDENT evaluation: truth and "
+                        "reco are each rebinned onto the universal grid "
+                        "(edges at global multiples of adc_hold_delay).")
+    p.add_argument("--content-offset-ticks", type=float, default=0.0,
+                   help="Diagnostic shift of the reco physical centers "
+                        "[ticks] in universal mode (declaration scans).")
     p.add_argument("--json", default=None, help="Optional output JSON path.")
     args = p.parse_args()
 
@@ -158,7 +232,9 @@ def main() -> None:
         results[label] = evaluate(Path(path), corr_threshold=args.corr_threshold,
                                   key=args.key, truth_npz=truth,
                                   group_pixels=args.group_pixels,
-                                  group_time=args.group_time)
+                                  group_time=args.group_time,
+                                  universal=args.universal_grid,
+                                  content_offset_ticks=args.content_offset_ticks)
 
     header = (f"{'label':<28} {'int%':>7} {'r':>8} {'slope':>7} "
               f"{'specdev':>8} {'ghost%':>7} {'gAdj%':>6} {'gIso%':>6} "
