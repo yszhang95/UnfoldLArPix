@@ -48,7 +48,10 @@ def pool_block(block: np.ndarray, group_pixels: int = 1,
 
 
 def universal_rebin(npz_path: Path, truth_npz: Path | None = None,
-                    content_offset_ticks: float = 0.0):
+                    content_offset_ticks: float = 0.0,
+                    deposit_shape: str = "linear",
+                    sigma_time: float = 0.005,
+                    sigma_pxl: float = 0.2):
     """Rebin truth and reco INDEPENDENTLY onto the universal grid.
 
     Universal time bins have edges at global multiples of adc_hold_delay
@@ -56,9 +59,22 @@ def universal_rebin(npz_path: Path, truth_npz: Path | None = None,
     hardware indices.  The smeared truth is summed from its own fine-tick
     grid; the reconstruction's bin contents are deposited from their
     PHYSICAL centers (declared boffset + (k + 1/2)*B, plus an optional
-    diagnostic ``content_offset_ticks``) with a charge-conserving linear
-    split.  Neither binning depends on the other — the protocol required
-    for absolute (cross-config, cross-event) statements.
+    diagnostic ``content_offset_ticks``).  Neither binning depends on the
+    other — the protocol required for absolute (cross-config,
+    cross-event) statements.
+
+    ``deposit_shape`` controls how reco content is deposited:
+    - "linear": charge-conserving linear split of the SMOOTHED coarse
+      content (treats each bin as uniform — carries a rebinning cost of
+      up to half a bin of artificial spread).
+    - "gaussian": each SHARP fitted charge is deposited as a Gaussian
+      around its regressed mean with the analysis filter width
+      (sigma_time, frequency-domain; time-domain sigma = 1/(2 pi
+      sigma_time) ticks), then the spatial analysis Gaussian is applied —
+      i.e. the smeared field G (x) q_hat is evaluated DIRECTLY on the
+      universal grid at fine-tick precision.  This removes the rebinning
+      artifact entirely; the shape width is hypothetical (filter- or
+      diffusion-motivated), matching the smeared-truth convention.
     """
     f = np.load(npz_path, allow_pickle=True)
     t = np.load(truth_npz, allow_pickle=True) if truth_npz is not None else f
@@ -91,13 +107,36 @@ def universal_rebin(npz_path: Path, truth_npz: Path | None = None,
              max(int(b_off[1]) + ny, tr_p0[1] + tr_u.shape[1]))
     shape = (p_max[0] - p_min[0], p_max[1] - p_min[1], ntu)
 
-    reco = np.zeros(shape)
+    out_shape = shape
+    reco = np.zeros(out_shape)
     ox, oy = int(b_off[0]) - p_min[0], int(b_off[1]) - p_min[1]
-    for k in range(ntq):
-        col = dq[:, :, k]
-        b = i0[k] - u_min
-        reco[ox:ox + nx, oy:oy + ny, b] += col * (1.0 - frac[k])
-        reco[ox:ox + nx, oy:oy + ny, b + 1] += col * frac[k]
+    if deposit_shape == "gaussian" and "deconv_q_sharp" in f.files:
+        import math
+
+        q_sharp = np.asarray(f["deconv_q_sharp"], dtype=np.float64)
+        sig_ticks = 1.0 / (2.0 * np.pi * float(sigma_time))
+        edges = (np.arange(u_min, u_max + 2) * B).astype(np.float64)
+        erf = np.vectorize(math.erf)
+        # weight of fit-bin k in universal bin m: Gaussian mass between edges
+        z = (edges[None, :] - centers[:, None]) / (np.sqrt(2.0) * sig_ticks)
+        cdf = 0.5 * (1.0 + erf(z))
+        W = cdf[:, 1:] - cdf[:, :-1]              # (ntq, ntu)
+        reco[ox:ox + nx, oy:oy + ny, :] = np.einsum("xyk,km->xym", q_sharp, W)
+        # spatial analysis Gaussian on the pixel axes (same convention as
+        # gaussian_filter_3d): full-array FFT so truth-side pixels align
+        fx = np.fft.fftfreq(out_shape[0])
+        fy = np.fft.fftfreq(out_shape[1])
+        gx = np.exp(-0.5 * fx**2 / float(sigma_pxl) ** 2)
+        gy = np.exp(-0.5 * fy**2 / float(sigma_pxl) ** 2)
+        R = np.fft.fftn(reco, axes=(0, 1))
+        reco = np.real(np.fft.ifftn(
+            R * gx[:, None, None] * gy[None, :, None], axes=(0, 1)))
+    else:
+        for k in range(ntq):
+            col = dq[:, :, k]
+            b = i0[k] - u_min
+            reco[ox:ox + nx, oy:oy + ny, b] += col * (1.0 - frac[k])
+            reco[ox:ox + nx, oy:oy + ny, b + 1] += col * frac[k]
     truth = np.zeros(shape)
     tx, ty = tr_p0[0] - p_min[0], tr_p0[1] - p_min[1]
     truth[tx:tx + tr_u.shape[0], ty:ty + tr_u.shape[1],
@@ -112,11 +151,13 @@ def evaluate(npz_path: Path, corr_threshold: float = 0.5,
              group_pixels: int = 1,
              group_time: int = 1,
              universal: bool = False,
-             content_offset_ticks: float = 0.0) -> dict:
+             content_offset_ticks: float = 0.0,
+             deposit_shape: str = "linear") -> dict:
     if universal:
         smear_summed, aligned_dq = universal_rebin(
             npz_path, truth_npz=truth_npz,
             content_offset_ticks=content_offset_ticks,
+            deposit_shape=deposit_shape,
         )
     else:
         f = np.load(npz_path, allow_pickle=True)
@@ -219,6 +260,12 @@ def main() -> None:
     p.add_argument("--content-offset-ticks", type=float, default=0.0,
                    help="Diagnostic shift of the reco physical centers "
                         "[ticks] in universal mode (declaration scans).")
+    p.add_argument("--deposit-shape", choices=("linear", "gaussian"),
+                   default="linear",
+                   help="Universal-mode reco deposit: linear split of "
+                        "coarse content, or Gaussian shapes around the "
+                        "regressed means (filter width) from the sharp "
+                        "charges — removes the rebinning artifact.")
     p.add_argument("--json", default=None, help="Optional output JSON path.")
     args = p.parse_args()
 
@@ -234,7 +281,8 @@ def main() -> None:
                                   group_pixels=args.group_pixels,
                                   group_time=args.group_time,
                                   universal=args.universal_grid,
-                                  content_offset_ticks=args.content_offset_ticks)
+                                  content_offset_ticks=args.content_offset_ticks,
+                                  deposit_shape=args.deposit_shape)
 
     header = (f"{'label':<28} {'int%':>7} {'r':>8} {'slope':>7} "
               f"{'specdev':>8} {'ghost%':>7} {'gAdj%':>6} {'gIso%':>6} "
