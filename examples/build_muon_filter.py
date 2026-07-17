@@ -85,12 +85,14 @@ def align_voxel_blocks(fine_lower_corner, coarse_lower_corner, fine_voxels,
 
 
 def truth_deconv_power(npz_path: Path, active_threshold: float):
-    """Per-pixel temporal power of (smeared truth, deconv_q) for one muon NPZ.
+    """Per-pixel temporal spectra of (smeared truth, deconv_q) for one muon NPZ.
 
     The smeared truth is aligned onto the deconv_q voxel grid, active pixels are
-    selected by truth charge, and mean |rFFT|^2 along time is returned for both.
+    selected by truth charge, and per-pixel rFFTs along time are averaged into
+    the auto-powers of both and their cross-power.
 
-    Returns ``(freqs, P_truth, P_deconv, n_pixels)`` with freqs in cycles/sample.
+    Returns ``(freqs, P_truth, P_deconv, C_cross, n_pixels)`` with freqs in
+    cycles/sample and ``C_cross = <S_truth * conj(S_deconv)>`` (complex).
     """
     f = np.load(npz_path, allow_pickle=True)
     smeared_true = np.asarray(f["smeared_true"], dtype=np.float64)
@@ -109,9 +111,12 @@ def truth_deconv_power(npz_path: Path, active_threshold: float):
     xs, ys = np.where(charge > active_threshold * cmax)
     nt = smear_summed.shape[2]
     freqs = np.fft.rfftfreq(nt)
-    P_truth = (np.abs(np.fft.rfft(smear_summed[xs, ys, :], axis=-1)) ** 2).mean(axis=0)
-    P_dec = (np.abs(np.fft.rfft(aligned_dq[xs, ys, :], axis=-1)) ** 2).mean(axis=0)
-    return freqs, P_truth, P_dec, int(xs.size)
+    S_truth = np.fft.rfft(smear_summed[xs, ys, :], axis=-1)
+    S_dec = np.fft.rfft(aligned_dq[xs, ys, :], axis=-1)
+    P_truth = (np.abs(S_truth) ** 2).mean(axis=0)
+    P_dec = (np.abs(S_dec) ** 2).mean(axis=0)
+    C_cross = (S_truth * np.conj(S_dec)).mean(axis=0)
+    return freqs, P_truth, P_dec, C_cross, int(xs.size)
 
 
 def smooth_spectrum(h: np.ndarray, bins: int) -> np.ndarray:
@@ -238,13 +243,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=("readout", "truth"),
+        choices=("readout", "truth", "truth-complex"),
         default="truth",
         help="readout: |H| = sqrt(P_continuous_readout / P_compensated_readout), a "
              "pure boost correcting the compensation power deficit. "
              "truth:   |H| = sqrt(P_smeared_truth / P_deconv_q), the "
              "deconvolution->truth transfer function (can attenuate where "
-             "deconv_q over-shoots truth). Default: truth.",
+             "deconv_q over-shoots truth). "
+             "truth-complex: H1 = <S_truth S_deconv*> / <|S_deconv|^2>, the "
+             "coherence-weighted complex system-identification estimate — "
+             "corrects PHASE (systematic timing bias) as well as magnitude. "
+             "Default: truth.",
     )
     parser.add_argument(
         "--muon-v3",
@@ -261,6 +270,14 @@ def parse_args() -> argparse.Namespace:
         metavar="NPZ",
         help="NPZ file(s) from the v3_burst (template-compensated) muon run. "
              "In --mode truth this supplies both smeared_true and deconv_q.",
+    )
+    parser.add_argument(
+        "--h1-pure",
+        action="store_true",
+        help="truth-complex only: use the raw H1 estimate without blending "
+             "to identity by coherence. |H1| = gamma * sqrt(P_truth/P_deconv), "
+             "so incoherent bands are attenuated (like the truth magnitude "
+             "filter) while the phase correction is kept.",
     )
     parser.add_argument(
         "--smooth-bins",
@@ -302,20 +319,24 @@ def parse_args() -> argparse.Namespace:
 
 
 def _pool_truth_deconv(paths, active_threshold):
-    """Trace-count-weighted mean (P_truth, P_deconv) across muon NPZ files."""
+    """Trace-count-weighted mean (P_truth, P_deconv, C_cross) across muon NPZs."""
     results = []
     for path in paths:
-        freqs, P_t, P_d, n = truth_deconv_power(path, active_threshold)
-        results.append((freqs, P_t, P_d, n))
+        freqs, P_t, P_d, C_td, n = truth_deconv_power(path, active_threshold)
+        results.append((freqs, P_t, P_d, C_td, n))
         print(f"  {path.name}: {n} active pixels, nt={(len(freqs)-1)*2}")
-    max_nf = max(len(f) for f, _, _, _ in results)
+    max_nf = max(len(f) for f, _, _, _, _ in results)
     common = np.fft.rfftfreq((max_nf - 1) * 2)
-    tot_t = np.zeros(max_nf); tot_d = np.zeros(max_nf); w = 0
-    for f, P_t, P_d, n in results:
+    tot_t = np.zeros(max_nf)
+    tot_d = np.zeros(max_nf)
+    tot_c = np.zeros(max_nf, dtype=np.complex128)
+    w = 0
+    for f, P_t, P_d, C_td, n in results:
         tot_t += np.interp(common, f, P_t) * n
         tot_d += np.interp(common, f, P_d) * n
+        tot_c += np.interp(common, f, C_td) * n
         w += n
-    return common, tot_t / w, tot_d / w, w
+    return common, tot_t / w, tot_d / w, tot_c / w, w
 
 
 def main() -> None:
@@ -324,6 +345,89 @@ def main() -> None:
     paths_v3burst = [Path(p) for p in args.muon_v3_burst]
     eps = args.reg
 
+    if args.mode == "truth-complex":
+        # H1(f) = <S_truth S_deconv*> / <|S_deconv|^2>: the least-squares
+        # system-identification estimate of the deconv->truth transfer
+        # function.  Its phase encodes the systematic timing bias of the
+        # reconstruction (template anchoring, residual sampling phase), which
+        # a magnitude-only filter cannot correct.  The correction is blended
+        # to identity by the coherence gamma^2 so that incoherent (noise
+        # dominated) bands are left untouched.
+        print("Mode: truth-complex  (H1 = <S_t S_d*>/<|S_d|^2>, coherence-weighted)")
+        print(f"muon v3_burst files: {len(paths_v3burst)}")
+        common_freqs, P_truth, P_dec, C_cross, n_pix = _pool_truth_deconv(
+            paths_v3burst, args.active_threshold
+        )
+        H1 = C_cross / (P_dec + eps)
+        coherence = np.abs(C_cross) ** 2 / (P_truth * P_dec + eps)
+        coherence = np.clip(coherence, 0.0, 1.0)
+        if args.h1_pure:
+            print("h1-pure: no identity blending; |H1| = gamma*sqrt(P_t/P_d)")
+            raw_H = H1
+        else:
+            raw_H = 1.0 + coherence * (H1 - 1.0)
+        H_complex = (
+            smooth_spectrum(raw_H.real, args.smooth_bins)
+            + 1j * smooth_spectrum(raw_H.imag, args.smooth_bins)
+        )
+        H_complex = np.nan_to_num(H_complex, nan=1.0, posinf=1.0, neginf=1.0)
+        # DC must stay real: an imaginary DC component is unphysical for a
+        # real time-domain correction.
+        H_complex[0] = H_complex[0].real
+        H_mag = np.abs(H_complex)
+        group_delay_bins = np.zeros_like(H_mag)
+        with np.errstate(invalid="ignore"):
+            dphi = np.gradient(np.unwrap(np.angle(H_complex)), common_freqs)
+            group_delay_bins = -dphi / (2.0 * np.pi)
+        print(f"\nactive pixels pooled: {n_pix}")
+        print(f"|H| range: [{H_mag.min():.3f}, {H_mag.max():.3f}]  "
+              f"coherence range: [{coherence.min():.3f}, {coherence.max():.3f}]")
+        print(f"phase range: [{np.angle(H_complex).min():.3f}, "
+              f"{np.angle(H_complex).max():.3f}] rad; "
+              f"group delay at low f: {group_delay_bins[1]:.3f} bins")
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            out_path, freqs_cycles_per_sample=common_freqs, H_mag=H_mag,
+            H_complex=H_complex, raw_H=raw_H, coherence=coherence,
+            P_truth=P_truth, P_deconv=P_dec, C_cross=C_cross, n_pixels=n_pix,
+            mode="truth-complex", smooth_bins=args.smooth_bins, reg=args.reg,
+            active_threshold=args.active_threshold,
+            paths_v3burst=str(paths_v3burst),
+        )
+        print(f"Saved filter to: {out_path}")
+
+        fig, axes = plt.subplots(3, 1, figsize=(10, 11), sharex=True)
+        axes[0].plot(common_freqs, P_truth, color="tab:red", linewidth=1.3,
+                     label=f"P_smeared_truth ({n_pix} pixels)")
+        axes[0].plot(common_freqs, P_dec, color="tab:green", linewidth=1.3,
+                     label="P_deconv_q")
+        axes[0].set_ylabel("mean power"); axes[0].set_yscale("log")
+        axes[0].set_title("Muon temporal power: smeared truth vs deconv_q")
+        axes[0].legend(fontsize=9); axes[0].grid(True, which="both", alpha=0.3)
+        axes[1].plot(common_freqs, np.abs(raw_H), color="grey", linewidth=0.8,
+                     alpha=0.6, label="|raw H| (coherence-weighted H1)")
+        axes[1].plot(common_freqs, H_mag, color="tab:red", linewidth=1.6,
+                     label=f"|H(f)| smoothed ({args.smooth_bins} bins)")
+        axes[1].plot(common_freqs, coherence, color="tab:blue", linewidth=1.0,
+                     label="coherence gamma^2")
+        axes[1].axhline(1.0, color="grey", linestyle="--", linewidth=0.7)
+        axes[1].set_ylabel("|H(f)| / gamma^2")
+        axes[1].legend(fontsize=9); axes[1].grid(True, which="both", alpha=0.3)
+        axes[2].plot(common_freqs, np.angle(H_complex), color="tab:purple",
+                     linewidth=1.4, label="arg H(f)")
+        axes[2].axhline(0.0, color="grey", linestyle="--", linewidth=0.7)
+        axes[2].set_ylabel("phase [rad]")
+        axes[2].set_xlabel("frequency [cycles / ADC-sample]")
+        axes[2].set_title("phase of H — encodes systematic timing bias")
+        axes[2].legend(fontsize=9); axes[2].grid(True, which="both", alpha=0.3)
+        fig.tight_layout()
+        png_path = out_path.with_suffix(".png")
+        fig.savefig(png_path, dpi=140, bbox_inches="tight")
+        print(f"Saved diagnostic plot to: {png_path}")
+        plt.close(fig)
+        return
+
     if args.mode == "truth":
         # |H(f)| = sqrt(P_smeared_truth / P_deconv_q), measured on the muon.
         # Naturally attenuates (|H|<1) where deconv_q over-shoots the (smoothed)
@@ -331,7 +435,7 @@ def main() -> None:
         # self-limiting because P_truth -> 0 in the smoothed high-freq tail.
         print("Mode: truth  (|H| = sqrt(P_truth / P_deconv_q))")
         print(f"muon v3_burst files: {len(paths_v3burst)}")
-        common_freqs, P_truth, P_dec, n_pix = _pool_truth_deconv(paths_v3burst, args.active_threshold)
+        common_freqs, P_truth, P_dec, _, n_pix = _pool_truth_deconv(paths_v3burst, args.active_threshold)
         raw_H = np.sqrt((P_truth + eps) / (P_dec + eps))
         H_mag = smooth_spectrum(raw_H, args.smooth_bins)
         H_mag = np.nan_to_num(H_mag, nan=1.0, posinf=1.0, neginf=1.0)
