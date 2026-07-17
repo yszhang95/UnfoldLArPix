@@ -526,6 +526,25 @@ def main() -> None:
         # -B declaration leaves a systematic -0.55 bin reco-early offset;
         # +B//2 removes it (r 0.944->0.980, ghost 10.4->5.4%).
         solver_tshift = -B + B // 2
+
+        # Structured per-charge output, anchored to the GLOBAL tick axis
+        # (grid-independent: downstream analysis can rebin to any width or
+        # phase).  Physical bin-center of bin k on the declared grid is
+        # boffset_raw[2] + k*B (fine ticks).  Columns:
+        # [pixel_x, pixel_y, t_center_tick, charge_ke, on_skeleton]
+        raw_off = np.asarray(result.hwf_block_offset, dtype=float)
+        ci, cj, ck = np.where(q_hat > 0.01)
+        seedcut = args.seed_cut if args.seed_cut is not None else 0.5
+        charges_list = np.stack(
+            [
+                raw_off[0] + ci,
+                raw_off[1] + cj,
+                raw_off[2] + ck * float(B),
+                q_hat[ci, cj, ck],
+                (q_hat[ci, cj, ck] > seedcut).astype(float),
+            ],
+            axis=1,
+        )
         if args.lean_output:
             boffset = np.array(result.hwf_block_offset, copy=True)
             boffset[-1] += solver_tshift
@@ -555,6 +574,11 @@ def main() -> None:
         payload["solver_warm_sigma"] = warm_sigma
         payload["solver_lam_tv"] = args.lam_tv
         payload["solver_lam_l2"] = args.lam_l2
+        payload["charges"] = charges_list
+        payload["charges_columns"] = (
+            "pixel_x pixel_y t_center_tick charge_ke on_skeleton"
+        )
+        payload["boffset_raw"] = raw_off
 
         suffix = args.output_suffix or (
             f"a{args.alpha:g}_b{args.beta_quiet:g}".replace(".", "p")
