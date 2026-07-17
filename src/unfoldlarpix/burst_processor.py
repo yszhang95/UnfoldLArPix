@@ -738,27 +738,55 @@ class BurstSequenceProcessor:
         return merged_sequences
 
 
+DEPOSIT_MODES = {"floor", "linear"}
+
+
 def merged_sequences_to_block(
     merged_seqs: Dict[tuple[int, int], MergedSequence],
     bin_size: int,
-    npadbin: int = 5
+    npadbin: int = 5,
+    deposit_mode: str = "floor",
+    deposit_phase: float = 0.0,
+    pad_pixels: int = 0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Convert a MergedSequence to block format with specified bin size.
 
     Args:
         merged_seqs: MergedSequence to convert
         bin_size: Number of time points to group into each block
-        shift_to_center: Whether to shift time points to the center of the block
+        deposit_mode: "floor" reproduces the historical behaviour — each
+            charge is dropped entirely into the bin containing its latch
+            time, discarding the sub-bin phase (up to one full bin of
+            per-pixel timing jitter).  "linear" splits each charge between
+            the two adjacent bins according to its fractional bin position,
+            which removes the per-sequence sampling-phase jitter while
+            conserving charge exactly.
+        deposit_phase: Constant offset (in bins) added to the fractional
+            position before the linear split.  Only used by
+            ``deposit_mode="linear"``; use it to match the phase convention
+            of the deconvolution kernel (0.0 keeps the floor-mode convention
+            as the zero-fraction limit).
+        pad_pixels: Zero-padding added on every side of the SPATIAL extent
+            (the hit bounding box).  The field response couples up to half
+            the kernel width in pixels, so true charge just outside the
+            box contributes to edge-pixel measurements; without padding a
+            fit can only park that charge on the boundary rows.
 
     Returns:
         Tuple of (block_times, block_charges) where:
             block_times: Array of time points for each block
             block_charges: 2D array of charges for each block (shape [n_blocks, block_size])
     """
+    if deposit_mode not in DEPOSIT_MODES:
+        raise ValueError(
+            f"Unsupported deposit_mode: {deposit_mode}. Must be one of {DEPOSIT_MODES}."
+        )
     pad_length = npadbin * bin_size
     # calculate pixel reaches
     pixel_keys = list(merged_seqs.keys())
     pmin, pmax = np.min(pixel_keys, axis=0), np.max(pixel_keys, axis=0)
+    pmin = np.asarray(pmin, dtype=int) - int(pad_pixels)
+    pmax = np.asarray(pmax, dtype=int) + int(pad_pixels)
     shape = np.zeros((3,), dtype=int)
     shape[:2] = pmax - pmin + 1
     tmin, tmax = [np.min(merged_seqs[pixel_key].times) for pixel_key in pixel_keys], [np.max(merged_seqs[pixel_key].times) for pixel_key in pixel_keys]
@@ -772,12 +800,25 @@ def merged_sequences_to_block(
     for pixel_key, merged_seq in merged_seqs.items():
         times = merged_seq.times
         charges = merged_seq.charges
-        tinds = (times - offset[2]) // bin_size
-        if len(np.unique(tinds)) != len(tinds):
-            raise ValueError(f"Duplicate time indices found for pixel {pixel_key} after binning, cannot convert to blocks."
-                             f"times: {times}, tinds: {tinds}, offset: {offset[2]}, bin_size: {bin_size}")
         pix_inds = np.asarray(pixel_key, dtype=int) - spatial_offset
-        block_charges[pix_inds[0], pix_inds[1], tinds.astype(int)] = charges
+        if deposit_mode == "linear":
+            fpos = (times - offset[2]) / bin_size + deposit_phase
+            i0 = np.floor(fpos).astype(int)
+            frac = fpos - i0
+            if np.any(i0 < 0) or np.any(i0 + 1 >= shape[2]):
+                raise ValueError(
+                    f"Linear deposit out of block range for pixel {pixel_key}: "
+                    f"indices [{i0.min()}, {i0.max() + 1}] vs nt={shape[2]}."
+                )
+            trace = block_charges[pix_inds[0], pix_inds[1]]
+            np.add.at(trace, i0, charges * (1.0 - frac))
+            np.add.at(trace, i0 + 1, charges * frac)
+        else:
+            tinds = (times - offset[2]) // bin_size
+            if len(np.unique(tinds)) != len(tinds):
+                raise ValueError(f"Duplicate time indices found for pixel {pixel_key} after binning, cannot convert to blocks."
+                                 f"times: {times}, tinds: {tinds}, offset: {offset[2]}, bin_size: {bin_size}")
+            block_charges[pix_inds[0], pix_inds[1], tinds.astype(int)] = charges
 
         # Deposit leak-mode smoothing overflow into bins preceding the gap.
         for start_time, overflow in getattr(merged_seq, "template_overflow", []) or []:
