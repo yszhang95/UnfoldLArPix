@@ -12,6 +12,7 @@ from .burst_processor import (
     TemplateCompensationAnchor,
     merged_sequences_to_block,
 )
+from .iterative_recomp import iterative_recompensation, measured_bin_mask
 from .burst_processor_v2 import BurstSequenceProcessorV2
 from .burst_processor_v3 import BurstSequenceProcessorV3
 from .data_containers import EventData, Geometry, Hits, ReadoutConfig
@@ -72,6 +73,8 @@ class EventDeconvolutionResult:
     wiener_omega_c: float | None = None
     wiener_b: float | None = None
     roi_threshold_sigma: float | None = None
+    iter_recomp: int = 0
+    hwf_block_refined: np.ndarray | None = None
 
 
 BurstProcessorClass = (
@@ -235,6 +238,9 @@ def hits_to_merged_block(
     template_smooth_sigma_bins: float | None = None,
     template_smooth_edge_mode: str = "renormalize",
     template_smooth_n_sigma: float = 4.0,
+    deposit_mode: str = "floor",
+    deposit_phase: float = 0.0,
+    pad_pixels: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, float, tuple[TemplateCompensationAnchor, ...]]:
     """Convert hit bursts into a dense 3D block for deconvolution."""
     burst_processor = create_burst_processor(
@@ -256,6 +262,9 @@ def hits_to_merged_block(
         merged_sequences,
         readout_config.adc_hold_delay,
         npadbin=npadbin,
+        deposit_mode=deposit_mode,
+        deposit_phase=deposit_phase,
+        pad_pixels=pad_pixels,
     )
     return (
         block_offset,
@@ -410,19 +419,23 @@ def apply_time_filter(
     Args:
         gaussian_kernel: 3-D filter array of shape ``(nx, ny, n_fft_t)``
             as returned by ``build_gaussian_deconv_kernel``.
-        h_mag: 1-D non-negative magnitude correction array (≥ 0).
+        h_mag: 1-D correction array.  Real (magnitude-only) or complex —
+            a complex filter additionally corrects the systematic timing
+            (phase) bias of the reconstruction.
         h_freqs: Corresponding frequency values in cycles/ADC-sample,
             monotonically increasing, same length as ``h_mag``.
 
     Returns:
         New array of the same shape as ``gaussian_kernel`` with the time
-        filter multiplied in along the last axis.
+        filter multiplied in along the last axis (complex when ``h_mag``
+        is complex).
     """
     n_fft_t = gaussian_kernel.shape[-1]
     # rfft produces n_fft_t = n_t // 2 + 1 from n_t real samples.
     n_t = (n_fft_t - 1) * 2
     target_freqs = np.fft.rfftfreq(n_t, d=1)  # cycles/ADC-sample, in [0, 0.5]
     # Interpolate; 1.0 outside the measured frequency range = no correction.
+    # np.interp interpolates complex arrays component-wise.
     h_interp = np.interp(target_freqs, h_freqs, h_mag, left=1.0, right=1.0)
     return gaussian_kernel * h_interp[np.newaxis, np.newaxis, :]
 
@@ -466,6 +479,10 @@ def process_event_deconvolution(
     template_smooth_edge_mode: str = "renormalize",
     template_smooth_n_sigma: float = 4.0,
     time_filter: tuple[np.ndarray, np.ndarray] | None = None,
+    deposit_mode: str = "floor",
+    deposit_phase: float = 0.0,
+    iter_recomp: int = 0,
+    pad_pixels: int = 0,
 ) -> EventDeconvolutionResult:
     """Run the common hit-block deconvolution workflow for one event.
 
@@ -496,6 +513,9 @@ def process_event_deconvolution(
         template_smooth_sigma_bins=template_smooth_sigma_bins,
         template_smooth_edge_mode=template_smooth_edge_mode,
         template_smooth_n_sigma=template_smooth_n_sigma,
+        deposit_mode=deposit_mode,
+        deposit_phase=deposit_phase,
+        pad_pixels=pad_pixels,
     )
     tau_value = readout_config.adc_hold_delay if tau is None else tau
     gaussian_kernel = build_gaussian_deconv_kernel(
@@ -508,11 +528,32 @@ def process_event_deconvolution(
     if time_filter is not None:
         h_mag, h_freqs = time_filter
         gaussian_kernel = apply_time_filter(gaussian_kernel, h_mag, h_freqs)
-    deconv_q, local_offset = deconv_fft(
-        block_data,
-        prepared_response.integrated_response,
-        gaussian_kernel,
-    )
+    hwf_block_refined: np.ndarray | None = None
+    if iter_recomp > 0:
+        nburst = event.hits.data.shape[1] - 3
+        mask = measured_bin_mask(
+            event.hits.location,
+            nburst,
+            readout_config.adc_hold_delay,
+            np.asarray(block_offset),
+            block_data.shape,
+            deposit_mode=deposit_mode,
+            deposit_phase=deposit_phase,
+        )
+        deconv_q, hwf_block_refined = iterative_recompensation(
+            block_data,
+            prepared_response.integrated_response,
+            gaussian_kernel,
+            mask,
+            n_iter=iter_recomp,
+        )
+        local_offset = (0, 0, 0)
+    else:
+        deconv_q, local_offset = deconv_fft(
+            block_data,
+            prepared_response.integrated_response,
+            gaussian_kernel,
+        )
     local_offset = tuple(int(offset) for offset in local_offset)
     if require_zero_local_offset and any(offset != 0 for offset in local_offset):
         raise ValueError(f"Expected zero local offset, got {local_offset}")
@@ -590,6 +631,8 @@ def process_event_deconvolution(
         wiener_omega_c=wiener_omega_c if enable_wiener_roi else None,
         wiener_b=wiener_b if enable_wiener_roi else None,
         roi_threshold_sigma=roi_threshold_sigma if enable_wiener_roi else None,
+        iter_recomp=iter_recomp,
+        hwf_block_refined=hwf_block_refined,
     )
 
 

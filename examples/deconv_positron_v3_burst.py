@@ -119,6 +119,31 @@ def parse_args() -> argparse.Namespace:
         help="Kernel half-width in sigma units (default: 4.0).",
     )
     parser.add_argument(
+        "--deposit-mode",
+        choices=("floor", "linear"),
+        default="floor",
+        help="How merged-sequence charges are placed into the dense block: "
+        "'floor' (historical, drops sub-bin phase) or 'linear' (splits each "
+        "charge between adjacent bins by its fractional position, removing "
+        "per-sequence sampling-phase jitter). Adds a '_lin<phase>' tag.",
+    )
+    parser.add_argument(
+        "--deposit-phase",
+        type=float,
+        default=0.0,
+        help="Constant bin-phase offset used by --deposit-mode linear "
+        "(default: 0.0).",
+    )
+    parser.add_argument(
+        "--iter-recomp",
+        type=int,
+        default=0,
+        help="Number of iterative self-consistent recompensation passes: "
+        "deconvolve, clip charge at zero, forward-model through the "
+        "response, replace template-injected segments with the prediction "
+        "(integral-preserving), re-deconvolve. Adds an '_iterN' tag.",
+    )
+    parser.add_argument(
         "--time-filter-npz",
         default=None,
         help="Path to NPZ produced by build_muon_filter.py.  When set, the "
@@ -147,21 +172,35 @@ def main() -> None:
             f"{fmt_sigma_pxl_detailed(args.sigma_pxl)}"
         )
 
+    if args.deposit_mode == "linear":
+        phase_tag = f"{args.deposit_phase:+.2f}".replace(".", "p")
+        args.output_suffix += f"_lin{phase_tag}"
+    if args.iter_recomp > 0:
+        args.output_suffix += f"_iter{args.iter_recomp}"
+
     # Load optional muon-derived time filter (produced by build_muon_filter.py).
     time_filter = None
     if args.time_filter_npz is not None:
         filt_data = np.load(args.time_filter_npz)
+        if "H_complex" in filt_data.files:
+            h_values = np.asarray(filt_data["H_complex"], dtype=np.complex128)
+            filt_kind = "complex"
+        else:
+            h_values = np.asarray(filt_data["H_mag"], dtype=np.float64)
+            filt_kind = "magnitude"
         time_filter = (
-            np.asarray(filt_data["H_mag"], dtype=np.float64),
+            h_values,
             np.asarray(filt_data["freqs_cycles_per_sample"], dtype=np.float64),
         )
         print(
-            f"Loaded muon time filter from {args.time_filter_npz}: "
+            f"Loaded muon time filter ({filt_kind}) from {args.time_filter_npz}: "
             f"{len(time_filter[0])} frequency bins, "
-            f"|H| range [{time_filter[0].min():.3f}, {time_filter[0].max():.3f}]"
+            f"|H| range [{np.abs(time_filter[0]).min():.3f}, "
+            f"{np.abs(time_filter[0]).max():.3f}]"
         )
-        if "_muonfilt" not in args.output_suffix:
-            args.output_suffix += "_muonfilt"
+        tag = "_muonfiltc" if filt_kind == "complex" else "_muonfilt"
+        if tag not in args.output_suffix:
+            args.output_suffix += tag
 
     loader = DataLoader(args.input_file)
     readout_config = loader.get_readout_config()
@@ -216,6 +255,9 @@ def main() -> None:
             template_smooth_edge_mode=args.template_smooth_edge,
             template_smooth_n_sigma=args.template_smooth_n_sigma,
             time_filter=time_filter,
+            deposit_mode=args.deposit_mode,
+            deposit_phase=args.deposit_phase,
+            iter_recomp=args.iter_recomp,
         )
         boffset = shift_time_offset(
             result.hwf_block_offset,
