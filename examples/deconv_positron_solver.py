@@ -49,6 +49,31 @@ def parse_args() -> argparse.Namespace:
                         "rectification bias.")
     p.add_argument("--beta-quiet", type=float, default=1.0,
                    help="Quiet-bin inequality penalty weight.")
+    p.add_argument("--beta-censor", type=float, default=0.0,
+                   help="Exact ZS censoring weight: penalize the running "
+                        "MAXIMUM of the restarted cumulative charge on "
+                        "each silent discriminator span above threshold "
+                        "(never-fired pixels from t=0; fired pixels after "
+                        "their last CSA restart).  Strictly closer to the "
+                        "real trigger logic than the per-bin quiet "
+                        "penalty; typically used with --beta-quiet 0.")
+    p.add_argument("--censor-margin", type=float, default=0.0,
+                   help="Noise margin [ke-] added to the censor threshold: "
+                        "the discriminator saw signal+noise, so silence "
+                        "only excludes signal peaks above thr + k*sigma "
+                        "(censored-Gaussian hinge).  ~2 ke- = 2 sigma.")
+    p.add_argument("--irl1-passes", type=int, default=0,
+                   help="Reweighted-L1 passes after the ladder: "
+                        "alpha_i = a * s / (q_i + s) — bright charges are "
+                        "penalized ~0 (near-unbiased selection), faint "
+                        "ones keep full selection pressure.")
+    p.add_argument("--irl1-scale", type=float, default=0.5,
+                   help="Reweighting scale s [ke-].")
+    p.add_argument("--irl1-alpha", type=float, default=None,
+                   help="Base alpha for the reweighting (default: last "
+                        "ladder alpha).")
+    p.add_argument("--irl1-iters", type=int, default=100,
+                   help="FISTA iterations per reweighted-L1 pass.")
     p.add_argument("--n-iter", type=int, default=300)
     p.add_argument("--support-eps", type=float, default=None,
                    help="When set, restrict the solution to voxels where "
@@ -349,6 +374,41 @@ def main() -> None:
                 quiet_mask[px, py, :] = False
         thr = float(readout_config.threshold)
 
+        # Exact ZS censoring: per pixel, the block bin where its silent
+        # span starts — 0 for never-fired pixels (the discriminator was
+        # armed the whole time), the post-last-sequence CSA restart bin
+        # for fired ones.  The censored statistic is the running MAX of
+        # the restarted cumulative (the response is bipolar, so the
+        # total does not bound the peak).
+        censor_kwargs = {}
+        if args.beta_censor > 0:
+            nt_b = block_shape[2]
+            censor_start = np.zeros(block_shape[:2], dtype=np.int64)
+            last_latch: dict[tuple[int, int], float] = {}
+            for row in event.hits.location:
+                px = int(row[0] - block_offset[0])
+                py = int(row[1] - block_offset[1])
+                if not (0 <= px < block_shape[0]
+                        and 0 <= py < block_shape[1]):
+                    continue
+                t_loc = float(row[3]) - float(block_offset[2])
+                key = (px, py)
+                last_latch[key] = max(last_latch.get(key, -np.inf), t_loc)
+            reset = float(readout_config.csa_reset_time or 0)
+            for (px, py), t_loc in last_latch.items():
+                s = int(np.ceil((t_loc + reset) / B))
+                censor_start[px, py] = min(max(s, 0), nt_b)
+            n_tail = sum(1 for v in censor_start[~quiet_mask[:, :, 0]]
+                         if v < nt_b)
+            print(f"  censoring: {int(quiet_mask[:, :, 0].sum())} silent "
+                  f"pixels (full span) + {n_tail} fired-pixel tails, "
+                  f"beta {args.beta_censor}")
+            censor_kwargs = {
+                "beta_censor": args.beta_censor,
+                "censor_start": censor_start,
+                "censor_threshold": thr + args.censor_margin,
+            }
+
         def to_fit_grid(arr: np.ndarray) -> np.ndarray:
             """Map a physical-grid array onto the (shifted, shorter) fit grid."""
             if time_shift:
@@ -447,6 +507,7 @@ def main() -> None:
                 lam_l2=args.lam_l2,
                 lam_tv=args.lam_tv,
                 verbose=True,
+                **censor_kwargs,
                 **ladder_spectral,
             )
         elif args.alpha_ladder:
@@ -466,6 +527,7 @@ def main() -> None:
                 lam_l2=args.lam_l2,
                 lam_tv=args.lam_tv,
                 verbose=True,
+                **censor_kwargs,
                 **ladder_spectral,
             )
         else:
@@ -481,7 +543,31 @@ def main() -> None:
                 lam_l2=args.lam_l2,
                 lam_tv=args.lam_tv,
                 verbose=True,
+                **censor_kwargs,
             )
+        if args.irl1_passes > 0:
+            a0 = (args.irl1_alpha if args.irl1_alpha is not None
+                  else (args.alpha_ladder[-1] if args.alpha_ladder
+                        else args.alpha))
+            s_ke = float(args.irl1_scale)
+            for i in range(args.irl1_passes):
+                alpha_arr = a0 * s_ke / (q_hat + s_ke)
+                q_hat = solver_mod.solve_fista(
+                    op,
+                    alpha=alpha_arr,
+                    beta_quiet=args.beta_quiet,
+                    quiet_mask=quiet_mask,
+                    quiet_threshold=thr,
+                    n_iter=args.irl1_iters,
+                    q0=q_hat,
+                    support_mask=support,
+                    lam_l2=args.lam_l2,
+                    lam_tv=args.lam_tv,
+                    **censor_kwargs,
+                )
+                print(f"  IRL1 pass {i}: total q {q_hat.sum():.1f} ke-, "
+                      f"nnz {(q_hat > 0.01).sum()}")
+
         if args.probe_conditioning:
             from unfoldlarpix.constrained_solver import (
                 probe_support_conditioning,
@@ -523,6 +609,7 @@ def main() -> None:
                     lam_l2=args.lam_l2,
                     lam_tv=args.lam_tv,
                     verbose=True,
+                    **censor_kwargs,
                     **refit_spectral,
                 )
             finally:

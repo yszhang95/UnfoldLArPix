@@ -533,3 +533,38 @@ class TestSubbinPositions:
         q2[0, 0, 3] = 4.0
         u2 = centroid_bin_offsets(q2, window_bins=2)
         assert u2[0, 0, 3] == 0.0
+
+
+class TestCensorRunningMax:
+    def test_censor_suppresses_running_max(self):
+        """The censored running-max penalty pulls the restarted cumulative
+        peak on silent pixels below threshold — including charge spread
+        thinly across bins that the per-bin quiet penalty cannot see."""
+        kernel = _make_kernel(seed=9)
+        B = 30
+        nx, ny, nt = 3, 3, 20
+        windows = [LatchWindow(1, 1, 300.0, 330.0, 5.0)]
+        op = ZSOperator(kernel, (nx, ny, nt), windows, adc_hold_delay=B)
+        censor_start = np.zeros((nx, ny), dtype=np.int64)
+        censor_start[1, 1] = nt          # the fired pixel is not censored
+
+        def silent_peak(q):
+            block = op.conv(q)
+            C = np.cumsum(block, axis=2)
+            m = C.max(axis=2)
+            m[1, 1] = -np.inf
+            return float(m.max())
+
+        # NOTE: this toy kernel couples strongly to neighbours, so the
+        # recorded window and the censoring genuinely conflict (unlike
+        # the real center-dominated response, where the truth satisfies
+        # the censoring by construction).  The test checks the penalty
+        # semantics: the silent running max is pulled to the threshold
+        # while some data fit is retained.
+        q_free = solve_fista(op, alpha=0.0, n_iter=200)
+        q_cen = solve_fista(op, alpha=0.0, n_iter=300,
+                            beta_censor=10.0, censor_start=censor_start,
+                            censor_threshold=2.0)
+        assert silent_peak(q_free) > 4.0          # censoring is binding
+        assert silent_peak(q_cen) <= 2.3          # soft penalty ~ thr
+        assert op.forward(q_cen)[0] > 1.0         # data not abandoned

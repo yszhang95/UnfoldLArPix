@@ -340,6 +340,9 @@ def solve_fista(
     beta_quiet: float = 0.0,
     quiet_mask: np.ndarray | None = None,
     quiet_threshold: float = np.inf,
+    beta_censor: float = 0.0,
+    censor_start: np.ndarray | None = None,
+    censor_threshold: float = np.inf,
     n_iter: int = 200,
     q0: np.ndarray | None = None,
     L: float | None = None,
@@ -361,6 +364,20 @@ def solve_fista(
             threshold is what removes that bias.
         beta_quiet: Weight of the quiet-bin inequality penalty
             ``beta * relu(conv(q)[quiet] - thr)^2``.
+        beta_censor / censor_start / censor_threshold: EXACT ZS
+            censoring of silent discriminators.  The discriminator
+            statistic is the RUNNING CUMULATIVE of the collected charge
+            since the last CSA restart — and because the field response
+            has negative lobes (charge is positive, the response is
+            not), the cumulative is NOT monotone and the censored
+            statistic is its running MAXIMUM, not its total.  For each
+            pixel, ``censor_start[px, py]`` gives the block time bin
+            where its silent span begins (0 for never-fired pixels,
+            the post-last-sequence CSA restart bin for fired ones,
+            ``nt`` to disable); the penalty is
+            ``beta/2 * relu(max_t cumsum(conv(q))[t] - base - thr)^2``
+            per pixel — one scalar censored observation per silent
+            discriminator, convex, with a subgradient at the argmax.
         quiet_mask: Bool block-shape mask of bins whose window integral
             must stay below ``quiet_threshold`` (unfired discriminators).
         n_iter: FISTA iterations.
@@ -382,6 +399,29 @@ def solve_fista(
         L_total = L + 2.0 * beta_quiet
     else:
         L_total = L
+    if beta_censor > 0 and censor_start is not None:
+        nt_b = op.block_shape[2]
+        s_idx = np.asarray(censor_start, dtype=np.int64)
+        t_axis = np.arange(nt_b)[None, None, :]
+        censor_active = t_axis >= s_idx[:, :, None]
+        # power-iterate the worst-case linearization (full-span
+        # cumulative row per pixel) for a sound step size
+        rng_c = np.random.default_rng(1)
+        xc = rng_c.standard_normal(op.q_shape)
+        xc /= np.linalg.norm(xc)
+        lam_c = 0.0
+        for _ in range(6):
+            b = np.where(censor_active, op.conv(xc), 0.0)
+            row = b.sum(axis=2)
+            yc = op.conv_adjoint(
+                np.where(censor_active, row[:, :, None], 0.0))
+            lam_c = float(np.linalg.norm(yc))
+            if lam_c <= 0:
+                break
+            xc = yc / lam_c
+        # extra 2x margin: the argmax row of a shorter span can couple
+        # more coherently to the (bipolar) kernel than the full span
+        L_total = L_total + 2.0 * beta_censor * max(lam_c, 1.0)
     if lam_spectral > 0 and spectral_weight is not None:
         L_total = L_total + 2.0 * lam_spectral * float(np.max(spectral_weight))
     step = 1.0 / (L_total * 1.05)
@@ -403,6 +443,20 @@ def solve_fista(
             # inequality constraints are satisfied
             if viol.any():
                 grad += beta_quiet * op.conv_adjoint(viol)
+        if beta_censor > 0 and censor_start is not None:
+            # running-max censoring: for each silent span, penalize the
+            # peak of the restarted cumulative above threshold.
+            C = np.cumsum(
+                np.where(censor_active, block_pred, 0.0), axis=2)
+            peak = C.max(axis=2)
+            arg = C.argmax(axis=2)
+            cviol = np.clip(peak - censor_threshold, 0.0, None)
+            if cviol.any():
+                # d(peak)/d(block[t]) = 1 for t in [span start, argmax]
+                upto = t_axis <= arg[:, :, None]
+                g_c = np.where(censor_active & upto,
+                               cviol[:, :, None], 0.0)
+                grad += beta_censor * op.conv_adjoint(g_c)
         if lam_l2 > 0:
             grad += 2.0 * lam_l2 * y
         if lam_tv > 0:
