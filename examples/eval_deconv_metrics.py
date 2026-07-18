@@ -51,7 +51,8 @@ def universal_rebin(npz_path: Path, truth_npz: Path | None = None,
                     content_offset_ticks: float = 0.0,
                     deposit_shape: str = "linear",
                     sigma_time: float = 0.005,
-                    sigma_pxl: float = 0.2):
+                    sigma_pxl: float = 0.2,
+                    time_offsets: np.ndarray | None = None):
     """Rebin truth and reco INDEPENDENTLY onto the universal grid.
 
     Universal time bins have edges at global multiples of adc_hold_delay
@@ -75,6 +76,10 @@ def universal_rebin(npz_path: Path, truth_npz: Path | None = None,
       universal grid at fine-tick precision.  This removes the rebinning
       artifact entirely; the shape width is hypothetical (filter- or
       diffusion-motivated), matching the smeared-truth convention.
+
+    ``time_offsets`` (gaussian mode only): optional array shaped like
+    ``deconv_q_sharp`` with a per-voxel shift [fine ticks] added to that
+    charge's deposit center — the hook for sub-bin regressed positions.
     """
     f = np.load(npz_path, allow_pickle=True)
     t = np.load(truth_npz, allow_pickle=True) if truth_npz is not None else f
@@ -117,11 +122,31 @@ def universal_rebin(npz_path: Path, truth_npz: Path | None = None,
         sig_ticks = 1.0 / (2.0 * np.pi * float(sigma_time))
         edges = (np.arange(u_min, u_max + 2) * B).astype(np.float64)
         erf = np.vectorize(math.erf)
-        # weight of fit-bin k in universal bin m: Gaussian mass between edges
-        z = (edges[None, :] - centers[:, None]) / (np.sqrt(2.0) * sig_ticks)
-        cdf = 0.5 * (1.0 + erf(z))
-        W = cdf[:, 1:] - cdf[:, :-1]              # (ntq, ntu)
-        reco[ox:ox + nx, oy:oy + ny, :] = np.einsum("xyk,km->xym", q_sharp, W)
+        if time_offsets is None:
+            # weight of fit-bin k in universal bin m: Gaussian mass
+            # between edges
+            z = (edges[None, :] - centers[:, None]) / (np.sqrt(2.0) * sig_ticks)
+            cdf = 0.5 * (1.0 + erf(z))
+            W = cdf[:, 1:] - cdf[:, :-1]              # (ntq, ntu)
+            reco[ox:ox + nx, oy:oy + ny, :] = np.einsum(
+                "xyk,km->xym", q_sharp, W)
+        else:
+            off = np.asarray(time_offsets, dtype=np.float64)
+            if off.shape != q_sharp.shape:
+                raise ValueError("time_offsets must match deconv_q_sharp")
+            xs, ys, ks = np.nonzero(q_sharp > 1e-6)
+            reach = int(np.ceil(6.0 * sig_ticks / B)) + 1
+            for x, y, k in zip(xs, ys, ks):
+                c = centers[k] + off[x, y, k]
+                m_c = int(np.floor(c / B)) - u_min
+                m0 = max(m_c - reach, 0)
+                m1 = min(m_c + reach + 1, ntu)
+                if m1 <= m0:
+                    continue
+                z = (edges[m0:m1 + 1] - c) / (np.sqrt(2.0) * sig_ticks)
+                cdf = 0.5 * (1.0 + erf(z))
+                reco[ox + x, oy + y, m0:m1] += (
+                    q_sharp[x, y, k] * (cdf[1:] - cdf[:-1]))
         # spatial analysis Gaussian on the pixel axes (same convention as
         # gaussian_filter_3d): full-array FFT so truth-side pixels align
         fx = np.fft.fftfreq(out_shape[0])
@@ -177,6 +202,17 @@ def evaluate(npz_path: Path, corr_threshold: float = 0.5,
     aligned_dq = pool_block(aligned_dq, group_pixels, group_time)
     smear_summed = pool_block(smear_summed, group_pixels, group_time)
 
+    out = metrics_from_blocks(smear_summed, aligned_dq,
+                              corr_threshold=corr_threshold,
+                              active_threshold_frac=active_threshold_frac)
+    out["file"] = str(npz_path)
+    return out
+
+
+def metrics_from_blocks(smear_summed: np.ndarray, aligned_dq: np.ndarray,
+                        corr_threshold: float = 0.5,
+                        active_threshold_frac: float = 0.10) -> dict:
+    """All scalar metrics from an aligned (truth, reco) block pair."""
     sum_dq = float(aligned_dq.sum())
     sum_truth = float(smear_summed.sum())
 
@@ -221,7 +257,6 @@ def evaluate(npz_path: Path, corr_threshold: float = 0.5,
     spec_dev = float(np.mean(np.abs(ratio - 1.0)))
 
     return {
-        "file": str(npz_path),
         "sum_deconv_q": round(sum_dq, 2),
         "sum_truth": round(sum_truth, 2),
         "integral_pct": round(100.0 * (sum_dq / sum_truth - 1.0), 3),
