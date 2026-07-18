@@ -56,6 +56,21 @@ def parse_args() -> argparse.Namespace:
                         "(dilated ROI-style support projection).")
     p.add_argument("--support-dilate", type=int, default=2,
                    help="Dilation radius (voxels) of the support mask.")
+    p.add_argument("--support-source", choices=["deconv", "hits"],
+                   default="deconv",
+                   help="Where the base support comes from: 'deconv' = "
+                        "smoothed FFT-deconv warm start > --support-eps; "
+                        "'hits' = union of the recorded latch windows "
+                        "(fired pixel, window time bins), extended by "
+                        "--hits-pre-bins/--hits-post-bins and then dilated "
+                        "by --support-dilate like the deconv support.")
+    p.add_argument("--hits-pre-bins", type=int, default=2,
+                   help="Extra bins BEFORE each latch window included in "
+                        "the hits support (charge can accumulate below "
+                        "threshold for several bins before latching).")
+    p.add_argument("--hits-post-bins", type=int, default=1,
+                   help="Extra bins AFTER each latch window included in "
+                        "the hits support.")
     p.add_argument("--debias-iter", type=int, default=0,
                    help="When > 0, refit with alpha=0 on the L1 active set "
                         "for this many iterations (two-stage debias).")
@@ -313,12 +328,25 @@ def main() -> None:
             return arr[:, :, : op.q_shape[2]]
 
         support = None
-        if args.support_eps is not None:
+        if args.support_source == "hits":
+            nx, ny, nt = block_shape
+            support = np.zeros(block_shape, dtype=bool)
+            for w in windows:
+                if not (0 <= w.px < nx and 0 <= w.py < ny):
+                    continue
+                b0 = int(np.floor(max(w.t_lo, 0.0) / B)) - args.hits_pre_bins
+                b1 = int(np.ceil(w.t_hi / B)) + args.hits_post_bins
+                b0 = max(b0, 0)
+                b1 = min(b1, nt)
+                if b1 > b0:
+                    support[w.px, w.py, b0:b1] = True
+        elif args.support_eps is not None:
             warm_smooth = gaussian_post_smooth(
                 np.clip(result.deconv_q, 0.0, None), B,
                 warm_sigma, args.sigma_pxl,
             )
             support = warm_smooth > args.support_eps
+        if support is not None:
             for _ in range(args.support_dilate):
                 grown = support.copy()
                 for ax in range(3):
