@@ -39,6 +39,27 @@ from eval_deconv_metrics import (  # noqa: E402
 )
 
 
+def reco_centroid_offsets(npz_path: Path, window_bins: int = 2,
+                          min_charge: float = 0.05):
+    """TRUTH-FREE per-voxel offsets: local centroid of the fitted field.
+
+    The window likelihood constrains the deposit FIELD, not point
+    positions — a charge between bins is fitted as an amplitude split
+    across the two bins (sub-bin offsets are unidentifiable re-
+    parameterizations of that split).  The honest position estimator is
+    therefore the charge-weighted centroid of the fitted sharp field
+    itself, on the same pixel within +-window_bins, clipped to +-B/2.
+    """
+    from unfoldlarpix.constrained_solver import centroid_bin_offsets
+
+    f = np.load(npz_path, allow_pickle=True)
+    B = int(f["adc_hold_delay"])
+    q_sharp = np.asarray(f["deconv_q_sharp"], dtype=np.float64)
+    u = centroid_bin_offsets(q_sharp, window_bins=int(window_bins),
+                             min_charge=min_charge)
+    return u * float(B), q_sharp, B, int((q_sharp > 1e-6).sum())
+
+
 def truth_optimal_offsets(npz_path: Path, truth_npz: Path,
                           window_bins: float = 2.0,
                           min_truth: float = 0.05):
@@ -89,6 +110,10 @@ def main() -> None:
     p.add_argument("--truth-npz", required=True)
     p.add_argument("--window-bins", type=float, default=2.0,
                    help="Half-width [bins] of the truth-centroid window.")
+    p.add_argument("--source", choices=("truth", "reco"), default="truth",
+                   help="Centroid source: 'truth' = ceiling (cheating "
+                        "reference); 'reco' = truth-free estimator (local "
+                        "centroid of the fitted sharp field).")
     p.add_argument("--corr-threshold", type=float, default=0.5)
     p.add_argument("--label", default=None)
     p.add_argument("--json", default=None)
@@ -99,18 +124,24 @@ def main() -> None:
     npz, ref = Path(args.solver_npz), Path(args.truth_npz)
     label = args.label or npz.stem
 
-    offsets, q_sharp, B, n_moved = truth_optimal_offsets(
-        npz, ref, window_bins=args.window_bins)
+    if args.source == "reco":
+        offsets, q_sharp, B, n_moved = reco_centroid_offsets(
+            npz, window_bins=int(args.window_bins))
+    else:
+        offsets, q_sharp, B, n_moved = truth_optimal_offsets(
+            npz, ref, window_bins=args.window_bins)
     active = q_sharp > 1e-6
     off_act = offsets[active]
     print(f"{label}: {int(active.sum())} active charges, "
-          f"{n_moved} with truth in window; "
+          f"{n_moved} with centroid source in window; "
           f"|offset| mean {np.abs(off_act).mean():.2f} ticks, "
           f"at bound (+-{B // 2}) {(np.abs(off_act) >= B / 2 - 1e-9).mean() * 100:.1f}%")
 
+    variant = ("reco-centroid" if args.source == "reco"
+               else "truth-optimal")
     results = {}
     blocks = {}
-    for tag, off in (("declared", None), ("truth-optimal", offsets)):
+    for tag, off in (("declared", None), (variant, offsets)):
         truth, reco = universal_rebin(
             npz, truth_npz=ref, deposit_shape="gaussian", time_offsets=off)
         m = metrics_from_blocks(truth, reco,
@@ -147,7 +178,7 @@ def main() -> None:
         fig, axes = plt.subplots(1, 3, figsize=(16.5, 5.2))
         vmax = args.hist_max
         bins = np.linspace(0, vmax, 46)
-        for ax, tag in zip(axes[:2], ("declared", "truth-optimal")):
+        for ax, tag in zip(axes[:2], ("declared", variant)):
             truth, reco = blocks[tag]
             mask = reco > args.corr_threshold
             h = ax.hist2d(truth[mask], reco[mask], bins=(bins, bins),
@@ -166,14 +197,16 @@ def main() -> None:
 
         ax = axes[2]
         ax.hist(off_act, bins=61, range=(-B / 2, B / 2), color="tab:blue")
-        ax.set_xlabel("truth-optimal offset [ticks]")
+        ax.set_xlabel(f"{variant} offset [ticks]")
         ax.set_ylabel("charges")
         ax.set_title(f"per-charge offsets (bound $\\pm${B // 2} ticks = "
                      f"$\\pm$0.5 bin)")
         ax.axvline(0, color="k", lw=0.8)
 
-        fig.suptitle(f"sub-bin position ceiling (truth-informed) — {label}\n"
-                     + note, fontsize=11)
+        head = ("sub-bin positions: truth-free reco-centroid estimator"
+                if args.source == "reco"
+                else "sub-bin position ceiling (truth-informed)")
+        fig.suptitle(f"{head} — {label}\n" + note, fontsize=11)
         fig.tight_layout(rect=(0, 0, 1, 0.93))
         Path(args.plot).parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(args.plot, dpi=140)

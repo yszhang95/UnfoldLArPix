@@ -177,12 +177,24 @@ def evaluate(npz_path: Path, corr_threshold: float = 0.5,
              group_time: int = 1,
              universal: bool = False,
              content_offset_ticks: float = 0.0,
-             deposit_shape: str = "linear") -> dict:
+             deposit_shape: str = "linear",
+             use_fitted_offsets: bool = False) -> dict:
     if universal:
+        time_offsets = None
+        if use_fitted_offsets:
+            f0 = np.load(npz_path, allow_pickle=True)
+            if "deconv_q_offsets" not in f0.files:
+                raise SystemExit(
+                    f"{npz_path}: no deconv_q_offsets key "
+                    "(run the solver with --subbin-rounds)."
+                )
+            time_offsets = np.asarray(
+                f0["deconv_q_offsets"], dtype=np.float64)
         smear_summed, aligned_dq = universal_rebin(
             npz_path, truth_npz=truth_npz,
             content_offset_ticks=content_offset_ticks,
             deposit_shape=deposit_shape,
+            time_offsets=time_offsets,
         )
     else:
         f = np.load(npz_path, allow_pickle=True)
@@ -301,6 +313,10 @@ def main() -> None:
                         "coarse content, or Gaussian shapes around the "
                         "regressed means (filter width) from the sharp "
                         "charges — removes the rebinning artifact.")
+    p.add_argument("--use-fitted-offsets", action="store_true",
+                   help="Universal gaussian mode: deposit each charge at "
+                        "its FITTED sub-bin position (deconv_q_offsets "
+                        "from --subbin-rounds) instead of the bin center.")
     p.add_argument("--json", default=None, help="Optional output JSON path.")
     args = p.parse_args()
 
@@ -317,7 +333,8 @@ def main() -> None:
                                   group_time=args.group_time,
                                   universal=args.universal_grid,
                                   content_offset_ticks=args.content_offset_ticks,
-                                  deposit_shape=args.deposit_shape)
+                                  deposit_shape=args.deposit_shape,
+                                  use_fitted_offsets=args.use_fitted_offsets)
 
     header = (f"{'label':<28} {'int%':>7} {'r':>8} {'slope':>7} "
               f"{'specdev':>8} {'ghost%':>7} {'gAdj%':>6} {'gIso%':>6} "

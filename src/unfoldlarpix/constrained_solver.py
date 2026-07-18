@@ -426,6 +426,288 @@ def solve_fista(
     return x
 
 
+def split_deposit(q: np.ndarray, u: np.ndarray) -> np.ndarray:
+    """Sum-preserving linear split of each charge toward a neighbour bin.
+
+    A charge ``q[x, y, k]`` with fractional offset ``u[x, y, k]`` (in
+    bins, bounded to [-1/2, 1/2]) is deposited as ``(1 - |u|) q`` in bin
+    ``k`` and ``|u| q`` in bin ``k + sign(u)`` — the first-order (linear
+    interpolation) representation of a charge at continuous position
+    ``k + u`` on the coarse grid.  ``u == 0`` is the identity.
+    """
+    pos = np.clip(u, 0.0, 0.5)
+    neg = np.clip(-u, 0.0, 0.5)
+    out = q * (1.0 - pos - neg)
+    out[:, :, 1:] += (q * pos)[:, :, :-1]
+    out[:, :, :-1] += (q * neg)[:, :, 1:]
+    return out
+
+
+def split_adjoint(g: np.ndarray, u: np.ndarray) -> np.ndarray:
+    """Adjoint of ``split_deposit`` in ``q`` for fixed ``u``."""
+    pos = np.clip(u, 0.0, 0.5)
+    neg = np.clip(-u, 0.0, 0.5)
+    out = g * (1.0 - pos - neg)
+    out[:, :, :-1] += pos[:, :, :-1] * g[:, :, 1:]
+    out[:, :, 1:] += neg[:, :, 1:] * g[:, :, :-1]
+    return out
+
+
+class _NumpyBoundary:
+    """Uniform numpy-in/numpy-out view of a numpy OR torch ZS operator.
+
+    The torch operator's ``conv``/``sample`` methods are tensor-native;
+    this shim converts at every call so backend-agnostic stages (the
+    sub-bin split) can be written once in numpy.  Costs one host/device
+    round trip per call — acceptable for short refinement stages.
+    """
+
+    def __init__(self, op):
+        self.op = op
+        self.q_shape = op.q_shape
+        self.n_data = op.n_data
+        self._torch = hasattr(op, "to_tensor")
+        self.d = op.d.cpu().numpy() if hasattr(op.d, "cpu") else op.d
+
+    def _out(self, t):
+        return t.cpu().numpy().astype(np.float64) if self._torch else t
+
+    def _in(self, a):
+        return self.op.to_tensor(a) if self._torch else a
+
+    def conv(self, q):
+        return self._out(self.op.conv(self._in(q)))
+
+    def conv_adjoint(self, g):
+        return self._out(self.op.conv_adjoint(self._in(g)))
+
+    def sample(self, block):
+        return self._out(self.op.sample(self._in(block)))
+
+    def sample_adjoint(self, vec):
+        return self._out(self.op.sample_adjoint(self._in(vec)))
+
+
+class _SplitOperator:
+    """Adapter: the ZS operator composed with a fixed sub-bin split.
+
+    Presents the :class:`ZSOperator` interface expected by
+    :func:`solve_fista` (conv / conv_adjoint / sample / sample_adjoint /
+    d / q_shape / lipschitz), with the deposit ``S(u)`` folded into the
+    convolution.  ``op`` must already be numpy-boundary (wrap torch
+    operators in :class:`_NumpyBoundary` first).
+    """
+
+    def __init__(self, op, u: np.ndarray):
+        self.op = op
+        self.u = u
+        self.q_shape = op.q_shape
+        self.d = op.d
+        self.n_data = op.n_data
+
+    def conv(self, q):
+        return self.op.conv(split_deposit(np.asarray(q), self.u))
+
+    def conv_adjoint(self, g):
+        return split_adjoint(np.asarray(self.op.conv_adjoint(g)), self.u)
+
+    def sample(self, block):
+        return self.op.sample(block)
+
+    def sample_adjoint(self, vec):
+        return self.op.sample_adjoint(vec)
+
+    def forward(self, q):
+        return self.sample(self.conv(q))
+
+    def adjoint(self, vec):
+        return self.conv_adjoint(self.sample_adjoint(vec))
+
+    def lipschitz(self, n_iter: int = 12, seed: int = 0) -> float:
+        rng = np.random.default_rng(seed)
+        x = rng.standard_normal(self.q_shape)
+        x /= np.linalg.norm(x)
+        lam = 1.0
+        for _ in range(n_iter):
+            y = self.adjoint(self.forward(x))
+            lam = float(np.linalg.norm(y))
+            if lam <= 0:
+                return 1.0
+            x = y / lam
+        return lam
+
+
+def solve_subbin_positions(
+    op,
+    q0: np.ndarray,
+    *,
+    skeleton: np.ndarray,
+    n_rounds: int = 3,
+    q_iters: int = 60,
+    u_iters: int = 8,
+    alpha: float | np.ndarray = 0.0,
+    beta_quiet: float = 0.0,
+    quiet_mask: np.ndarray | None = None,
+    quiet_threshold: float = np.inf,
+    u_step: float = 1.0,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Refine per-charge amplitudes AND bounded sub-bin time offsets.
+
+    Post-ladder stage on a FROZEN skeleton: each active charge gains a
+    continuous offset ``u in [-1/2, 1/2]`` bins, represented on the
+    coarse grid by the sum-preserving linear split
+    (:func:`split_deposit`).  Alternates FISTA amplitude passes (via
+    :func:`solve_fista` on the composed operator) with projected-
+    gradient offset passes.  The data leverage for ``u`` is the
+    fine-tick misalignment of the latch-window edges with the q grid —
+    windows sample the two split bins with different fractional
+    overlaps, so the likelihood depends on the offsets.
+
+    Motivation (truth-informed ceiling, subbin_ceiling_diag.py):
+    per-charge truth-centroid offsets are bimodal at the +-1/2 bound
+    (40-47% clip) and halve the ghost fraction at fixed integral.
+
+    Returns ``(q, u)``; the physical time offset is ``u * B`` ticks.
+    """
+    op = _NumpyBoundary(op)
+    q = np.where(skeleton, np.clip(q0, 0.0, None), 0.0)
+    u = np.zeros(op.q_shape)
+    L = _SplitOperator(op, u).lipschitz()
+
+    def _grid_grad(qq, uu):
+        block_pred = op.conv(split_deposit(qq, uu))
+        resid = op.sample(block_pred) - op.d
+        G = op.conv_adjoint(op.sample_adjoint(resid))
+        if beta_quiet > 0 and quiet_mask is not None:
+            viol = np.where(
+                quiet_mask,
+                np.clip(block_pred - quiet_threshold, 0.0, None),
+                0.0,
+            )
+            if viol.any():
+                G = G + beta_quiet * op.conv_adjoint(viol)
+        loss = 0.5 * float(np.sum(resid**2))
+        return G, loss
+
+    for rnd in range(int(n_rounds)):
+        # -- amplitude pass on the frozen skeleton, split fixed.
+        # ||S(u)|| <= sqrt(2), so 2*L bounds the composed curvature —
+        # avoids re-running the power iteration every round.
+        sop = _SplitOperator(op, u)
+        q = solve_fista(
+            sop,
+            alpha=alpha,
+            beta_quiet=beta_quiet,
+            quiet_mask=quiet_mask,
+            quiet_threshold=quiet_threshold,
+            n_iter=q_iters,
+            q0=q,
+            L=2.0 * L,
+            support_mask=skeleton,
+        )
+        # -- offset pass, amplitudes fixed: projected gradient with an
+        # exact line search along the gradient direction (the loss is
+        # piecewise quadratic in u; kinks and bounds are handled by the
+        # clip + backtracking guard).
+        G, loss_prev = _grid_grad(q, u)
+        for _ in range(int(u_iters)):
+            Gp = np.zeros_like(G)
+            Gm = np.zeros_like(G)
+            Gp[:, :, :-1] = G[:, :, 1:]      # G at k+1
+            Gm[:, :, 1:] = G[:, :, :-1]      # G at k-1
+            right = q * (Gp - G)             # d(loss)/du on the u>0 branch
+            left = q * (G - Gm)              # d(loss)/du on the u<0 branch
+            g_u = np.where(
+                u > 0, right,
+                np.where(
+                    u < 0, left,
+                    np.where(right < 0, right,
+                             np.where(left > 0, left, 0.0)),
+                ),
+            )
+            g_u = g_u * skeleton
+            gnorm2 = float(np.sum(g_u * g_u))
+            if gnorm2 < 1e-20:
+                break
+            # deposit change per unit step along -g_u: on the active
+            # branch d(out)/du_k = q_k (e_{k+s} - e_k), s = branch sign
+            s_pos = (u > 0) | ((u == 0) & (right < 0))
+            s_neg = (u < 0) | ((u == 0) & ~s_pos & (left > 0))
+            w = q * g_u
+            D = np.where(s_pos | s_neg, w, 0.0)
+            Dsh = np.zeros_like(D)
+            Dsh[:, :, 1:] += np.where(s_pos, w, 0.0)[:, :, :-1]
+            Dsh[:, :, :-1] += np.where(s_neg, w, 0.0)[:, :, 1:]
+            D_grid = D - Dsh                 # = +Sum g_k q_k (e_k - e_{k+s})
+            v = op.sample(op.conv(D_grid))
+            vnorm2 = float(np.sum(np.asarray(v) ** 2))
+            if vnorm2 <= 0:
+                break
+            t_star = gnorm2 / vnorm2 * float(u_step)
+            accepted = False
+            for _bt in range(8):
+                u_new = np.clip(u - t_star * g_u, -0.5, 0.5)
+                u_new[:, :, 0] = np.clip(u_new[:, :, 0], 0.0, 0.5)
+                u_new[:, :, -1] = np.clip(u_new[:, :, -1], -0.5, 0.0)
+                u_new *= skeleton
+                G_new, loss_new = _grid_grad(q, u_new)
+                if loss_new <= loss_prev:
+                    u, G, loss_prev = u_new, G_new, loss_new
+                    accepted = True
+                    break
+                t_star *= 0.5
+            if not accepted:
+                break
+        if verbose:
+            moved = float((np.abs(u[skeleton]) > 1e-3).mean()) * 100
+            at_bound = float((np.abs(u[skeleton]) >= 0.5 - 1e-9).mean()) * 100
+            print(f"  subbin round {rnd}: data-loss {loss_prev:.4e}, "
+                  f"moved {moved:.1f}% of charges "
+                  f"({at_bound:.1f}% at bound), "
+                  f"total q {q.sum():.1f} ke-")
+    return q, u
+
+
+def centroid_bin_offsets(
+    q: np.ndarray,
+    window_bins: int = 1,
+    min_charge: float = 0.05,
+) -> np.ndarray:
+    """TRUTH-FREE sub-bin position estimator: local reco centroids.
+
+    Measured fact (nb4, 2026-07-17): fitting per-charge offsets against
+    the windows is UNIDENTIFIABLE — the likelihood constrains the
+    deposit FIELD only, and a charge between bins is already fitted as
+    an amplitude split across the two bins, so a split-parameterized
+    offset is a redundant re-parameterization (fitted offsets came out
+    ~0.2 ticks vs ~10 needed).  The honest position estimator is the
+    charge-weighted centroid of the fitted sharp field itself: for each
+    active voxel, the centroid over the same pixel within
+    ``+-window_bins``, clipped to half a bin.
+
+    Returns offsets in BIN units (q-shaped array, bounded to [-1/2, 1/2])
+    — multiply by ``adc_hold_delay`` for ticks; deposit with
+    :func:`split_deposit` or Gaussian shapes at the shifted centers.
+    ``window_bins=1`` is conservative (slope stays ~1); ``2`` merges
+    more aggressively (fewer ghost voxels, more killed truth).
+    """
+    offsets = np.zeros_like(q)
+    nt = q.shape[2]
+    w = int(window_bins)
+    xs, ys, ks = np.nonzero(q > 1e-6)
+    for x, y, k in zip(xs, ys, ks):
+        lo, hi = max(k - w, 0), min(k + w + 1, nt)
+        col = q[x, y, lo:hi]
+        tot = float(col.sum())
+        if tot < min_charge:
+            continue
+        idx = np.arange(lo, hi, dtype=np.float64)
+        offsets[x, y, k] = np.clip(
+            float((col * idx).sum() / tot) - k, -0.5, 0.5)
+    return offsets
+
+
 def smear_kernel_gaussian(
     kernel: np.ndarray,
     adc_hold_delay: int,

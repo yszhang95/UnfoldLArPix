@@ -440,3 +440,96 @@ class TestSolverRecovery:
         pred_con = op.conv(q_con)
         assert pred_con[quiet].max() <= pred_free[quiet].max() + 1e-9
         assert pred_con[quiet].max() < 1.0
+
+
+class TestSubbinPositions:
+    def test_split_identity_sum_and_adjoint(self):
+        from unfoldlarpix.constrained_solver import split_adjoint, split_deposit
+
+        rng = np.random.default_rng(0)
+        q = rng.uniform(0.0, 5.0, size=(4, 4, 12))
+        u = rng.uniform(-0.5, 0.5, size=(4, 4, 12))
+        u[:, :, 0] = np.clip(u[:, :, 0], 0.0, 0.5)
+        u[:, :, -1] = np.clip(u[:, :, -1], -0.5, 0.0)
+        # u = 0 is the identity
+        np.testing.assert_allclose(split_deposit(q, np.zeros_like(u)), q)
+        # sum-preserving (edge charges cannot spill outside)
+        out = split_deposit(q, u)
+        assert out.sum() == pytest.approx(q.sum(), rel=1e-12)
+        # adjoint dot test: <S q, g> == <q, S^T g>
+        g = rng.standard_normal(q.shape)
+        lhs = float((split_deposit(q, u) * g).sum())
+        rhs = float((q * split_adjoint(g, u)).sum())
+        assert lhs == pytest.approx(rhs, rel=1e-12)
+
+    def test_recovers_subbin_offset(self):
+        """Truth deposited between two bins (u=0.35) is recovered as a
+        single skeleton charge with the right amplitude AND offset."""
+        from unfoldlarpix.constrained_solver import (
+            solve_subbin_positions,
+            split_deposit,
+        )
+
+        kernel = _make_kernel(seed=4)
+        B = 30
+        nx, ny, nt = 5, 5, 40
+        ntq = nt - kernel.shape[2] + 1
+        q_true = np.zeros((nx, ny, ntq))
+        q_true[2, 2, 12] = 8.0
+        u_true = np.zeros((nx, ny, ntq))
+        u_true[2, 2, 12] = 0.35
+        block = forward_model_block(
+            split_deposit(q_true, u_true), kernel, (nx, ny, nt))
+        windows = []
+        for px in range(nx):
+            for py in range(ny):
+                for b in range(nt):
+                    windows.append(
+                        LatchWindow(px, py, b * B, (b + 1) * B,
+                                    float(block[px, py, b]))
+                    )
+        op = ZSOperator(kernel, (nx, ny, nt), windows, adc_hold_delay=B)
+        skel = q_true > 0
+        q0 = np.where(skel, 8.0, 0.0)
+        q_hat, u_hat = solve_subbin_positions(
+            op, q0, skeleton=skel, n_rounds=3, q_iters=80, u_iters=12,
+            alpha=1e-4)
+        assert q_hat[2, 2, 12] == pytest.approx(8.0, rel=0.03)
+        assert u_hat[2, 2, 12] == pytest.approx(0.35, abs=0.03)
+
+    def test_aligned_charge_keeps_zero_offset(self):
+        from unfoldlarpix.constrained_solver import solve_subbin_positions
+
+        kernel = _make_kernel(seed=5)
+        B = 30
+        nx, ny, nt = 5, 5, 40
+        ntq = nt - kernel.shape[2] + 1
+        q_true = np.zeros((nx, ny, ntq))
+        q_true[2, 2, 12] = 8.0
+        block = forward_model_block(q_true, kernel, (nx, ny, nt))
+        windows = [
+            LatchWindow(px, py, b * B, (b + 1) * B, float(block[px, py, b]))
+            for px in range(nx) for py in range(ny) for b in range(nt)
+        ]
+        op = ZSOperator(kernel, (nx, ny, nt), windows, adc_hold_delay=B)
+        skel = q_true > 0
+        q_hat, u_hat = solve_subbin_positions(
+            op, q_true.copy(), skeleton=skel, n_rounds=2, q_iters=60,
+            u_iters=8, alpha=1e-4)
+        assert abs(u_hat[2, 2, 12]) < 0.02
+        assert q_hat[2, 2, 12] == pytest.approx(8.0, rel=0.03)
+
+    def test_centroid_bin_offsets(self):
+        from unfoldlarpix.constrained_solver import centroid_bin_offsets
+
+        q = np.zeros((3, 3, 10))
+        # a 0.65/0.35 split between bins 4 and 5 = charge at 4 + 0.35
+        q[1, 1, 4], q[1, 1, 5] = 6.5, 3.5
+        u = centroid_bin_offsets(q, window_bins=1)
+        assert u[1, 1, 4] == pytest.approx(0.35, abs=1e-9)
+        assert u[1, 1, 5] == pytest.approx(-0.5, abs=1e-9)  # clipped
+        # an isolated single-bin charge keeps offset 0
+        q2 = np.zeros((3, 3, 10))
+        q2[0, 0, 3] = 4.0
+        u2 = centroid_bin_offsets(q2, window_bins=2)
+        assert u2[0, 0, 3] == 0.0

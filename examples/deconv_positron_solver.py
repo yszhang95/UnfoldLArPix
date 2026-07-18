@@ -71,6 +71,34 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hits-post-bins", type=int, default=1,
                    help="Extra bins AFTER each latch window included in "
                         "the hits support.")
+    p.add_argument("--subbin-rounds", type=int, default=0,
+                   help="When > 0, run the sub-bin position stage after "
+                        "the main fit: each active charge gains a bounded "
+                        "time offset u in [-1/2, 1/2] bins (sum-preserving "
+                        "linear split), alternating amplitude FISTA and "
+                        "projected-gradient offset passes for this many "
+                        "rounds.  Offsets are saved as deconv_q_offsets "
+                        "[ticks] and folded into the charges positions.")
+    p.add_argument("--subbin-q-iters", type=int, default=60,
+                   help="FISTA iterations per sub-bin amplitude pass.")
+    p.add_argument("--subbin-u-iters", type=int, default=8,
+                   help="Projected-gradient steps per sub-bin offset pass.")
+    p.add_argument("--subbin-alpha", type=float, default=None,
+                   help="L1 weight during the sub-bin amplitude passes "
+                        "(default: --alpha; the skeleton is frozen, so a "
+                        "small value keeps amplitudes near-unbiased).")
+    p.add_argument("--subbin-skel-eps", type=float, default=0.01,
+                   help="Charge threshold [ke-] defining the frozen "
+                        "skeleton for the sub-bin stage.")
+    p.add_argument("--centroid-window", type=int, default=0,
+                   help="When > 0, declare each charge's sub-bin position "
+                        "as the local RECO centroid of the fitted sharp "
+                        "field (same pixel, +-N bins) — the truth-free "
+                        "estimator; fitting offsets against the windows is "
+                        "unidentifiable (the likelihood constrains only "
+                        "the deposit field).  1 = conservative (slope~1), "
+                        "2 = more aggressive merging.  Saved as "
+                        "deconv_q_offsets and folded into charges.")
     p.add_argument("--debias-iter", type=int, default=0,
                    help="When > 0, refit with alpha=0 on the L1 active set "
                         "for this many iterations (two-stage debias).")
@@ -519,8 +547,49 @@ def main() -> None:
             )
             print(f"  debiased on active set: total q {q_hat.sum():.1f} ke-")
 
+        u_off = None
+        if args.subbin_rounds > 0:
+            from unfoldlarpix.constrained_solver import (
+                solve_subbin_positions,
+                split_deposit,
+            )
+
+            skel = q_hat > args.subbin_skel_eps
+            print(f"  subbin stage: {int(skel.sum())} charges "
+                  f"(> {args.subbin_skel_eps} ke-), "
+                  f"{args.subbin_rounds} rounds")
+            q_hat, u_off = solve_subbin_positions(
+                op,
+                q_hat,
+                skeleton=skel,
+                n_rounds=args.subbin_rounds,
+                q_iters=args.subbin_q_iters,
+                u_iters=args.subbin_u_iters,
+                alpha=(args.subbin_alpha
+                       if args.subbin_alpha is not None else args.alpha),
+                beta_quiet=args.beta_quiet,
+                quiet_mask=quiet_mask,
+                quiet_threshold=thr,
+                verbose=True,
+            )
+
+        if args.centroid_window > 0:
+            from unfoldlarpix.constrained_solver import (
+                centroid_bin_offsets,
+                split_deposit,
+            )
+
+            u_off = centroid_bin_offsets(
+                q_hat, window_bins=args.centroid_window)
+            moved = float((np.abs(u_off[q_hat > 1e-6]) > 1e-3).mean()) * 100
+            print(f"  centroid offsets (+-{args.centroid_window} bins): "
+                  f"{moved:.1f}% of charges moved")
+
         d_ref = op.d.cpu().numpy() if hasattr(op.d, "cpu") else op.d
-        resid = op.forward(q_hat) - d_ref
+        q_deposited = (
+            split_deposit(q_hat, u_off) if u_off is not None else q_hat
+        )
+        resid = op.forward(q_deposited) - d_ref
         print(f"  data residual rms {np.sqrt(np.mean(resid**2)):.4f} ke-, "
               f"total q {q_hat.sum():.1f} ke- "
               f"(warm start {np.clip(result.deconv_q, 0, None).sum():.1f})")
@@ -529,19 +598,22 @@ def main() -> None:
             # blob coefficient at fit index t sits at physical index
             # t + time_shift
             q_hat = np.roll(q_hat, time_shift, axis=2)
+            if u_off is not None:
+                u_off = np.roll(u_off, time_shift, axis=2)
+                q_deposited = np.roll(q_deposited, time_shift, axis=2)
         if args.gaussian_basis and residual_sigmas is None:
             # full-width basis: model already carries the analysis smearing
             q_smooth = gaussian_post_smooth(
-                q_hat, B, args.sigma, args.sigma_pxl
+                q_deposited, B, args.sigma, args.sigma_pxl
             )
         elif args.gaussian_basis:
             # partial basis: apply only the residual smearing
             q_smooth = gaussian_post_smooth(
-                q_hat, B, residual_sigmas[0], residual_sigmas[1]
+                q_deposited, B, residual_sigmas[0], residual_sigmas[1]
             )
         else:
             q_smooth = gaussian_post_smooth(
-                q_hat, B, args.sigma, args.sigma_pxl
+                q_deposited, B, args.sigma, args.sigma_pxl
             )
 
         # Reuse the standard payload, replacing the deconvolution product.
@@ -563,11 +635,14 @@ def main() -> None:
         raw_off = np.asarray(result.hwf_block_offset, dtype=float)
         ci, cj, ck = np.where(q_hat > 0.01)
         seedcut = args.seed_cut if args.seed_cut is not None else 0.5
+        t_centers = raw_off[2] + ck * float(B)
+        if u_off is not None:
+            t_centers = t_centers + u_off[ci, cj, ck] * float(B)
         charges_list = np.stack(
             [
                 raw_off[0] + ci,
                 raw_off[1] + cj,
-                raw_off[2] + ck * float(B),
+                t_centers,
                 q_hat[ci, cj, ck],
                 (q_hat[ci, cj, ck] > seedcut).astype(float),
             ],
@@ -607,6 +682,13 @@ def main() -> None:
             "pixel_x pixel_y t_center_tick charge_ke on_skeleton"
         )
         payload["boffset_raw"] = raw_off
+        if u_off is not None:
+            payload["deconv_q_offsets"] = (
+                u_off * float(B)).astype(np.float32)
+            if args.subbin_rounds > 0:
+                payload["solver_subbin_rounds"] = args.subbin_rounds
+            if args.centroid_window > 0:
+                payload["solver_centroid_window"] = args.centroid_window
 
         suffix = args.output_suffix or (
             f"a{args.alpha:g}_b{args.beta_quiet:g}".replace(".", "p")
