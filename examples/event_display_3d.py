@@ -24,7 +24,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-import plotly.graph_objects as go
+
+try:
+    import plotly.graph_objects as go
+    HAVE_PLOTLY = True
+except ImportError:               # the PNG projections work without it
+    go = None
+    HAVE_PLOTLY = False
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from muon_filter_report import align_voxel_blocks  # noqa: E402
@@ -69,57 +75,62 @@ def main() -> None:
     truth = Path(args.truth_npz) if args.truth_npz else Path(args.files[0])
     cut = args.threshold
 
-    fig = go.Figure()
+    fig = go.Figure() if HAVE_PLOTLY else None
     truth_added = False
-    colors = ["dodgerblue", "mediumseagreen", "orange", "violet"]
     proj_data = []
 
     for i, (label, path) in enumerate(zip(args.labels, args.files)):
         smear_summed, aligned_dq, lower, B = load_grid(Path(path), truth)
         if not truth_added:
-            x, y, t, q = voxels(smear_summed, lower, B, args.tick_us, cut)
-            fig.add_trace(go.Scatter3d(
-                x=x, y=y, z=t, mode="markers", name="smeared truth",
-                marker=dict(size=2.2, color=q, colorscale="Greys",
-                            cmin=0, cmax=float(np.percentile(q, 98)),
-                            showscale=False),
-                hovertemplate="truth %{marker.color:.2f} ke-<extra></extra>",
-            ))
+            if HAVE_PLOTLY:
+                x, y, t, q = voxels(smear_summed, lower, B, args.tick_us, cut)
+                fig.add_trace(go.Scatter3d(
+                    x=x, y=y, z=t, mode="markers", name="smeared truth",
+                    marker=dict(size=2.2, color=q, colorscale="Greys",
+                                cmin=0, cmax=float(np.percentile(q, 98)),
+                                showscale=False),
+                    hovertemplate="truth %{marker.color:.2f} ke-<extra></extra>",
+                ))
             truth_added = True
             proj_data.append(("smeared truth", smear_summed, lower, B))
-        x, y, t, q = voxels(aligned_dq, lower, B, args.tick_us, cut)
-        fig.add_trace(go.Scatter3d(
-            x=x, y=y, z=t, mode="markers", name=label,
-            visible=True if i == 0 else "legendonly",
-            marker=dict(size=2.2, color=q, colorscale="Viridis",
-                        cmin=0, cmax=float(np.percentile(q, 98)),
-                        showscale=False),
-            hovertemplate=label + " %{marker.color:.2f} ke-<extra></extra>",
-        ))
-        ghost_mask = (aligned_dq > cut) & (smear_summed < cut)
-        gx, gy, gt = np.where(ghost_mask)
-        fig.add_trace(go.Scatter3d(
-            x=lower[0] + gx, y=lower[1] + gy,
-            z=(lower[2] + gt * B) * args.tick_us,
-            mode="markers", name=f"{label} ghosts",
-            visible="legendonly",
-            marker=dict(size=2.6, color="red"),
-            hovertemplate="ghost<extra></extra>",
-        ))
+        if HAVE_PLOTLY:
+            x, y, t, q = voxels(aligned_dq, lower, B, args.tick_us, cut)
+            fig.add_trace(go.Scatter3d(
+                x=x, y=y, z=t, mode="markers", name=label,
+                visible=True if i == 0 else "legendonly",
+                marker=dict(size=2.2, color=q, colorscale="Viridis",
+                            cmin=0, cmax=float(np.percentile(q, 98)),
+                            showscale=False),
+                hovertemplate=label + " %{marker.color:.2f} ke-<extra></extra>",
+            ))
+            ghost_mask = (aligned_dq > cut) & (smear_summed < cut)
+            gx, gy, gt = np.where(ghost_mask)
+            fig.add_trace(go.Scatter3d(
+                x=lower[0] + gx, y=lower[1] + gy,
+                z=(lower[2] + gt * B) * args.tick_us,
+                mode="markers", name=f"{label} ghosts",
+                visible="legendonly",
+                marker=dict(size=2.6, color="red"),
+                hovertemplate="ghost<extra></extra>",
+            ))
         proj_data.append((label, aligned_dq, lower, B))
 
-    fig.update_layout(
-        scene=dict(xaxis_title="pixel x", yaxis_title="pixel y",
-                   zaxis_title="time [us]", aspectmode="data"),
-        legend=dict(itemsizing="constant"),
-        title=(f"event display — voxels > {cut} ke-  "
-               "(click legend entries to toggle; red = reco w/o truth)"),
-        margin=dict(l=0, r=0, t=40, b=0),
-    )
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    fig.write_html(out, include_plotlyjs=True)
-    print(f"Saved {out}")
+    if HAVE_PLOTLY:
+        fig.update_layout(
+            scene=dict(xaxis_title="pixel x", yaxis_title="pixel y",
+                       zaxis_title="time [us]", aspectmode="data"),
+            legend=dict(itemsizing="constant"),
+            title=(f"event display — voxels > {cut} ke-  "
+                   "(click legend entries to toggle; red = reco w/o truth)"),
+            margin=dict(l=0, r=0, t=40, b=0),
+        )
+        fig.write_html(out, include_plotlyjs=True)
+        print(f"Saved {out}")
+    else:
+        print("plotly not installed — skipping interactive HTML "
+              "(pip install plotly to enable); writing PNG projections only.")
 
     # ---- static projections PNG (truth row + one row per reco) ----
     n_rows = len(proj_data)

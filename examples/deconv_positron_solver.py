@@ -758,6 +758,8 @@ def main() -> None:
                 include_hwf_block=True,
             )
             payload["deconv_q_sharp"] = q_hat
+            payload["readout_nburst"] = event.hits.data.shape[1] - 3
+            payload["readout_threshold"] = float(readout_config.threshold)
         payload["solver_alpha"] = args.alpha
         payload["solver_beta_quiet"] = args.beta_quiet
         payload["solver_n_iter"] = args.n_iter
