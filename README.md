@@ -1,89 +1,59 @@
 # UnfoldLArPix
 
-Signal processing package for LArPix data unfolding.
+Reconstruction of 3D ionization charge from zero-suppressed LArPix burst
+readout (ND-LAr-like pixel TPC, tred simulation).
 
-## Installation
+Zero suppression breaks conventional FFT deconvolution: silence is
+inequality information and the recorded data are window integrals, not
+dense waveforms.  The current method is a **constrained sparse solver**
+in measurement space (FISTA; positivity + weighted L1 + honest
+latch-window forward model), with the legacy compensated FFT
+deconvolution retained as warm start and cheap first pass.
+
+## Quick start
 
 ```bash
-# TO BE DONE
+cd examples
+./run_pipeline.sh data/pgun_positron_3gev_tred_noises_effq_nt1_thres5k_nburst4.npz 0 0 nb4
 ```
 
-## Development Installation
+One event end to end (unfold → truth/reco metrics → correlation plot →
+event display) in ~30 s on GPU.  **`examples/PIPELINE.md`** documents
+every stage and knob.
 
-```bash
-git clone <repository-url>
-cd UnfoldLArPix
-uv venv
-uv sync
-```
+## Layout
 
-## Usage
+- `src/unfoldlarpix/`
+  - `constrained_solver.py` / `constrained_solver_torch.py` — the ZS
+    solver (numpy / GPU backends): latch-window forward operator, FISTA,
+    soft-ladder homotopy, censoring, sub-bin centroid estimator.
+  - `burst_processor*.py`, `deconv_workflow.py`, `deconv.py` — burst
+    merging, template compensation, FFT deconvolution (warm-start path;
+    see `README_burst_processor.md`).
+  - `data_loader.py`, `smear_truth.py` — tred NPZ IO, truth smearing.
+- `examples/` — drivers, evaluation (`eval_deconv_metrics.py`,
+  universal-grid protocol), plotting, `PIPELINE.md`.
+- `tests/` — unit tests (`pytest`; the solver suites are current).
+- `docs/` — JINST draft, slides; `docs/archive/` — superseded design
+  notes and analysis-session reports (see its README).
 
-### Data Loading
+## Results & provenance
 
-```python
-from unfoldlarpix import DataLoader
+Findings, adopted configuration, and the complete study ledger live in
+the analysis archive (not in this repo):
+`/srv/storage1/yousen/analysis/charge_unfolading_ndlar/analysis_20260716_zs_fixes/report/FINDINGS.md`.
 
-# Load NPZ file produced by tred
-loader = DataLoader("path/to/data.npz")
+## Environments
 
-# Iterate over events grouped by (event_id, tpc_id)
-for event in loader.iter_events():
-    print(f"TPC {event.tpc_id}, Event {event.event_id}")
-
-    # Access effective charge data
-    if event.effq:
-        print(f"  EffQ shape: {event.effq.data.shape}")
-        print(f"  EffQ location shape: {event.effq.location.shape}")
-
-    # Access current/waveform data
-    if event.current:
-        print(f"  Current shape: {event.current.data.shape}")
-        print(f"  Current location shape: {event.current.location.shape}")
-
-    # Access hit data
-    if event.hits:
-        print(f"  Hits shape: {event.hits.data.shape}")
-        print(f"  Hits location shape: {event.hits.location.shape}")
-
-# Get geometry information
-geometry = loader.get_geometry(0)
-print(f"TPC 0 geometry: {geometry.lower} to {geometry.upper}")
-
-# Get readout configuration
-config = loader.get_readout_config()
-print(f"Time spacing: {config.time_spacing} μs")
-```
-
-### Signal Processing
-
-```python
-```
+- Repo venv (`.venv`): numpy/matplotlib — enough for tests and most
+  evaluation scripts.
+- GPU runs use tred's venv (torch 2.6 + CUDA):
+  `PYTHONPATH=src /home/yousen/Documents/NDLAr2x2/tred/.venv/bin/python …`
+  Do **not** install torch into the repo venv.
 
 ## Development
 
-This project follows strict coding standards using Black, isort, Ruff, and mypy.
-
-### Format code
 ```bash
-isort .
-black .
+pytest             # run tests
+ruff check . --fix # lint
 ```
-
-### Lint and fix
-```bash
-ruff check . --fix
-```
-
-### Type check
-```bash
-mypy .
-```
-
-### Run tests
-```bash
-pytest
-```
-
-## License
-
