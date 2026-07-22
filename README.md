@@ -34,7 +34,7 @@ every stage and knob.
 - `examples/` — drivers, evaluation (`eval_deconv_metrics.py`,
   universal-grid protocol), plotting, `PIPELINE.md`.
 - `tests/` — unit tests (`pytest`; the solver suites are current).
-- `docs/` — JINST draft, slides; `docs/archive/` — superseded design
+- `docs/archive/` — superseded design
   notes and analysis-session reports (see its README).
 
 ## Results & provenance
