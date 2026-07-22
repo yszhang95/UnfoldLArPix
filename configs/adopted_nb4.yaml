@@ -1,0 +1,19 @@
+# Adopted dense-regime configuration (nb4) — golden reference config.
+services:
+  compute:  {device: cuda, dtype: float32}
+  detector: {response: /srv/storage1/yousen/tred_workspace/response_44_v2a_full_25x25pixel_tred.npz}
+  rng:      {seed: 0}
+sequence:
+  - LoadEvent:        {input: examples/data/pgun_positron_3gev_tred_noises_effq_nt1_thres5k_nburst4.npz, tpc: 0, max_events: 1}
+  - FFTWarmStart:     {sigma_time: 0.005, sigma_pixel: 0.2, pad_pixels: 12}
+  - BuildMeasurement: {split_trigger: true}
+  - BuildSupport:     {eps: 0.3, dilate: 1, smooth_first: true}
+  - Solve:
+      engine:   {iters: 150}
+      strategy: {type: ladder, alphas: [1.0, 0.5, 0.3], seed_cut: 0.5, soft_len: 2.0}
+      terms:
+        - {type: quiet, beta: 1.0}
+  - CentroidPositions: {window: 1}
+  - WriteCharges:
+      out_dir: examples/analysis_output/fwk_runs
+      prefix: fwk_nb4
