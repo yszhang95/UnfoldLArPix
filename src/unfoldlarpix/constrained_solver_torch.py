@@ -161,7 +161,9 @@ def solve_fista(
     quiet_mask: np.ndarray | None = None,
     quiet_threshold: float = np.inf,
     beta_censor: float = 0.0,
-    censor_start: np.ndarray | None = None,
+    censor_reset: np.ndarray | None = None,
+    censor_arm: np.ndarray | None = None,
+    censor_end: int | None = None,
     censor_threshold: float = np.inf,
     n_iter: int = 200,
     q0: np.ndarray | None = None,
@@ -179,24 +181,29 @@ def solve_fista(
     L_total = L + 2.0 * beta_quiet if (beta_quiet > 0 and quiet_mask is not None) else L
     if lam_spectral > 0 and spectral_weight is not None:
         L_total = L_total + 2.0 * lam_spectral * float(np.max(spectral_weight))
-    c_active = None
-    if beta_censor > 0 and censor_start is not None:
+    c_ref = None
+    if beta_censor > 0 and censor_reset is not None:
         nt_b = op.block_shape[2]
-        s_idx = op.to_tensor(
-            np.asarray(censor_start, dtype=np.int64), torch.long)
+        r_idx = op.to_tensor(
+            np.asarray(censor_reset, dtype=np.int64), torch.long)
+        a_idx = (op.to_tensor(np.asarray(censor_arm, dtype=np.int64),
+                              torch.long)
+                 if censor_arm is not None else r_idx)
+        c_end = int(censor_end) if censor_end is not None else nt_b
         t_axis = torch.arange(nt_b, device=op.device)[None, None, :]
-        c_active = t_axis >= s_idx[:, :, None]
+        c_ref = t_axis >= r_idx[:, :, None]
+        c_armed = (t_axis >= a_idx[:, :, None]) & (t_axis < c_end)
         # power-iterate the worst-case (full-span cumulative row)
         # linearization for a sound step size
         xc = torch.randn(op.q_shape, dtype=op.dtype, device=op.device)
         xc /= torch.linalg.vector_norm(xc)
         lam_c = 0.0
         for _ in range(6):
-            b = torch.where(c_active, op.conv(xc),
+            b = torch.where(c_ref, op.conv(xc),
                             torch.zeros((), dtype=op.dtype, device=op.device))
             row = b.sum(dim=2)
             yc = op.conv_adjoint(
-                torch.where(c_active, row[:, :, None].expand_as(b),
+                torch.where(c_ref, row[:, :, None].expand_as(b),
                             torch.zeros((), dtype=op.dtype,
                                         device=op.device)))
             lam_c = float(torch.linalg.vector_norm(yc))
@@ -233,16 +240,23 @@ def solve_fista(
             )
             if bool(viol.any()):
                 grad += beta_quiet * op.conv_adjoint(viol)
-        if c_active is not None:
+        if c_ref is not None:
             zero = torch.zeros((), dtype=op.dtype, device=op.device)
-            C = torch.cumsum(torch.where(c_active, block_pred, zero), dim=2)
-            peak, arg = C.max(dim=2)
-            cviol = torch.clamp(peak - censor_threshold, min=0.0)
+            C = torch.cumsum(torch.where(c_ref, block_pred, zero), dim=2)
+            neg_inf = torch.tensor(float("-inf"), dtype=op.dtype,
+                                   device=op.device)
+            Cm = torch.where(c_armed, C, neg_inf)
+            peak, arg = Cm.max(dim=2)
+            cviol = torch.where(
+                torch.isfinite(peak),
+                torch.clamp(peak - censor_threshold, min=0.0),
+                zero,
+            )
             if bool(cviol.any()):
                 t_axis_c = torch.arange(
                     C.shape[2], device=op.device)[None, None, :]
                 upto = t_axis_c <= arg[:, :, None]
-                g_c = torch.where(c_active & upto,
+                g_c = torch.where(c_ref & upto,
                                   cviol[:, :, None].expand_as(C), zero)
                 grad += beta_censor * op.conv_adjoint(g_c)
         if lam_l2 > 0:

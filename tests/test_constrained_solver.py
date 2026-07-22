@@ -545,8 +545,9 @@ class TestCensorRunningMax:
         nx, ny, nt = 3, 3, 20
         windows = [LatchWindow(1, 1, 300.0, 330.0, 5.0)]
         op = ZSOperator(kernel, (nx, ny, nt), windows, adc_hold_delay=B)
-        censor_start = np.zeros((nx, ny), dtype=np.int64)
-        censor_start[1, 1] = nt          # the fired pixel is not censored
+        censor_reset = np.zeros((nx, ny), dtype=np.int64)
+        censor_arm = np.zeros((nx, ny), dtype=np.int64)
+        censor_arm[1, 1] = nt            # the fired pixel is not censored
 
         def silent_peak(q):
             block = op.conv(q)
@@ -563,8 +564,38 @@ class TestCensorRunningMax:
         # while some data fit is retained.
         q_free = solve_fista(op, alpha=0.0, n_iter=200)
         q_cen = solve_fista(op, alpha=0.0, n_iter=300,
-                            beta_censor=10.0, censor_start=censor_start,
+                            beta_censor=10.0, censor_reset=censor_reset,
+                            censor_arm=censor_arm, censor_end=nt,
                             censor_threshold=2.0)
         assert silent_peak(q_free) > 4.0          # censoring is binding
         assert silent_peak(q_cen) <= 2.3          # soft penalty ~ thr
         assert op.forward(q_cen)[0] > 1.0         # data not abandoned
+
+    def test_censor_armed_window_and_reset_reference(self):
+        """The max is taken only over the ARMED window, and the
+        cumulative is referenced at censor_reset — bins before the
+        reset do not count toward the censored statistic."""
+        from unfoldlarpix.constrained_solver import ZSOperator
+
+        kernel = np.zeros((3, 3, 5))
+        kernel[1, 1, 0] = 1.0            # pure center collection, prompt
+        B = 30
+        nx, ny, nt = 3, 3, 20
+        windows = [LatchWindow(0, 0, 0.0, 30.0, 0.0)]  # dummy row
+        op = ZSOperator(kernel, (nx, ny, nt), windows, adc_hold_delay=B)
+        # charge 10 ke at bin 3 (before reset) and 1 ke at bin 12
+        q = np.zeros(op.q_shape)
+        q[1, 1, 3] = 10.0
+        q[1, 1, 12] = 1.0
+        bp = op.conv(q)
+        censor_reset = np.full((nx, ny), nt, dtype=np.int64)
+        censor_arm = np.full((nx, ny), nt, dtype=np.int64)
+        censor_reset[1, 1] = 8           # reset AFTER the 10-ke deposit
+        censor_arm[1, 1] = 10
+        t_axis = np.arange(nt)[None, None, :]
+        C = np.cumsum(np.where(t_axis >= censor_reset[:, :, None], bp, 0.0),
+                      axis=2)
+        armed = (t_axis >= censor_arm[:, :, None]) & (t_axis < nt)
+        peak = np.where(armed, C, -np.inf).max(axis=2)
+        # the 10 ke before the reset is excluded: peak sees only the 1 ke
+        assert peak[1, 1] == pytest.approx(1.0, abs=1e-9)

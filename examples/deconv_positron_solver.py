@@ -374,38 +374,59 @@ def main() -> None:
                 quiet_mask[px, py, :] = False
         thr = float(readout_config.threshold)
 
-        # Exact ZS censoring: per pixel, the block bin where its silent
-        # span starts — 0 for never-fired pixels (the discriminator was
-        # armed the whole time), the post-last-sequence CSA restart bin
-        # for fired ones.  The censored statistic is the running MAX of
-        # the restarted cumulative (the response is bipolar, so the
-        # total does not bound the peak).
+        # Exact ZS censoring (corrected 2026-07-21, FINDINGS item 19).
+        # Per pixel the censored statistic is the running MAX of the
+        # cumulative REFERENCED at the CSA restart (last latch +
+        # csa_reset; the response is bipolar so the peak, not the
+        # total, is the statistic), with the max taken ONLY over the
+        # ARMED window (from the discriminator re-arm, hits col4, to
+        # the end of the readout-covered range).  hits col3 is the
+        # FIRST latch (trigger + B); the last latch is DERIVED as
+        # trigger + nburst*B with nburst from the data columns —
+        # using col3 as "last latch" was the bug that made the penalty
+        # count bursts 2..n as silence.
         censor_kwargs = {}
         if args.beta_censor > 0:
             nt_b = block_shape[2]
-            censor_start = np.zeros(block_shape[:2], dtype=np.int64)
-            last_latch: dict[tuple[int, int], float] = {}
+            nburst_c = event.hits.data.shape[1] - 3
+            npad_bins = 50           # process_event_deconvolution npadbin
+            # never-fired pixels: armed the whole readout-covered span
+            censor_reset = np.full(block_shape[:2], npad_bins,
+                                   dtype=np.int64)
+            censor_arm = np.full(block_shape[:2], npad_bins,
+                                 dtype=np.int64)
+            last_seq: dict[tuple[int, int], tuple[float, float]] = {}
             for row in event.hits.location:
                 px = int(row[0] - block_offset[0])
                 py = int(row[1] - block_offset[1])
                 if not (0 <= px < block_shape[0]
                         and 0 <= py < block_shape[1]):
                     continue
-                t_loc = float(row[3]) - float(block_offset[2])
+                trig = float(row[2]) - float(block_offset[2])
+                rearm = float(row[4]) - float(block_offset[2])
                 key = (px, py)
-                last_latch[key] = max(last_latch.get(key, -np.inf), t_loc)
-            reset = float(readout_config.csa_reset_time or 0)
-            for (px, py), t_loc in last_latch.items():
-                s = int(np.ceil((t_loc + reset) / B))
-                censor_start[px, py] = min(max(s, 0), nt_b)
-            n_tail = sum(1 for v in censor_start[~quiet_mask[:, :, 0]]
-                         if v < nt_b)
+                if key not in last_seq or trig > last_seq[key][0]:
+                    last_seq[key] = (trig, rearm)
+            reset_t = float(readout_config.csa_reset_time or 0)
+            for (px, py), (trig, rearm) in last_seq.items():
+                last_latch = trig + nburst_c * B
+                censor_reset[px, py] = min(
+                    max(int(np.ceil((last_latch + reset_t) / B)), 0), nt_b)
+                censor_arm[px, py] = min(
+                    max(int(np.ceil(rearm / B)), 0), nt_b)
+            censor_end = nt_b - npad_bins
+            n_tail = sum(1 for v in censor_arm[~quiet_mask[:, :, 0]]
+                         if v < censor_end)
             print(f"  censoring: {int(quiet_mask[:, :, 0].sum())} silent "
-                  f"pixels (full span) + {n_tail} fired-pixel tails, "
-                  f"beta {args.beta_censor}")
+                  f"pixels + {n_tail} fired-pixel tails "
+                  f"(reset=last latch+{reset_t:g}, arm=col4, "
+                  f"end=nt-{npad_bins}), beta {args.beta_censor}, "
+                  f"margin {args.censor_margin:g} ke")
             censor_kwargs = {
                 "beta_censor": args.beta_censor,
-                "censor_start": censor_start,
+                "censor_reset": censor_reset,
+                "censor_arm": censor_arm,
+                "censor_end": censor_end,
                 "censor_threshold": thr + args.censor_margin,
             }
 
