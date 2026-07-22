@@ -165,6 +165,7 @@ def solve_fista(
     censor_arm: np.ndarray | None = None,
     censor_end: int | None = None,
     censor_threshold: float = np.inf,
+    censor_norm: str = "l2",
     n_iter: int = 200,
     q0: np.ndarray | None = None,
     L: float | None = None,
@@ -193,24 +194,27 @@ def solve_fista(
         t_axis = torch.arange(nt_b, device=op.device)[None, None, :]
         c_ref = t_axis >= r_idx[:, :, None]
         c_armed = (t_axis >= a_idx[:, :, None]) & (t_axis < c_end)
-        # power-iterate the worst-case (full-span cumulative row)
-        # linearization for a sound step size
-        xc = torch.randn(op.q_shape, dtype=op.dtype, device=op.device)
-        xc /= torch.linalg.vector_norm(xc)
-        lam_c = 0.0
-        for _ in range(6):
-            b = torch.where(c_ref, op.conv(xc),
-                            torch.zeros((), dtype=op.dtype, device=op.device))
-            row = b.sum(dim=2)
-            yc = op.conv_adjoint(
-                torch.where(c_ref, row[:, :, None].expand_as(b),
-                            torch.zeros((), dtype=op.dtype,
-                                        device=op.device)))
-            lam_c = float(torch.linalg.vector_norm(yc))
-            if lam_c <= 0:
-                break
-            xc = yc / lam_c
-        L_total = L_total + 2.0 * beta_censor * max(lam_c, 1.0)
+        if censor_norm == "l2":
+            # power-iterate the worst-case (full-span cumulative row)
+            # linearization for a sound step size
+            xc = torch.randn(op.q_shape, dtype=op.dtype, device=op.device)
+            xc /= torch.linalg.vector_norm(xc)
+            lam_c = 0.0
+            for _ in range(6):
+                b = torch.where(c_ref, op.conv(xc),
+                                torch.zeros((), dtype=op.dtype,
+                                            device=op.device))
+                row = b.sum(dim=2)
+                yc = op.conv_adjoint(
+                    torch.where(c_ref, row[:, :, None].expand_as(b),
+                                torch.zeros((), dtype=op.dtype,
+                                            device=op.device)))
+                lam_c = float(torch.linalg.vector_norm(yc))
+                if lam_c <= 0:
+                    break
+                xc = yc / lam_c
+            L_total = L_total + 2.0 * beta_censor * max(lam_c, 1.0)
+        # censor_norm == "l1": zero curvature — no step inflation
     step = 1.0 / (L_total * 1.05)
 
     sw = None
@@ -253,11 +257,13 @@ def solve_fista(
                 zero,
             )
             if bool(cviol.any()):
+                coeff = (cviol if censor_norm == "l2"
+                         else (cviol > 0).to(op.dtype))
                 t_axis_c = torch.arange(
                     C.shape[2], device=op.device)[None, None, :]
                 upto = t_axis_c <= arg[:, :, None]
                 g_c = torch.where(c_ref & upto,
-                                  cviol[:, :, None].expand_as(C), zero)
+                                  coeff[:, :, None].expand_as(C), zero)
                 grad += beta_censor * op.conv_adjoint(g_c)
         if lam_l2 > 0:
             grad += 2.0 * lam_l2 * y

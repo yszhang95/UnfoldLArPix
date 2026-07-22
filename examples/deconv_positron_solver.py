@@ -62,6 +62,11 @@ def parse_args() -> argparse.Namespace:
                         "the discriminator saw signal+noise, so silence "
                         "only excludes signal peaks above thr + k*sigma "
                         "(censored-Gaussian hinge).  ~2 ke- = 2 sigma.")
+    p.add_argument("--censor-norm", choices=["l2", "l1"], default="l2",
+                   help="Censor hinge: l2 = squared (soft, inflates the "
+                        "step bound ~4x -> needs more iterations); l1 = "
+                        "linear (exact penalty, zero curvature, no step "
+                        "cost; subgradient like the TV term).")
     p.add_argument("--irl1-passes", type=int, default=0,
                    help="Reweighted-L1 passes after the ladder: "
                         "alpha_i = a * s / (q_i + s) — bright charges are "
@@ -428,6 +433,7 @@ def main() -> None:
                 "censor_arm": censor_arm,
                 "censor_end": censor_end,
                 "censor_threshold": thr + args.censor_margin,
+                "censor_norm": args.censor_norm,
             }
 
         def to_fit_grid(arr: np.ndarray) -> np.ndarray:

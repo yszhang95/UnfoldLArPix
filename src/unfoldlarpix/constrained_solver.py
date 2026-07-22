@@ -345,6 +345,7 @@ def solve_fista(
     censor_arm: np.ndarray | None = None,
     censor_end: int | None = None,
     censor_threshold: float = np.inf,
+    censor_norm: str = "l2",
     n_iter: int = 200,
     q0: np.ndarray | None = None,
     L: float | None = None,
@@ -385,6 +386,13 @@ def solve_fista(
             ``censor_threshold`` should include a noise margin
             (thr + ~3 sigma).  WARNING: the last latch is
             trigger + nburst*B (hits col3 is the FIRST latch).
+            ``censor_norm``: "l2" (default) = squared hinge
+            beta/2*relu(M-thr)^2 — soft, tolerates residual violation,
+            adds curvature to the step bound (needs ~4x iterations);
+            "l1" = linear hinge beta*relu(M-thr) — exact penalty
+            (violations driven to zero for large enough beta), zero
+            curvature so the step size is NOT inflated (treated as a
+            subgradient, like the TV term).
         quiet_mask: Bool block-shape mask of bins whose window integral
             must stay below ``quiet_threshold`` (unfired discriminators).
         n_iter: FISTA iterations.
@@ -416,24 +424,27 @@ def solve_fista(
         censor_ref = t_axis >= r_idx[:, :, None]          # cumulative ref
         censor_armed = ((t_axis >= a_idx[:, :, None])
                         & (t_axis < c_end))               # where max is taken
-        # power-iterate the worst-case linearization (full-span
-        # cumulative row per pixel) for a sound step size
-        rng_c = np.random.default_rng(1)
-        xc = rng_c.standard_normal(op.q_shape)
-        xc /= np.linalg.norm(xc)
-        lam_c = 0.0
-        for _ in range(6):
-            b = np.where(censor_ref, op.conv(xc), 0.0)
-            row = b.sum(axis=2)
-            yc = op.conv_adjoint(
-                np.where(censor_ref, row[:, :, None], 0.0))
-            lam_c = float(np.linalg.norm(yc))
-            if lam_c <= 0:
-                break
-            xc = yc / lam_c
-        # extra 2x margin: the argmax row of a shorter span can couple
-        # more coherently to the (bipolar) kernel than the full span
-        L_total = L_total + 2.0 * beta_censor * max(lam_c, 1.0)
+        if censor_norm == "l2":
+            # power-iterate the worst-case linearization (full-span
+            # cumulative row per pixel) for a sound step size
+            rng_c = np.random.default_rng(1)
+            xc = rng_c.standard_normal(op.q_shape)
+            xc /= np.linalg.norm(xc)
+            lam_c = 0.0
+            for _ in range(6):
+                b = np.where(censor_ref, op.conv(xc), 0.0)
+                row = b.sum(axis=2)
+                yc = op.conv_adjoint(
+                    np.where(censor_ref, row[:, :, None], 0.0))
+                lam_c = float(np.linalg.norm(yc))
+                if lam_c <= 0:
+                    break
+                xc = yc / lam_c
+            # extra 2x margin: the argmax row of a shorter span can
+            # couple more coherently to the (bipolar) kernel
+            L_total = L_total + 2.0 * beta_censor * max(lam_c, 1.0)
+        # censor_norm == "l1": linear hinge has zero curvature — no
+        # step-size inflation (subgradient, like the TV term)
     if lam_spectral > 0 and spectral_weight is not None:
         L_total = L_total + 2.0 * lam_spectral * float(np.max(spectral_weight))
     step = 1.0 / (L_total * 1.05)
@@ -467,10 +478,13 @@ def solve_fista(
                              np.clip(peak - censor_threshold, 0.0, None),
                              0.0)
             if cviol.any():
-                # d(peak)/d(block[t]) = 1 for t in [reset, argmax]
+                # d(peak)/d(block[t]) = 1 for t in [reset, argmax];
+                # chain: l2 hinge carries viol, l1 hinge carries 1
+                coeff = (cviol if censor_norm == "l2"
+                         else (cviol > 0).astype(np.float64))
                 upto = t_axis <= arg[:, :, None]
                 g_c = np.where(censor_ref & upto,
-                               cviol[:, :, None], 0.0)
+                               coeff[:, :, None], 0.0)
                 grad += beta_censor * op.conv_adjoint(g_c)
         if lam_l2 > 0:
             grad += 2.0 * lam_l2 * y

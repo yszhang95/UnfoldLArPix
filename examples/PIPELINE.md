@@ -47,10 +47,22 @@ This is the **adopted default configuration** (rationale in
 | `--split-trigger` | model the trigger-window overshoot as its own row |
 | `--pad-pixels 12` | spatial pad so ±12-pixel response coupling has room (no edge ghosts) |
 | `--support-eps 0.3 --support-dilate 1` | ROI from the smoothed FFT-deconv warm start |
-| `--beta-quiet 1.0` | quiet-window inequality penalty (silence = charge stayed below threshold) |
+| `--beta-quiet 1.0` | quiet-window inequality penalty (silence = charge stayed below threshold) — **redundant here, see note** |
 | `--ladder-iters 150` | FISTA iterations per ladder stage |
 | `--centroid-window 1` | sub-bin time position = local reco centroid (halves ghost) |
 | `--backend torch --device cuda` | GPU (float32, ~20× CPU); drop to `--backend numpy` if no GPU |
+
+> **Redundancy note (FINDINGS item 18).** With this deconv support,
+> two knobs contribute nothing and can be dropped with zero metric
+> change: **`--beta-quiet`** (the support already excludes the silent
+> pixels the inequality would act on — measured identical at 1.0 vs
+> 0.0 on nb4 and nb1) and the **second Gaussian smear** inside the
+> support construction (`deconv_q` already carries the analysis
+> Gaussian; direct thresholding of `clip(deconv_q)` would be
+> equivalent). Deghosting is carried by **support + positivity + the
+> L1 ladder**. The flags are kept in the command for generality (they
+> matter only with a wide or absent support); the code is unchanged
+> pending a refactor.
 
 The output NPZ is **self-contained**: it holds the smeared truth
 (`smeared_true`) alongside the reconstruction (`deconv_q`,
