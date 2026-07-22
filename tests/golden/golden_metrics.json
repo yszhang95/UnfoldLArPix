@@ -1,0 +1,42 @@
+{
+  "nb4_adopted_centroid_w1": {
+    "config": "ladder 1.0/0.5/0.3 + seed 0.5 + soft 2 + split-trigger + pad12 + support eps0.3 d1 + quiet 1.0 + iters150 + centroid w1",
+    "metrics": {
+      "integral_pct": -2.094,
+      "pearson_r": 0.9816,
+      "slope": 0.99796,
+      "spec_dev": 0.1355,
+      "ghost_frac": 0.04487,
+      "ghost_adj_frac": 0.04427,
+      "ghost_iso_frac": 0.0006,
+      "ghost_iso_charge": 3.54,
+      "true_killed": 311.56,
+      "n_voxels_gt_thr": 10030
+    },
+    "signatures": {
+      "q_sharp_sum": 31749.1,
+      "q_sharp_nnz": 2805,
+      "q_sharp_max": 128.961
+    }
+  },
+  "nb1_censorL2_600_centroid_w2": {
+    "config": "adopted + beta-censor 1.0 margin 3 (L2) + iters600 + centroid w2 (post-hoc)",
+    "metrics": {
+      "integral_pct": 0.717,
+      "pearson_r": 0.9484,
+      "slope": 0.99655,
+      "spec_dev": 0.1732,
+      "ghost_frac": 0.08013,
+      "ghost_adj_frac": 0.0763,
+      "ghost_iso_frac": 0.00383,
+      "ghost_iso_charge": 27.04,
+      "true_killed": 492.65,
+      "n_voxels_gt_thr": 10183
+    },
+    "signatures": {
+      "q_sharp_sum": 32660.7,
+      "q_sharp_nnz": 2569,
+      "q_sharp_max": 134.938
+    }
+  }
+}
