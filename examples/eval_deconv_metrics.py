@@ -47,7 +47,9 @@ def evaluate(npz_path: Path, corr_threshold: float = 0.5,
              universal: bool = False,
              content_offset_ticks: float = 0.0,
              deposit_shape: str = "linear",
-             use_fitted_offsets: bool = False) -> dict:
+             use_fitted_offsets: bool = False,
+             sigma_time: float = 0.005,
+             sigma_pxl: float = 0.2) -> dict:
     if universal:
         time_offsets = None
         if use_fitted_offsets:
@@ -63,6 +65,8 @@ def evaluate(npz_path: Path, corr_threshold: float = 0.5,
             npz_path, truth_npz=truth_npz,
             content_offset_ticks=content_offset_ticks,
             deposit_shape=deposit_shape,
+            sigma_time=sigma_time,
+            sigma_pxl=sigma_pxl,
             time_offsets=time_offsets,
         )
     else:
@@ -123,6 +127,13 @@ def main() -> None:
                    help="Universal gaussian mode: deposit each charge at "
                         "its FITTED sub-bin position (deconv_q_offsets "
                         "from --subbin-rounds) instead of the bin center.")
+    p.add_argument("--sigma-time", type=float, default=0.005,
+                   help="Universal gaussian mode: reco deposit filter width "
+                        "[cycles/tick]; MUST match the truth smearing "
+                        "(time-domain sigma = 1/(2 pi sigma_time) ticks).")
+    p.add_argument("--sigma-pxl", type=float, default=0.2,
+                   help="Universal gaussian mode: spatial filter width "
+                        "[cycles/pixel]; must match the truth smearing.")
     p.add_argument("--json", default=None, help="Optional output JSON path.")
     args = p.parse_args()
 
@@ -140,7 +151,9 @@ def main() -> None:
                                   universal=args.universal_grid,
                                   content_offset_ticks=args.content_offset_ticks,
                                   deposit_shape=args.deposit_shape,
-                                  use_fitted_offsets=args.use_fitted_offsets)
+                                  use_fitted_offsets=args.use_fitted_offsets,
+                                  sigma_time=args.sigma_time,
+                                  sigma_pxl=args.sigma_pxl)
 
     header = (f"{'label':<28} {'int%':>7} {'r':>8} {'slope':>7} "
               f"{'specdev':>8} {'ghost%':>7} {'gAdj%':>6} {'gIso%':>6} "
