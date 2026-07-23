@@ -1,76 +1,58 @@
 #!/bin/bash
 # =====================================================================
-# ZS charge-unfolding pipeline — end to end, one event.
+# ZS charge-unfolding pipeline — end to end, one event, config-driven.
 #
-#   input NPZ  ->  constrained-solver unfold  ->  truth/reco metrics
-#              ->  2D correlation plot  ->  3-view event-display PNG
+#   input NPZ -> framework unfold -> metrics -> correlation plot
+#             -> 3-view event display
 #
-# The solver output is SELF-CONTAINED (smeared truth + reco in one
-# file), so the metrics/plot steps need no external truth reference.
+# Usage:   ./run_pipeline.sh INPUT.npz [TPC] [TAG]
+# Example: ./run_pipeline.sh \
+#            data/pgun_positron_3gev_tred_noises_effq_nt1_thres5k_nburst4.npz 0 nb4
 #
-# Usage:
-#   ./run_pipeline.sh INPUT.npz [TPC] [EVENT] [TAG]
-#
-# Example:
-#   ./run_pipeline.sh \
-#     data/pgun_positron_3gev_tred_noises_effq_nt1_thres5k_nburst4.npz 0 0 nb4
-#
-# Requirements: the tred venv (numpy/scipy/matplotlib + torch/CUDA).
-# For the interactive 3D HTML also: pip install plotly (optional; the
-# PNG projection is produced regardless).
+# The unfold step instantiates configs/adopted_nb4.yaml with your input
+# (a copy of the resolved config is embedded in the output NPZ).  The
+# output is SELF-CONTAINED (smeared truth included), so the analysis
+# steps need no external truth reference.
+# Requirements: tred venv (torch + CUDA).  Optional: plotly for the
+# interactive 3D HTML.
 # =====================================================================
 set -e
 cd "$(dirname "$0")"
+REPO=$(cd .. && pwd)
 
-# ---- configuration ---------------------------------------------------
-INPUT=${1:?"usage: run_pipeline.sh INPUT.npz [TPC] [EVENT] [TAG]"}
+INPUT=${1:?"usage: run_pipeline.sh INPUT.npz [TPC] [TAG]"}
 TPC=${2:-0}
-EVENT=${3:-0}
-TAG=${4:-run}
+TAG=${3:-run}
 
 PY=/home/yousen/Documents/NDLAr2x2/tred/.venv/bin/python
-FR=/srv/storage1/yousen/tred_workspace/response_44_v2a_full_25x25pixel_tred.npz
 OUT=analysis_output/pipeline_${TAG}
 mkdir -p "$OUT"
 
-SOLVED="$OUT/deconv_positron_solver_${TAG}_event_${TPC}_${EVENT}.npz"
+echo "############ 1/4  UNFOLD (framework) ####################"
+CFG=$OUT/job_${TAG}.yaml
+sed -e "s|input: .*npz|input: examples/$INPUT|" \
+    -e "s|tpc: 0|tpc: $TPC|" \
+    -e "s|out_dir: .*|out_dir: examples/$OUT|" \
+    -e "s|prefix: .*|prefix: $TAG|" \
+    -e "s|WriteCharges:|WriteCharges:\n      embed_truth: true|" \
+    "$REPO/configs/adopted_nb4.yaml" > "$CFG"
+(cd "$REPO" && PYTHONPATH=src $PY -m unfoldlarpix.fwk.runner "examples/$CFG")
 
-# ADOPTED DEFAULT CONFIG (see report/FINDINGS.md).  Fixed knobs:
-#   soft-ladder homotopy (alpha 1.0 -> 0.5 -> 0.3), strong-q seeding,
-#   trigger split, 12-pixel spatial pad, deconv-support ROI, per-bin
-#   quiet-window penalty, reco-centroid sub-bin positions (window 1).
-SOLVER_ARGS="\
-  --alpha-ladder 1.0 0.5 0.3 --seed-cut 0.5 --soft-seed-len 2 \
-  --split-trigger --pad-pixels 12 --support-eps 0.3 --support-dilate 1 \
-  --beta-quiet 1.0 --ladder-iters 150 --centroid-window 1 \
-  --backend torch --device cuda"
-
-echo "############ 1/4  UNFOLD  ###############################"
-PYTHONPATH=../src $PY -u deconv_positron_solver.py \
-  --input-file "$INPUT" --field-response "$FR" \
-  --tpc-id "$TPC" $SOLVER_ARGS \
-  --output-dir "$OUT" --output-suffix "$TAG"
+SOLVED=$(ls -t $OUT/${TAG}_event_*.npz | head -1)
 
 echo "############ 2/4  METRICS  ##############################"
-# universal grid (edges at global multiples of adc_hold_delay),
-# Gaussian-shape deposit, sub-bin centroid positions applied.
-PYTHONPATH=../src $PY eval_deconv_metrics.py "$SOLVED" \
-  --labels "$TAG" \
+PYTHONPATH=../src $PY eval_deconv_metrics.py "$SOLVED" --labels "$TAG" \
   --universal-grid --deposit-shape gaussian --use-fitted-offsets \
   --json "$OUT/metrics_${TAG}.json"
 
 echo "############ 3/4  CORRELATION PLOT  #####################"
-PYTHONPATH=../src $PY corr2d_report.py "$SOLVED" \
-  --labels "$TAG" --out "$OUT/corr2d_${TAG}.png"
+PYTHONPATH=../src $PY corr2d_report.py "$SOLVED" --labels "$TAG" \
+  --out "$OUT/corr2d_${TAG}.png"
 
 echo "############ 4/4  EVENT DISPLAY  ########################"
-PYTHONPATH=../src $PY event_display_3d.py "$SOLVED" \
-  --labels "$TAG" --out "$OUT/event_${TAG}.html"
+PYTHONPATH=../src $PY event_display_3d.py "$SOLVED" --labels "$TAG" \
+  --out "$OUT/event_${TAG}.html"
 
 echo
-echo "DONE.  Outputs in $OUT/:"
-echo "  metrics_${TAG}.json     scalar metrics (also printed above)"
-echo "  corr2d_${TAG}.png       truth vs reco 2D correlation"
-echo "  event_${TAG}.png        3-view projections (truth + reco + ghosts)"
-echo "  event_${TAG}.html       interactive 3D (if plotly installed)"
-echo "  $(basename "$SOLVED")  self-contained solver output (~1.9 GB)"
+echo "DONE.  Outputs in $OUT/:  metrics_${TAG}.json  corr2d_${TAG}.png"
+echo "       event_${TAG}.png(.html)  $(basename "$SOLVED")  job_${TAG}.yaml"

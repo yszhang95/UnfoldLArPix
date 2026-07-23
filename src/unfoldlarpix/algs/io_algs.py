@@ -95,6 +95,14 @@ class WriteCharges(Algorithm):
         if u is not None:
             payload["deconv_q_offsets"] = (u * float(B)).astype(np.float32)
 
+        if bool(self.props.get("embed_truth", False)):
+            # self-contained output: eval/plots need no external truth ref
+            from ..deconv_workflow import smear_effective_charge
+            smear_offset, smeared = smear_effective_charge(
+                ev, sigma_time=sigma, sigma_pixel=sigma_pxl)
+            payload["smeared_true"] = smeared
+            payload["smear_offset"] = np.array(smear_offset)
+
         out_dir = Path(self.props["out_dir"]).expanduser()
         out_dir.mkdir(parents=True, exist_ok=True)
         prefix = self.props.get("prefix", "unfold")

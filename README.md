@@ -21,21 +21,33 @@ One event end to end (unfold → truth/reco metrics → correlation plot →
 event display) in ~30 s on GPU.  **`examples/PIPELINE.md`** documents
 every stage and knob.
 
-## Layout
+## Layout (torch-only, Gaudi-style framework)
 
 - `src/unfoldlarpix/`
-  - `constrained_solver.py` / `constrained_solver_torch.py` — the ZS
-    solver (numpy / GPU backends): latch-window forward operator, FISTA,
-    soft-ladder homotopy, censoring, sub-bin centroid estimator.
-  - `burst_processor*.py`, `deconv_workflow.py`, `deconv.py` — burst
-    merging, template compensation, FFT deconvolution (warm-start path;
-    see `README_burst_processor.md`).
-  - `data_loader.py`, `smear_truth.py` — tred NPZ IO, truth smearing.
-- `examples/` — drivers, evaluation (`eval_deconv_metrics.py`,
-  universal-grid protocol), plotting, `PIPELINE.md`.
-- `tests/` — unit tests (`pytest`; the solver suites are current).
-- `docs/archive/` — superseded design
-  notes and analysis-session reports (see its README).
+  - `fwk/` — write-once EventStore, Algorithm/Service bases, registry,
+    YAML job runner.
+  - `algs/`, `services/` — the pipeline components (LoadEvent,
+    FFTWarmStart, BuildMeasurement, BuildSupport, Solve,
+    CentroidPositions, WriteCharges; compute/detector/rng services).
+  - `model/` — the single (torch) ZS operator, GPU FFT warm start,
+    `conventions.py` (every tick/bin/phase convention, one place).
+  - `terms/`, `solve/` — objective terms (data, quiet, censor + the
+    coordinatewise prox) with autograd-checked gradients; FISTA engine;
+    Ladder/FinalRefit strategies on an explicit SolveState.
+  - `eval/` — the universal-grid evaluation protocol.
+  - `io/` — typed hits accessors (column semantics validated);
+    `data_loader.py` tred NPZ IO.
+  - `constrained_solver.py` — measurement building + numpy utilities
+    (slimmed; the numpy solver was removed).
+  - `burst_processor*.py`, `deconv_workflow.py` — template compensation
+    (CPU part of the warm start).
+- `configs/` — YAML job configs (`adopted_nb4.yaml`, `sparse_nb1.yaml`
+  = the golden-regression references).
+- `examples/` — thin CLIs (evaluation, plots), `PIPELINE.md`,
+  `legacy/` (pre-framework study scripts, provenance only).
+- `tests/` — unit + golden-regression tests (`pytest`; needs torch —
+  run under the tred venv).
+- `docs/archive/` — superseded design notes (see its README).
 
 ## Results & provenance
 
@@ -54,6 +66,6 @@ the analysis archive (not in this repo):
 ## Development
 
 ```bash
-pytest             # run tests
-ruff check . --fix # lint
+PYTHONPATH=src <tred-venv>/python -m pytest   # tests need torch
+ruff check . --fix                            # lint
 ```
