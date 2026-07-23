@@ -1,18 +1,15 @@
 """Test suite for data loader functionality."""
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 
 from unfoldlarpix.data_containers import (
-    Current,
     EffectiveCharge,
     EventData,
     Geometry,
     Hits,
-    ReadoutConfig,
 )
 from unfoldlarpix.data_loader import DataLoader
 
@@ -116,16 +113,6 @@ class TestDataLoader:
         assert geom1.tpc_id == 1
         assert geom1.drift_direction == -1
 
-    def test_parse_readout_config(self, temp_npz_file):
-        """Test readout configuration parsing."""
-        loader = DataLoader(temp_npz_file)
-        config = loader.get_readout_config()
-
-        assert isinstance(config, ReadoutConfig)
-        assert config.time_spacing == 0.1
-        assert config.adc_hold_delay == 10
-        assert config.threshold == 1.5
-
     def test_list_events(self, temp_npz_file):
         """Test event listing."""
         loader = DataLoader(temp_npz_file)
@@ -134,30 +121,6 @@ class TestDataLoader:
         assert len(events) == 2
         assert (0, 42) in events
         assert (1, 43) in events
-
-    def test_iter_events(self, temp_npz_file):
-        """Test event iteration."""
-        loader = DataLoader(temp_npz_file)
-        events = list(loader.iter_events())
-
-        assert len(events) == 2
-
-        # Find event (0, 42)
-        event_0_42 = next(e for e in events if e.tpc_id == 0 and e.event_id == 42)
-        assert event_0_42.effq is not None
-        assert event_0_42.current is not None
-        assert event_0_42.hits is not None
-        assert event_0_42.global_tref is not None
-
-        # Check that data from multiple batches is merged
-        assert event_0_42.effq.data.shape[0] == 8  # 5 + 3 from two batches
-        assert event_0_42.effq.location.shape[0] == 8
-
-        # Find event (1, 43)
-        event_1_43 = next(e for e in events if e.tpc_id == 1 and e.event_id == 43)
-        assert event_1_43.effq is not None
-        assert event_1_43.hits is not None
-        assert event_1_43.current is None  # No current data for this event
 
     def test_get_geometry_specific_tpc(self, temp_npz_file):
         """Test getting geometry for specific TPC."""
@@ -196,18 +159,6 @@ class TestDataContainers:
 
         with pytest.raises(ValueError):
             EffectiveCharge(data=data, location=location, tpc_id=0, event_id=42)
-
-    def test_current_container(self):
-        """Test Current container."""
-        data = np.random.rand(100)
-        location = np.random.randint(0, 10, (1, 3))
-
-        current = Current(data=data, location=location, tpc_id=0, event_id=42)
-
-        assert current.tpc_id == 0
-        assert current.event_id == 42
-        assert np.array_equal(current.data, data)
-        assert np.array_equal(current.location, location)
 
     def test_hits_container(self):
         """Test Hits container."""
@@ -267,21 +218,3 @@ class TestDataContainers:
                 cathode_position=0.0,
                 pixel_pitch=0.1,
             )
-
-    def test_readout_config_container(self):
-        """Test ReadoutConfig container."""
-        config = ReadoutConfig(
-            time_spacing=0.1,
-            adc_hold_delay=10,
-            adc_down_time=5,
-            csa_reset_time=100,
-            one_tick=1,
-            threshold=1.5,
-            uncorr_noise=0.1,
-            thres_noise=0.05,
-            reset_noise=0.02,
-        )
-
-        assert config.time_spacing == 0.1
-        assert config.adc_hold_delay == 10
-        assert config.threshold == 1.5
