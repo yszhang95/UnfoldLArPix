@@ -32,6 +32,34 @@ def solver_time_shift(adc_hold_delay: int) -> int:
     return -adc_hold_delay + adc_hold_delay // 2
 
 
+def burst_tau_min(readout_config) -> int:
+    """Physical floor [ticks] for the burst-merge gap ``tau``.
+
+    ``tau`` is the largest trigger-to-trigger gap at which consecutive
+    triggers are still treated as ONE continuous charge deposit and merged
+    by dead-time compensation (charge-conserving); larger gaps go to
+    template (shape) compensation.  Its floor is set by the readout: after
+    a latch the CSA is dead for ``adc_down_time`` and re-arms at
+    ``hold + adc_down_time + one_tick``; if charge is still above threshold
+    it re-fires immediately, so the smallest possible gap of a genuine
+    continuous re-trigger is::
+
+        adc_hold_delay + adc_down_time + one_tick
+
+    Below this floor such immediate re-triggers are misrouted to template
+    compensation, which cannot place a sub-``adc_hold_delay`` pre-trigger
+    ramp and DELETES ~threshold of charge per re-trigger (FINDINGS: burst
+    template charge non-conservation).  ``tau`` may be raised ABOVE the
+    floor (up to ``2*adc_hold_delay``, see ``resolve_burst_tau``) to match a
+    broader field response — a wide waveform keeps a pixel's cloud alive
+    longer, so re-triggers separated by more than the floor can still
+    belong to one deposit and should merge.
+    """
+    return int(readout_config.adc_hold_delay
+               + readout_config.adc_down_time
+               + readout_config.one_tick)
+
+
 # ---------------------------------------------------------------------
 # Hits column semantics  (see io/hits.py for the enforced accessors)
 # ---------------------------------------------------------------------

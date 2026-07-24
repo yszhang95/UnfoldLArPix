@@ -32,11 +32,13 @@ class FFTWarmStart(Algorithm):
         rc = store.get("readout_config")
         comp = self.services["compute"]
         prepared = self.services["detector"].prepared(rc.adc_hold_delay)
+        tau = self.props.get("tau")   # None -> physical floor (resolve_burst_tau)
         ws = fft_warm_start(
             ev.hits, rc, prepared,
             sigma_time=float(self.props.get("sigma_time", 0.005)),
             sigma_pixel=float(self.props.get("sigma_pixel", 0.2)),
             pad_pixels=int(self.props.get("pad_pixels", 0)),
+            tau=None if tau is None else int(tau),
             device=comp.device, dtype=comp.dtype)
         self.put(store, "warm.deconv_q", ws.deconv_q)
         self.put(store, "block", ws.block)
