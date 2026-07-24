@@ -48,9 +48,16 @@ class CensorRunningMax:
     def from_hits(cls, op, hits: HitsView, block_offset, *,
                   csa_reset_time: float, threshold: float,
                   npad_bins: int = 50, beta: float = 1.0,
-                  margin: float = 3.0, norm: str = "l2"):
-        """Build region boundaries from the DATA via typed accessors."""
-        B = hits.adc_hold_delay
+                  margin: float = 3.0, norm: str = "l2", bin_ticks=None):
+        """Build region boundaries from the DATA via typed accessors.
+
+        ``bin_ticks`` is the operator's time-bin width in fine ticks; it
+        defaults to the physical ``hits.adc_hold_delay`` but MUST be set to
+        the operator bin (e.g. adc_hold_delay/time_subbin) when the operator
+        runs on a sub-divided time grid, or the reset/arm boundaries land at
+        the wrong bin index.
+        """
+        B = hits.adc_hold_delay if bin_ticks is None else float(bin_ticks)
         nx, ny, nt = op.block_shape
         reset = np.full((nx, ny), npad_bins, np.int64)   # never-fired
         arm = np.full((nx, ny), npad_bins, np.int64)

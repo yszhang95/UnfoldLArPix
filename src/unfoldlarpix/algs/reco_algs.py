@@ -50,7 +50,7 @@ class BuildMeasurement(Algorithm):
     """Immutable event measurement: windows, operator A(d), quiet mask."""
 
     reads = ("event", "readout_config", "block", "block_offset")
-    writes = ("op", "quiet_mask")
+    writes = ("op", "quiet_mask", "time_subbin")
 
     def execute(self, store):
         ev = store.get("event")
@@ -58,24 +58,31 @@ class BuildMeasurement(Algorithm):
         block = store.get("block")
         block_offset = np.asarray(store.get("block_offset"))
         comp = self.services["compute"]
-        prepared = self.services["detector"].prepared(rc.adc_hold_delay)
+        S = int(self.props.get("time_subbin", 1))
+        B = int(rc.adc_hold_delay)
+        if S < 1 or B % S != 0:
+            raise ValueError(f"time_subbin {S} must be >=1 and divide "
+                             f"adc_hold_delay {B}")
+        # finer operator bin = B/S; the physical latch windows are unchanged.
+        prepared = self.services["detector"].prepared(B // S)
         thr = float(rc.threshold)
         split = bool(self.props.get("split_trigger", True))
         windows = build_latch_windows(
-            ev.hits.location, ev.hits.data, rc.adc_hold_delay, block_offset,
+            ev.hits.location, ev.hits.data, B, block_offset,
             csa_reset_time=rc.csa_reset_time,
             split_threshold=thr if split else None)
-        op = ZSOperator(prepared.integrated_response, block.shape, windows,
-                        rc.adc_hold_delay, device=comp.device,
-                        dtype=comp.dtype)
-        quiet = np.ones(block.shape, dtype=bool)
+        nx, ny, nt = block.shape
+        op = ZSOperator(prepared.integrated_response, (nx, ny, nt * S), windows,
+                        B // S, device=comp.device, dtype=comp.dtype)
+        quiet = np.ones((nx, ny, nt * S), dtype=bool)
         for row in ev.hits.location:
             px = int(row[0] - block_offset[0])
             py = int(row[1] - block_offset[1])
-            if 0 <= px < block.shape[0] and 0 <= py < block.shape[1]:
+            if 0 <= px < nx and 0 <= py < ny:
                 quiet[px, py, :] = False
         self.put(store, "op", op)
         self.put(store, "quiet_mask", quiet)
+        self.put(store, "time_subbin", S)
 
 
 @algorithm("BuildSupport")
@@ -88,12 +95,13 @@ class BuildSupport(Algorithm):
     threshold is the clean equivalent.
     """
 
-    reads = ("warm.deconv_q", "op", "readout_config")
+    reads = ("warm.deconv_q", "op", "readout_config", "time_subbin")
     writes = ("support",)
 
     def execute(self, store):
         rc = store.get("readout_config")
         op = store.get("op")
+        S = int(store.get("time_subbin") or 1)
         dq = np.clip(store.get("warm.deconv_q"), 0.0, None)
         eps = float(self.props.get("eps", 0.3))
         dilate = int(self.props.get("dilate", 1))
@@ -109,8 +117,11 @@ class BuildSupport(Algorithm):
                 for shift in (-1, 1):
                     grown |= np.roll(support, shift, axis=ax)
             support = grown
+        if S > 1:                       # lift the B-grid support to the B/S grid
+            support = np.repeat(support, S, axis=2)
         support = support[:, :, : op.q_shape[2]]
-        print(f"[BuildSupport] {support.mean() * 100:.2f}% of q voxels")
+        print(f"[BuildSupport] {support.mean() * 100:.2f}% of q voxels"
+              f"{f' (time_subbin={S})' if S > 1 else ''}")
         self.put(store, "support", support)
 
 
@@ -119,13 +130,15 @@ class Solve(Algorithm):
     """Constrained solve: terms + engine + strategies from config."""
 
     reads = ("op", "quiet_mask", "support", "warm.deconv_q",
-             "hits_view", "block_offset", "readout_config")
+             "hits_view", "block_offset", "readout_config", "time_subbin")
     writes = ("solve.q", "solve.state")
 
     def execute(self, store):
         op = store.get("op")
         rc = store.get("readout_config")
         thr = float(rc.threshold)
+        S = int(store.get("time_subbin") or 1)
+        bin_ticks = int(rc.adc_hold_delay) // S
 
         terms = [DataFidelity(op)]
         for tcfg in self.props.get("terms", []):
@@ -138,17 +151,20 @@ class Solve(Algorithm):
                     op, store.get("hits_view"), store.get("block_offset"),
                     csa_reset_time=float(rc.csa_reset_time or 0),
                     threshold=thr,
-                    npad_bins=int(tcfg.get("npad_bins", 50)),
+                    npad_bins=int(tcfg.get("npad_bins", 50)) * S,
                     beta=float(tcfg.get("beta", 1.0)),
                     margin=float(tcfg.get("margin", 3.0)),
-                    norm=tcfg.get("norm", "l2")))
+                    norm=tcfg.get("norm", "l2"),
+                    bin_ticks=bin_ticks))
             else:
                 raise ValueError(f"unknown term type: {kind}")
 
         support_np = store.get("support")
         support = op.to_tensor(support_np.astype(np.float64))
-        q0 = op.to_tensor(np.clip(
-            store.get("warm.deconv_q")[:, :, : op.q_shape[2]], 0.0, None))
+        q0_np = np.clip(store.get("warm.deconv_q"), 0.0, None)
+        if S > 1:                       # lift the B-grid warm seed to B/S (conserve)
+            q0_np = np.repeat(q0_np, S, axis=2) / S
+        q0 = op.to_tensor(q0_np[:, :, : op.q_shape[2]])
 
         engine = Fista(n_iter=int(self.props.get("engine", {})
                                   .get("iters", 150)))
@@ -167,8 +183,11 @@ class Solve(Algorithm):
         for rec in state.history:
             print(f"[Solve] {rec.label}: alpha={rec.alpha} "
                   f"q_sum={rec.q_sum:.1f} nnz={rec.nnz}")
-        self.put(store, "solve.q",
-                 state.q.cpu().numpy().astype(np.float64))
+        q = state.q.cpu().numpy().astype(np.float64)
+        if S > 1:                       # fit at B/S, report at B (sum sub-bins)
+            nx, ny, qt = q.shape
+            q = q[:, :, : (qt // S) * S].reshape(nx, ny, qt // S, S).sum(axis=3)
+        self.put(store, "solve.q", q)
         self.put(store, "solve.state", state)
 
 
