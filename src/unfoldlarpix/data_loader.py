@@ -281,6 +281,14 @@ class DataLoader:
             event_data.global_tref = group_data["global_tref"][
                 0
             ]  # Take first reference
+            # tred-format translation to the canonical acquisition start:
+            # global_tref's time component is in us; the canonical
+            # EventData.acq_start is in fine ticks (uniform scalar today;
+            # a channel-wise tred product would map to a callable here).
+            tref = np.asarray(event_data.global_tref).ravel()
+            if tref.size:
+                event_data.acq_start = float(tref[-1]) / float(
+                    self._parse_readout_config().time_spacing)
 
         return event_data
 

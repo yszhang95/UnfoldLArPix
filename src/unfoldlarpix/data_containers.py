@@ -112,6 +112,14 @@ class EventData:
     hits: Optional[Hits] = None
     truehits: Optional[TrueHits] = None
     global_tref: Optional[np.ndarray] = None
+    #: Canonical acquisition start: earliest time each channel's recorded
+    #: signal can begin, in fine ticks, same time frame as
+    #: ``hits.location[:, 2]``.  Either a scalar (uniform over channels) or
+    #: a callable ``(px, py) -> ticks`` in GLOBAL pixel coordinates
+    #: (channel-wise).  Loaders translate their format specifics (e.g. the
+    #: tred ``global_tref``) into this; downstream algorithms consume ONLY
+    #: this field and stay decoupled from any file format.
+    acq_start: Optional[Any] = None
     metadata: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:

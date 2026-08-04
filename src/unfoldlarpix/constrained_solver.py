@@ -36,6 +36,7 @@ def build_latch_windows(
     block_offset: np.ndarray,
     csa_reset_time: int | None = None,
     split_threshold: float | None = None,
+    acq_start: float | None = None,
 ) -> list[LatchWindow]:
     """Convert raw hits into per-burst integration windows.
 
@@ -59,10 +60,27 @@ def build_latch_windows(
     pseudo-measurement, and (trigger, first latch] carries the remainder.
     This injects the threshold-crossing information the lumped window
     discards, at the cost of ignoring crossing overshoot.
+
+    ``acq_start`` sets the lower edge of each channel's FIRST window: the
+    earliest time its recorded signal can begin (absolute fine ticks, same
+    frame as ``hits_location[:, 2]``).  A ``-inf`` edge makes the operator
+    credit near-anode charge with kernel mass that is not in the data (the
+    pre-deposition drift history is fictitious) and under-recover it.
+    Accepted forms: ``None`` (legacy ``-inf``), a scalar (uniform), or a
+    callable ``(px, py) -> ticks`` in GLOBAL pixel coordinates
+    (channel-wise).
     """
     B = float(adc_hold_delay)
     loc = np.asarray(hits_location)
     dat = np.asarray(hits_data, dtype=float)
+    toff = float(block_offset[2])
+    if acq_start is None:
+        edge_of = lambda gx, gy: -np.inf                    # noqa: E731
+    elif callable(acq_start):
+        edge_of = lambda gx, gy: float(acq_start(gx, gy)) - toff  # noqa: E731
+    else:
+        _e = float(acq_start) - toff
+        edge_of = lambda gx, gy: _e                         # noqa: E731
     order = np.lexsort((loc[:, 2], loc[:, 1], loc[:, 0]))
     windows: list[LatchWindow] = []
     prev_pixel = None
@@ -75,9 +93,10 @@ def build_latch_windows(
         charges = np.diff(cumulative, prepend=0.0)
         pixel = (px, py)
         if pixel != prev_pixel:
-            first_lo = -np.inf
+            first_lo = edge_of(int(loc[i, 0]), int(loc[i, 1]))
         else:
-            first_lo = prev_restart if prev_restart is not None else -np.inf
+            first_lo = (prev_restart if prev_restart is not None
+                        else edge_of(int(loc[i, 0]), int(loc[i, 1])))
         t_first = trigger + B
         if split_threshold is not None and float(charges[0]) >= split_threshold:
             windows.append(

@@ -67,10 +67,25 @@ class BuildMeasurement(Algorithm):
         prepared = self.services["detector"].prepared(B // S)
         thr = float(rc.threshold)
         split = bool(self.props.get("split_trigger", True))
+        # acq_start: lower edge of each channel's first window.
+        #   None (default) -> legacy -inf;
+        #   "event"        -> the event's canonical acq_start (scalar or
+        #                     channel-wise callable; the LOADER translates
+        #                     any file-format specifics into it);
+        #   number         -> absolute ticks (diagnostics only).
+        acq = self.props.get("acq_start")
+        if acq == "event":
+            acq = getattr(ev, "acq_start", None)
+            if acq is None:
+                raise ValueError("acq_start: 'event' but the event carries "
+                                 "no canonical acq_start")
+        elif acq is not None:
+            acq = float(acq)
         windows = build_latch_windows(
             ev.hits.location, ev.hits.data, B, block_offset,
             csa_reset_time=rc.csa_reset_time,
-            split_threshold=thr if split else None)
+            split_threshold=thr if split else None,
+            acq_start=acq)
         nx, ny, nt = block.shape
         op = ZSOperator(prepared.integrated_response, (nx, ny, nt * S), windows,
                         B // S, device=comp.device, dtype=comp.dtype)
