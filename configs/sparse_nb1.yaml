@@ -13,7 +13,6 @@ sequence:
       engine:   {iters: 600}
       strategy: {type: ladder, alphas: [1.0, 0.5, 0.3], seed_cut: 0.5, soft_len: 2.0}
       terms:
-        - {type: quiet, beta: 1.0}
         - {type: censor, beta: 1.0, margin: 3.0, norm: l2}
   - CentroidPositions: {window: 2}
   - WriteCharges:

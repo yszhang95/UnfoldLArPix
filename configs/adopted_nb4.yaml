@@ -11,8 +11,7 @@ sequence:
   - Solve:
       engine:   {iters: 150}
       strategy: {type: ladder, alphas: [1.0, 0.5, 0.3], seed_cut: 0.5, soft_len: 2.0}
-      terms:
-        - {type: quiet, beta: 1.0}
+      terms: []
   - CentroidPositions: {window: 1}
   - WriteCharges:
       out_dir: examples/analysis_output/fwk_runs
