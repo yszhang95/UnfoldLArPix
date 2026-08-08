@@ -10,7 +10,6 @@ For each file, aligns ``smeared_true`` onto the ``deconv_q`` voxel grid
 - ``pearson_r``, ``slope``: 2-D correlation stats on voxels with
   ``deconv_q > corr_threshold`` (default 0.5 ke-), as in Fig 3 of the muon
   filter report.
-- ``spec_dev``: mean |P_deconv/P_truth - 1| over active pixels (Fig 2 scalar).
 - ``ghost_frac``: fraction of voxels with ``deconv_q > corr_threshold`` whose
   aligned truth is below ``corr_threshold``.
 - ``true_killed``: total truth charge in voxels where truth > threshold but
@@ -39,7 +38,6 @@ from unfoldlarpix.eval import (metrics_from_blocks,  # noqa: E402,F401
 
 
 def evaluate(npz_path: Path, corr_threshold: float = 0.5,
-             active_threshold_frac: float = 0.10,
              key: str = "deconv_q",
              truth_npz: Path | None = None,
              group_pixels: int = 1,
@@ -88,8 +86,7 @@ def evaluate(npz_path: Path, corr_threshold: float = 0.5,
     smear_summed = pool_block(smear_summed, group_pixels, group_time)
 
     out = metrics_from_blocks(smear_summed, aligned_dq,
-                              corr_threshold=corr_threshold,
-                              active_threshold_frac=active_threshold_frac)
+                              corr_threshold=corr_threshold)
     out["file"] = str(npz_path)
     return out
 
@@ -156,13 +153,13 @@ def main() -> None:
                                   sigma_pxl=args.sigma_pxl)
 
     header = (f"{'label':<28} {'int%':>7} {'r':>8} {'slope':>7} "
-              f"{'specdev':>8} {'ghost%':>7} {'gAdj%':>6} {'gIso%':>6} "
+              f"{'ghost%':>7} {'gAdj%':>6} {'gIso%':>6} "
               f"{'gIsoQ':>7} {'killed':>8} {'nvox':>7}")
     print(header)
     print("-" * len(header))
     for label, m in results.items():
         print(f"{label:<28} {m['integral_pct']:>7.2f} {m['pearson_r']:>8.4f} "
-              f"{m['slope']:>7.3f} {m['spec_dev']:>8.3f} "
+              f"{m['slope']:>7.3f} "
               f"{100 * m['ghost_frac']:>7.2f} "
               f"{100 * m['ghost_adj_frac']:>6.2f} "
               f"{100 * m['ghost_iso_frac']:>6.2f} "

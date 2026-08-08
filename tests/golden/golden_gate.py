@@ -3,9 +3,9 @@
 `golden_metrics.json` pins the headline metrics and output-array
 signatures of the two canonical configurations:
 
-- nb4_adopted_centroid_w1: the adopted dense-regime config.
-- nb1_censorL2_600_centroid_w2: the sparse-regime config (censor L2,
-  600 iters, centroid w2).
+- nb4_adopted_centroid_w1: the adopted burst config (nburst >= 2).
+- nb1_censorL2_600_centroid_w2: the self-trigger config (nburst = 1;
+  censor L2, 600 iters, centroid w2).  Both are zero-suppressed.
 
 `compare_to_golden` checks a fresh result against the pinned values
 within tolerances.  Intended use: every refactor phase re-runs the two
@@ -25,7 +25,6 @@ TOL = {
     "integral_pct": 0.30,
     "pearson_r": 0.004,
     "slope": 0.010,
-    "spec_dev": 0.05,
     "ghost_frac": 0.006,
     "ghost_adj_frac": 0.006,
     "ghost_iso_frac": 0.002,

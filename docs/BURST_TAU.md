@@ -43,11 +43,11 @@ matches the +1060 ke charge excess the solver produced at 5-10 cm depth.
 
 Reconstruction, same event:
 
-| config | int% | r | slope | spec_dev | ghost% | killed |
-|---|---:|---:|---:|---:|---:|---:|
-| split on, no gate | +8.23 | 0.9468 | 1.090 | 14.10 | 5.71 | 91.6 |
-| split off | -3.83 | 0.9951 | 1.031 | 10.41 | 2.14 | 114.1 |
-| split on + `burst_tau: auto` | -4.52 | 0.9951 | 1.029 | 10.19 | **1.55** | **105.2** |
+| config | int% | r | slope | ghost% | killed |
+|---|---:|---:|---:|---:|---:|
+| split on, no gate | +8.23 | 0.9468 | 1.090 | 5.71 | 91.6 |
+| split off | -3.83 | 0.9951 | 1.031 | 2.14 | 114.1 |
+| split on + `burst_tau: auto` | -4.52 | 0.9951 | 1.029 | **1.55** | **105.2** |
 
 The gate beats *both* baselines on ghosting and killed truth: it keeps the 205
 accurate constraints that `split_trigger: false` throws away, and drops the 78
@@ -101,7 +101,7 @@ module. `warm_start` re-exports it, so existing imports and
 - Enabling the gate conserves charge: `sum(value)` is unchanged
   (10569.6 ke before and after on `pos_a50 nb4`), because the pseudo row and
   its remainder merge back into one lumped row.
-- Full suite passes (178 tests).
+- Full suite passes (185 tests).
 
 ## See also
 

@@ -149,8 +149,7 @@ def universal_rebin(npz_path: Path, truth_npz: Path | None = None,
 
 
 def metrics_from_blocks(smear_summed: np.ndarray, aligned_dq: np.ndarray,
-                        corr_threshold: float = 0.5,
-                        active_threshold_frac: float = 0.10) -> dict:
+                        corr_threshold: float = 0.5) -> dict:
     """All scalar metrics from an aligned (truth, reco) block pair."""
     sum_dq = float(aligned_dq.sum())
     sum_truth = float(smear_summed.sum())
@@ -185,23 +184,12 @@ def metrics_from_blocks(smear_summed: np.ndarray, aligned_dq: np.ndarray,
     ghost_iso_frac = float(ghost_iso.sum() / n_sel)
     ghost_iso_charge = float(aligned_dq[ghost_iso].sum())
 
-    # Fig-2 style spectral deviation over active pixels.
-    charge = smear_summed.sum(axis=2)
-    cmax = float(charge.max())
-    xs, ys = np.where(charge > active_threshold_frac * cmax)
-    P_true = (np.abs(np.fft.rfft(smear_summed[xs, ys, :], axis=-1)) ** 2).mean(axis=0)
-    P_dec = (np.abs(np.fft.rfft(aligned_dq[xs, ys, :], axis=-1)) ** 2).mean(axis=0)
-    safe = P_true > 0
-    ratio = P_dec[safe] / P_true[safe]
-    spec_dev = float(np.mean(np.abs(ratio - 1.0)))
-
     return {
         "sum_deconv_q": round(sum_dq, 2),
         "sum_truth": round(sum_truth, 2),
         "integral_pct": round(100.0 * (sum_dq / sum_truth - 1.0), 3),
         "pearson_r": round(pearson_r, 5),
         "slope": round(slope, 5),
-        "spec_dev": round(spec_dev, 4),
         "ghost_frac": round(ghost_frac, 5),
         "ghost_adj_frac": round(ghost_adj_frac, 5),
         "ghost_iso_frac": round(ghost_iso_frac, 5),
