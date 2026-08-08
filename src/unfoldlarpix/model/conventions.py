@@ -7,6 +7,8 @@ justification; nothing else in the package may hard-code them.
 """
 from __future__ import annotations
 
+import warnings
+
 # ---------------------------------------------------------------------
 # Deposit phase (block building)
 # ---------------------------------------------------------------------
@@ -86,3 +88,61 @@ HITS_LOCATION_COLUMNS = ("pixel_x", "pixel_y", "trigger", "first_latch",
 # "integrated response" is the response current integrated PER COARSE
 # BIN (bin-integrated current) — it is NOT the CSA cumulative; the
 # cumulative nature of the measurement lives in the window sampling.
+
+
+# ---------------------------------------------------------------------
+# Burst-merge gap (tau)
+# ---------------------------------------------------------------------
+def resolve_burst_tau(readout_config, tau: int | None = None) -> int:
+    """Resolve the tunable burst-merge gap ``tau`` against its physical bounds.
+
+    Bounds (both set by the readout, ticks):
+    - FLOOR = adc_hold_delay + adc_down_time + one_tick (:func:`burst_tau_min`).
+      Below it, immediate re-triggers are misrouted to template compensation
+      and lose ~threshold of charge each.
+    - CAP = 2 * adc_hold_delay.  Above it, dead-time compensation is applied
+      across a gap longer than one burst window plus one dead window — a
+      genuine multi-bin silence.  Dead-time merge does not create the
+      intermediate gap bins that template compensation does, so the merged
+      sequence comes out with a different length and its start displaced by
+      ~one bin (measured: len 130->128, start +1*adc_hold_delay for a
+      gap-82 pixel).  Gaps beyond the cap are real silences and belong to
+      template compensation.
+
+    ``tau=None`` -> FLOOR.  A value in [FLOOR, CAP] is used as given (tune
+    upward for broader responses).  Out-of-range values warn and clamp.  If
+    FLOOR > CAP (adc_down_time too large relative to adc_hold_delay) the two
+    constraints cannot both hold; warn and keep the FLOOR (charge
+    conservation over timing).
+    """
+    tau_min = burst_tau_min(readout_config)
+    tau_max = 2 * int(readout_config.adc_hold_delay)
+    if tau_min > tau_max:
+        warnings.warn(
+            f"burst tau floor {tau_min} exceeds cap {tau_max} "
+            f"(=2*adc_hold_delay): adc_down_time={readout_config.adc_down_time} "
+            f"is too large relative to adc_hold_delay="
+            f"{readout_config.adc_hold_delay} for a well-posed burst-merge "
+            f"window (no tau conserves charge AND avoids the >2B shift). "
+            f"Keeping the floor {tau_min}.", RuntimeWarning, stacklevel=2)
+        return tau_min
+    if tau is None:
+        return tau_min
+    tau = int(tau)
+    if tau < tau_min:
+        warnings.warn(
+            f"burst tau={tau} is below the physical floor {tau_min} "
+            f"(adc_hold_delay+adc_down_time+one_tick): immediate re-triggers "
+            f"would be routed to template compensation and lose ~threshold of "
+            f"charge each. Clamping to {tau_min}.",
+            RuntimeWarning, stacklevel=2)
+        return tau_min
+    if tau > tau_max:
+        warnings.warn(
+            f"burst tau={tau} exceeds the cap {tau_max} (=2*adc_hold_delay): "
+            f"gaps >2*adc_hold_delay are genuine silences; dead-time merge "
+            f"across them changes the merged-sequence length and shifts the "
+            f"following sequence by ~one bin. Clamping to {tau_max}.",
+            RuntimeWarning, stacklevel=2)
+        return tau_max
+    return tau

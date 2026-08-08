@@ -37,6 +37,7 @@ def build_latch_windows(
     csa_reset_time: int | None = None,
     split_threshold: float | None = None,
     acq_start: float | None = None,
+    burst_tau: int | None = None,
 ) -> list[LatchWindow]:
     """Convert raw hits into per-burst integration windows.
 
@@ -60,6 +61,24 @@ def build_latch_windows(
     pseudo-measurement, and (trigger, first latch] carries the remainder.
     This injects the threshold-crossing information the lumped window
     discards, at the cost of ignoring crossing overshoot.
+
+    ``burst_tau`` gates that split.  The pseudo-measurement asserts that
+    the accumulator equalled the threshold at the trigger, which holds
+    only when the trigger was THRESHOLD-limited.  After a latch the CSA is
+    dead for ``adc_down_time``; if the pixel is still above threshold when
+    the discriminator re-arms it fires immediately, and the pre-trigger
+    window then holds everything that piled up during the dead time — far
+    more than the threshold.  A sequence whose gap to the previous last
+    latch is below ``burst_tau`` (see
+    :func:`~unfoldlarpix.model.conventions.resolve_burst_tau`, floor
+    ``adc_hold_delay + adc_down_time + one_tick``) is such an immediate
+    re-trigger and is emitted as ONE lumped window instead.  Measured
+    (pos_a50 nb4, post-acq-fix, against the true current waveform): 101 of
+    306 pseudo rows were immediate re-triggers asserting 505 ke where the
+    true integral was 1477 ke, i.e. they carried +972 ke of spurious
+    deficit — 102% of the total pseudo-row error, while the 205
+    threshold-limited rows were accurate to -0.09 ke/row.  ``None``
+    (default) disables the gate and reproduces the legacy behaviour.
 
     ``acq_start`` sets the lower edge of each channel's FIRST window: the
     earliest time its recorded signal can begin (absolute fine ticks, same
@@ -85,6 +104,7 @@ def build_latch_windows(
     windows: list[LatchWindow] = []
     prev_pixel = None
     prev_restart = None
+    prev_last_latch = None
     for i in order:
         px = int(loc[i, 0] - block_offset[0])
         py = int(loc[i, 1] - block_offset[1])
@@ -94,11 +114,22 @@ def build_latch_windows(
         pixel = (px, py)
         if pixel != prev_pixel:
             first_lo = edge_of(int(loc[i, 0]), int(loc[i, 1]))
+            prev_last_latch = None
         else:
             first_lo = (prev_restart if prev_restart is not None
                         else edge_of(int(loc[i, 0]), int(loc[i, 1])))
+        # A trigger is threshold-limited only if the pixel had time to fall
+        # back below threshold since its previous latch; otherwise it fired
+        # the instant the discriminator re-armed and the pre-trigger window
+        # holds the whole dead-time pile-up, not the threshold.
+        threshold_limited = (
+            burst_tau is None
+            or prev_last_latch is None
+            or (trigger - prev_last_latch) >= float(burst_tau)
+        )
         t_first = trigger + B
-        if split_threshold is not None and float(charges[0]) >= split_threshold:
+        if (split_threshold is not None and threshold_limited
+                and float(charges[0]) >= split_threshold):
             windows.append(
                 LatchWindow(px, py, first_lo, trigger, float(split_threshold))
             )
@@ -115,6 +146,7 @@ def build_latch_windows(
             windows.append(LatchWindow(px, py, lo, lo + B, float(charges[j])))
         prev_pixel = pixel
         last_latch = t_first + (len(charges) - 1) * B
+        prev_last_latch = last_latch
         if csa_reset_time is not None:
             prev_restart = last_latch + float(csa_reset_time)
         elif loc.shape[1] > 4:

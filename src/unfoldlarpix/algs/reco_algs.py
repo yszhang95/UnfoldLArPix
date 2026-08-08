@@ -7,6 +7,7 @@ import torch
 from ..constrained_solver import (build_latch_windows, centroid_bin_offsets,
                                   gaussian_post_smooth)
 from ..fwk.component import Algorithm, algorithm
+from ..model.conventions import resolve_burst_tau
 from ..model.operator import ZSOperator
 from ..model.warm_start import fft_warm_start
 from ..solve.engine import Fista
@@ -81,11 +82,24 @@ class BuildMeasurement(Algorithm):
                                  "no canonical acq_start")
         elif acq is not None:
             acq = float(acq)
+        # burst_tau: gate on the split_trigger pseudo-measurement.
+        #   absent -> legacy (every trigger treated as threshold-limited);
+        #   "auto" -> the physical floor derived from the readout config;
+        #   number -> ticks, clamped to [floor, cap] with a warning.
+        # Resolution is a CONVENTION (pure function of the readout config);
+        # build_latch_windows receives only the resolved integer.
+        tau_prop = self.props.get("burst_tau")
+        if tau_prop is None:
+            burst_tau = None
+        elif tau_prop == "auto":
+            burst_tau = resolve_burst_tau(rc, None)
+        else:
+            burst_tau = resolve_burst_tau(rc, int(tau_prop))
         windows = build_latch_windows(
             ev.hits.location, ev.hits.data, B, block_offset,
             csa_reset_time=rc.csa_reset_time,
             split_threshold=thr if split else None,
-            acq_start=acq)
+            acq_start=acq, burst_tau=burst_tau)
         nx, ny, nt = block.shape
         op = ZSOperator(prepared.integrated_response, (nx, ny, nt * S), windows,
                         B // S, device=comp.device, dtype=comp.dtype)
