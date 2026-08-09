@@ -29,6 +29,22 @@ class LatchWindow:
     value: float     # recorded charge in the window
 
 
+@dataclass(frozen=True)
+class RowMeta:
+    """Noise-model metadata for one measurement row.
+
+    ``kind`` is one of ``pseudo`` (trigger-crossing equality),
+    ``remainder`` (trigger..first-latch part of a split first window),
+    ``lumped`` (unsplit first window) or ``diff`` (burst difference).
+    ``post_reset`` is True unless the row belongs to the pixel's first
+    trigger sequence: only post-reset sequences carry the kTC baseline
+    draw.  Consumed by :mod:`unfoldlarpix.model.noise`.
+    """
+
+    kind: str
+    post_reset: bool
+
+
 def build_latch_windows(
     hits_location: np.ndarray,
     hits_data: np.ndarray,
@@ -40,6 +56,30 @@ def build_latch_windows(
     burst_tau: int | None = None,
 ) -> list[LatchWindow]:
     """Convert raw hits into per-burst integration windows.
+
+    Thin wrapper over :func:`build_latch_rows` for callers that need only
+    the windows; see there for the full contract.
+    """
+    return build_latch_rows(hits_location, hits_data, adc_hold_delay,
+                            block_offset, csa_reset_time=csa_reset_time,
+                            split_threshold=split_threshold,
+                            acq_start=acq_start, burst_tau=burst_tau)[0]
+
+
+def build_latch_rows(
+    hits_location: np.ndarray,
+    hits_data: np.ndarray,
+    adc_hold_delay: int,
+    block_offset: np.ndarray,
+    csa_reset_time: int | None = None,
+    split_threshold: float | None = None,
+    acq_start: float | None = None,
+    burst_tau: int | None = None,
+) -> tuple[list[LatchWindow], list[RowMeta]]:
+    """Convert raw hits into per-burst integration windows plus row metadata.
+
+    Returns ``(windows, metas)`` with one :class:`RowMeta` per window,
+    emitted by the same loop — the metadata cannot drift from the windows.
 
     ``hits_data`` columns are ``[x, y, z, q1, q2, ...]`` with cumulative
     charges; charges are differenced per burst.  The first burst of a
@@ -102,6 +142,7 @@ def build_latch_windows(
         edge_of = lambda gx, gy: _e                         # noqa: E731
     order = np.lexsort((loc[:, 2], loc[:, 1], loc[:, 0]))
     windows: list[LatchWindow] = []
+    metas: list[RowMeta] = []
     prev_pixel = None
     prev_restart = None
     prev_last_latch = None
@@ -118,6 +159,7 @@ def build_latch_windows(
         else:
             first_lo = (prev_restart if prev_restart is not None
                         else edge_of(int(loc[i, 0]), int(loc[i, 1])))
+        post_reset = pixel == prev_pixel
         # A trigger is threshold-limited only if the pixel had time to fall
         # back below threshold since its previous latch; otherwise it fired
         # the instant the discriminator re-armed and the pre-trigger window
@@ -133,17 +175,21 @@ def build_latch_windows(
             windows.append(
                 LatchWindow(px, py, first_lo, trigger, float(split_threshold))
             )
+            metas.append(RowMeta("pseudo", post_reset))
             windows.append(
                 LatchWindow(px, py, trigger, t_first,
                             float(charges[0]) - float(split_threshold))
             )
+            metas.append(RowMeta("remainder", post_reset))
         else:
             windows.append(
                 LatchWindow(px, py, first_lo, t_first, float(charges[0]))
             )
+            metas.append(RowMeta("lumped", post_reset))
         for j in range(1, len(charges)):
             lo = t_first + (j - 1) * B
             windows.append(LatchWindow(px, py, lo, lo + B, float(charges[j])))
+            metas.append(RowMeta("diff", post_reset))
         prev_pixel = pixel
         last_latch = t_first + (len(charges) - 1) * B
         prev_last_latch = last_latch
@@ -153,7 +199,7 @@ def build_latch_windows(
             prev_restart = float(loc[i, 4] - block_offset[2])
         else:
             prev_restart = None
-    return windows
+    return windows, metas
 
 
 def build_cumulative_windows(

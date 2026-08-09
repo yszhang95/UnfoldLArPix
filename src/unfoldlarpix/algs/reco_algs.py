@@ -4,10 +4,11 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from ..constrained_solver import (build_latch_windows, centroid_bin_offsets,
+from ..constrained_solver import (build_latch_rows, centroid_bin_offsets,
                                   gaussian_post_smooth)
 from ..fwk.component import Algorithm, algorithm
 from ..model.conventions import resolve_burst_tau
+from ..model.noise import row_weights
 from ..model.operator import ZSOperator
 from ..model.warm_start import fft_warm_start
 from ..solve.engine import Fista
@@ -95,14 +96,25 @@ class BuildMeasurement(Algorithm):
             burst_tau = resolve_burst_tau(rc, None)
         else:
             burst_tau = resolve_burst_tau(rc, int(tau_prop))
-        windows = build_latch_windows(
+        windows, metas = build_latch_rows(
             ev.hits.location, ev.hits.data, B, block_offset,
             csa_reset_time=rc.csa_reset_time,
             split_threshold=thr if split else None,
             acq_start=acq, burst_tau=burst_tau)
+        # row_weights: diagonal data-fidelity weighting from the readout
+        # noise model (model.noise; scales travel with the data file).
+        #   absent -> legacy unweighted;
+        #   "split" -> only the trigger-split rows re-weighted;
+        #   "diag"  -> every row weighted by ref_var / var.
+        # The reference is the burst-diff variance, so ordinary rows keep
+        # weight 1 and the l1/censor balance is unchanged by construction.
+        rw_prop = self.props.get("row_weights")
+        weights = (None if rw_prop is None
+                   else row_weights(metas, rc, mode=str(rw_prop)))
         nx, ny, nt = block.shape
         op = ZSOperator(prepared.integrated_response, (nx, ny, nt * S), windows,
-                        B // S, device=comp.device, dtype=comp.dtype)
+                        B // S, device=comp.device, dtype=comp.dtype,
+                        row_weights=weights)
         quiet = np.ones((nx, ny, nt * S), dtype=bool)
         for row in ev.hits.location:
             px = int(row[0] - block_offset[0])
