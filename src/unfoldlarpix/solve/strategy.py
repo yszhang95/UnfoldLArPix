@@ -46,7 +46,8 @@ class Ladder:
     """
 
     def __init__(self, alphas, seed_cut: float = 0.5, soft_len: float = 2.0,
-                 soft_exponent: float = 1.0, n_iter: int = 150):
+                 soft_exponent: float = 1.0, n_iter: int = 150,
+                 alpha_scale=None):
         if not list(alphas):
             raise ValueError("ladder alphas cannot be empty")
         self.alphas = [float(a) for a in alphas]
@@ -54,15 +55,25 @@ class Ladder:
         self.soft_len = float(soft_len)
         self.soft_exponent = float(soft_exponent)
         self.n_iter = int(n_iter)
+        # optional STATIC per-voxel multiplier on every stage's weights
+        # (e.g. the measurement gain c_v: a coordinate activates when
+        # |A^T r|_v > alpha_v, and A^T r itself scales with c_v, so a
+        # uniform alpha systematically suppresses weak-coverage voxels;
+        # alpha_v ~ c_v equalises the activation condition).
+        self.alpha_scale = alpha_scale
 
     def alpha_field(self, op, a: float, skeleton) -> torch.Tensor | float:
         """Per-voxel L1 weights for one stage (exposed for unit tests)."""
         if skeleton is None or not bool(skeleton.any()):
-            return a
-        field_np = exponential_alpha_field(
-            skeleton.cpu().numpy().astype(bool), a, self.soft_len,
-            exponent=self.soft_exponent)
-        return op.to_tensor(field_np)
+            field = a
+        else:
+            field_np = exponential_alpha_field(
+                skeleton.cpu().numpy().astype(bool), a, self.soft_len,
+                exponent=self.soft_exponent)
+            field = op.to_tensor(field_np)
+        if self.alpha_scale is not None:
+            field = field * self.alpha_scale
+        return field
 
     def run(self, engine: Fista, op, smooth_terms, support,
             state: SolveState) -> SolveState:

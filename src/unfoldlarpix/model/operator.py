@@ -102,6 +102,14 @@ class ZSOperator:
     def adjoint(self, r: torch.Tensor) -> torch.Tensor:
         return self.conv_adjoint(self.sample_adjoint(r))
 
+    def measurement_gain(self) -> torch.Tensor:
+        """Per-voxel measurement gain ``c = A^T 1``: the charge the
+        recorded windows credit to a unit charge at each voxel.  A pure
+        operator/geometry quantity -- no data, no truth -- so anything
+        derived from it is blind to both."""
+        ones = torch.ones(self.n_data, dtype=self.dtype, device=self.device)
+        return self.adjoint(ones)
+
     @property
     def lipschitz(self) -> float:
         """||A^T A|| by power iteration — computed once, cached (the

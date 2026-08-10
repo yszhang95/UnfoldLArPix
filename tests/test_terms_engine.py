@@ -158,3 +158,22 @@ class TestCensorFractionalBoundaries:
         term = CensorRunningMax(op, reset, arm, censor_end=nt - 1,
                                 threshold=0.2, beta=1.5, norm="l2")
         autograd_check(term, op)
+
+
+class TestGainAlpha:
+    def test_alpha_scale_multiplies_every_stage(self):
+        op = make_op()
+        scale = torch.full(op.q_shape, 0.5, dtype=op.dtype, device=op.device)
+        lad = Ladder(alphas=[1.0], alpha_scale=scale)
+        f = lad.alpha_field(op, 1.0, None)
+        assert torch.allclose(f, scale)
+        skel = torch.zeros(op.q_shape, dtype=torch.bool, device=op.device)
+        skel[0, 0, 0] = True
+        f2 = lad.alpha_field(op, 1.0, skel)
+        assert float(f2[0, 0, 0]) == pytest.approx(0.5)   # a=1 at skeleton
+
+    def test_measurement_gain_is_adjoint_of_ones(self):
+        op = make_op()
+        g = op.measurement_gain()
+        ones = torch.ones(op.n_data, dtype=op.dtype, device=op.device)
+        assert torch.allclose(g, op.adjoint(ones))

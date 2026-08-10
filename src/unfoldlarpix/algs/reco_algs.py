@@ -202,6 +202,21 @@ class Solve(Algorithm):
         stype = scfg.pop("type", "ladder")
         if stype != "ladder":
             raise ValueError(f"unknown strategy: {stype}")
+        # gain_alpha: scale the l1 weights by the per-voxel measurement
+        # gain c_v = A^T 1 (an operator/geometry quantity -- blind to the
+        # data and to truth), normalised to its median over the support and
+        # clipped.  Equalises the coordinate-activation condition so
+        # weak-coverage charge is no longer preferentially shrunk.
+        ga = scfg.pop("gain_alpha", None)
+        if ga:
+            ga = ga if isinstance(ga, dict) else {}
+            c = op.measurement_gain()
+            on = c[support > 0]
+            ref = float(on.median()) if on.numel() else 1.0
+            scale = torch.clamp(c / max(ref, 1e-12),
+                                float(ga.get("floor", 0.05)),
+                                float(ga.get("cap", 2.0)))
+            scfg["alpha_scale"] = scale
         ladder = Ladder(n_iter=engine.n_iter, **scfg)
         state = ladder.run(engine, op, terms, support, SolveState(q=q0))
         if "refit" in self.props:
