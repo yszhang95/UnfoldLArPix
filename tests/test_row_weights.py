@@ -101,3 +101,15 @@ def test_unknown_mode_rejected():
     _, metas = _rows([100])
     with pytest.raises(ValueError):
         row_weights(metas, _RC(), mode="full")
+
+
+def test_diag_mean_normalised_when_no_diff_rows():
+    """nb1 events have no burst-diff anchor; the reference falls back to
+    the mean variance so the average weight is 1, not ~0.5."""
+    _, metas = _rows([100, 800], nburst=1)
+    assert not any(m.kind == "diff" for m in metas)
+    w = row_weights(metas, _RC(), mode="diag")
+    import numpy as np
+    v = row_variances(metas, _RC())
+    assert (1.0 / w) == pytest.approx(v / v.mean())
+    assert np.average(v * w) == pytest.approx(v.mean())

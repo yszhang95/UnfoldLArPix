@@ -95,6 +95,14 @@ def row_weights(metas, readout_config, mode: str) -> np.ndarray:
                          f"got {mode!r}")
     var = row_variances(metas, readout_config)
     ref = 2 * float(readout_config.uncorr_noise) ** 2
+    # The burst-diff reference presumes burst-diff rows exist.  A self-
+    # trigger event (nburst = 1) has NONE -- every row is a split or lumped
+    # first window -- and anchoring to the absent row type down-weights the
+    # whole system (~2x), which acts as a hidden l1 rescale (measured:
+    # integral -2.5..-3.5 pp on the nb1 scan).  Fall back to the mean
+    # variance so the average data-term scale is preserved instead.
+    if not any(m.kind == "diff" for m in metas):
+        ref = float(var.mean())
     w = ref / var
     if mode == "split":
         keep = np.array([m.kind not in ("pseudo", "remainder")
