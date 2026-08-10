@@ -26,6 +26,14 @@ class CensorRunningMax:
     def __init__(self, op, censor_reset: np.ndarray, censor_arm: np.ndarray,
                  censor_end: int, threshold: float, beta: float = 1.0,
                  norm: str = "l2"):
+        """``censor_reset`` / ``censor_arm`` are per-pixel boundaries in BIN
+        units and may be FRACTIONAL.  The boundary bin of the running sum
+        contributes with its overlap fraction (uniform-current-within-bin,
+        the same first-order convention as the operator's window sampling);
+        integer boundaries reproduce the old hard mask on the reset side.
+        The armed test asks whether the END of bin b, at (b+1)*B, is past
+        the re-arm instant -- C(b) is the accumulator at that instant.
+        """
         if norm not in ("l1", "l2"):
             raise ValueError(f"censor norm must be l1|l2, got {norm}")
         self.op = op
@@ -33,11 +41,13 @@ class CensorRunningMax:
         self.threshold = float(threshold)
         self.norm = norm
         nt = op.block_shape[2]
-        r_idx = op.to_tensor(np.asarray(censor_reset, np.int64), torch.long)
-        a_idx = op.to_tensor(np.asarray(censor_arm, np.int64), torch.long)
-        t_axis = torch.arange(nt, device=op.device)[None, None, :]
-        self.ref = t_axis >= r_idx[:, :, None]
-        self.armed = (t_axis >= a_idx[:, :, None]) & (t_axis < int(censor_end))
+        r_t = op.to_tensor(np.asarray(censor_reset, np.float64))
+        a_t = op.to_tensor(np.asarray(censor_arm, np.float64))
+        t_axis = torch.arange(nt, device=op.device, dtype=op.dtype)[None, None, :]
+        # fraction of bin b after the CSA restart: clip(b+1 - reset, 0, 1)
+        self.w = torch.clamp(t_axis + 1.0 - r_t[:, :, None], 0.0, 1.0)
+        self.armed = ((t_axis + 1.0 >= a_t[:, :, None])
+                      & (t_axis < float(censor_end)))
         self._zero = torch.zeros((), dtype=op.dtype, device=op.device)
         self._neg_inf = torch.tensor(float("-inf"), dtype=op.dtype,
                                      device=op.device)
@@ -59,8 +69,8 @@ class CensorRunningMax:
         """
         B = hits.adc_hold_delay if bin_ticks is None else float(bin_ticks)
         nx, ny, nt = op.block_shape
-        reset = np.full((nx, ny), npad_bins, np.int64)   # never-fired
-        arm = np.full((nx, ny), npad_bins, np.int64)
+        reset = np.full((nx, ny), float(npad_bins))      # never-fired
+        arm = np.full((nx, ny), float(npad_bins))
         px = (hits.pixel_x - int(block_offset[0])).astype(int)
         py = (hits.pixel_y - int(block_offset[1])).astype(int)
         ll = hits.last_latch - float(block_offset[2])
@@ -74,8 +84,8 @@ class CensorRunningMax:
             if k not in latest or trig[i] > latest[k][0]:
                 latest[k] = (trig[i], ll[i], ra[i])
         for (x, y), (_t, lli, rai) in latest.items():
-            reset[x, y] = min(max(int(np.ceil((lli + csa_reset_time) / B)), 0), nt)
-            arm[x, y] = min(max(int(np.ceil(rai / B)), 0), nt)
+            reset[x, y] = min(max((lli + csa_reset_time) / B, 0.0), float(nt))
+            arm[x, y] = min(max(rai / B, 0.0), float(nt))
         return cls(op, reset, arm, censor_end=nt - npad_bins,
                    threshold=threshold + margin, beta=beta, norm=norm)
 
@@ -86,11 +96,9 @@ class CensorRunningMax:
         xc = (xc / torch.linalg.vector_norm(xc)).to(self.op.device)
         lam = 0.0
         for _ in range(n):
-            b = torch.where(self.ref, self.op.conv(xc), self._zero)
+            b = self.w * self.op.conv(xc)
             row = b.sum(dim=2)
-            yc = self.op.conv_adjoint(
-                torch.where(self.ref, row[:, :, None].expand_as(b),
-                            self._zero))
+            yc = self.op.conv_adjoint(self.w * row[:, :, None])
             lam = float(torch.linalg.vector_norm(yc))
             if lam <= 0:
                 break
@@ -98,8 +106,7 @@ class CensorRunningMax:
         return lam
 
     def _peaks(self, ctx: IterCtx):
-        C = torch.cumsum(torch.where(self.ref, ctx.block_pred, self._zero),
-                         dim=2)
+        C = torch.cumsum(self.w * ctx.block_pred, dim=2)
         Cm = torch.where(self.armed, C, self._neg_inf)
         peak, arg = Cm.max(dim=2)
         viol = torch.where(torch.isfinite(peak),
@@ -119,10 +126,8 @@ class CensorRunningMax:
         coeff = viol if self.norm == "l2" else (viol > 0).to(self.op.dtype)
         nt = ctx.block_pred.shape[2]
         t_axis = torch.arange(nt, device=self.op.device)[None, None, :]
-        upto = t_axis <= arg[:, :, None]
-        g_c = torch.where(self.ref & upto,
-                          coeff[:, :, None].expand(*coeff.shape, nt),
-                          self._zero)
+        upto = (t_axis <= arg[:, :, None]).to(self.op.dtype)
+        g_c = self.w * upto * coeff[:, :, None]
         out += self.beta * self.op.conv_adjoint(g_c)
 
     def curvature(self) -> float:

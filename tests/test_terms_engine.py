@@ -115,3 +115,46 @@ class TestLadder:
             SolveState(q=torch.zeros(op.q_shape, dtype=torch.float64)))
         assert len(state.history) == 3
         assert float(state.q[2, 2, 12]) == pytest.approx(8.0, rel=0.1)
+
+
+class TestCensorFractionalBoundaries:
+    def test_fractional_reset_weights_boundary_bin(self):
+        """A half-bin reset counts half of the boundary bin's charge."""
+        op = make_op()
+        nx, ny, nt = op.block_shape
+        reset = np.full((nx, ny), 1.5)          # restart mid-bin-1
+        arm = np.zeros((nx, ny))
+        term = CensorRunningMax(op, reset, arm, censor_end=nt,
+                                threshold=0.0, beta=1.0, norm="l1")
+        w = term.w[0, 0].cpu().numpy()
+        assert w[0] == 0.0 and w[1] == 0.5 and w[2] == 1.0
+
+    def test_integer_reset_matches_hard_mask(self):
+        op = make_op()
+        nx, ny, nt = op.block_shape
+        reset = np.full((nx, ny), 2.0)
+        arm = np.zeros((nx, ny))
+        term = CensorRunningMax(op, reset, arm, censor_end=nt,
+                                threshold=0.0, beta=1.0, norm="l1")
+        w = term.w[0, 0].cpu().numpy()
+        assert (w[:2] == 0.0).all() and (w[2:] == 1.0).all()
+
+    def test_arm_checks_first_valid_bin_end(self):
+        """Re-arm inside bin k -> end of bin k (at (k+1)B) is armed."""
+        op = make_op()
+        nx, ny, nt = op.block_shape
+        reset = np.zeros((nx, ny))
+        arm = np.full((nx, ny), 2.3)            # re-arm inside bin 2
+        term = CensorRunningMax(op, reset, arm, censor_end=nt,
+                                threshold=0.0, beta=1.0, norm="l1")
+        armed = term.armed[0, 0].cpu().numpy()
+        assert not armed[1] and armed[2]        # end of bin 2 = 3.0 >= 2.3
+
+    def test_fractional_autograd(self):
+        op = make_op()
+        nx, ny, nt = op.block_shape
+        reset = np.random.default_rng(3).uniform(0, 1.8, (nx, ny))
+        arm = reset + 0.7
+        term = CensorRunningMax(op, reset, arm, censor_end=nt - 1,
+                                threshold=0.2, beta=1.5, norm="l2")
+        autograd_check(term, op)
