@@ -1,0 +1,8 @@
+sandbox_mode = "workspace-write"
+approval_policy = "never"
+
+[features]
+use_legacy_landlock = true
+
+[sandbox_workspace_write]
+writable_roots = ["."]

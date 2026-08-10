@@ -15,7 +15,6 @@ from ..solve.engine import Fista
 from ..solve.strategy import FinalRefit, Ladder, SolveState
 from ..terms.censor import CensorRunningMax
 from ..terms.data import DataFidelity
-from ..terms.quiet import QuietHinge
 
 
 @algorithm("FFTWarmStart")
@@ -49,10 +48,10 @@ class FFTWarmStart(Algorithm):
 
 @algorithm("BuildMeasurement")
 class BuildMeasurement(Algorithm):
-    """Immutable event measurement: windows, operator A(d), quiet mask."""
+    """Immutable event measurement: latch windows and the operator A(d)."""
 
     reads = ("event", "readout_config", "block", "block_offset")
-    writes = ("op", "quiet_mask", "time_subbin")
+    writes = ("op", "time_subbin")
 
     def execute(self, store):
         ev = store.get("event")
@@ -115,14 +114,7 @@ class BuildMeasurement(Algorithm):
         op = ZSOperator(prepared.integrated_response, (nx, ny, nt * S), windows,
                         B // S, device=comp.device, dtype=comp.dtype,
                         row_weights=weights)
-        quiet = np.ones((nx, ny, nt * S), dtype=bool)
-        for row in ev.hits.location:
-            px = int(row[0] - block_offset[0])
-            py = int(row[1] - block_offset[1])
-            if 0 <= px < nx and 0 <= py < ny:
-                quiet[px, py, :] = False
         self.put(store, "op", op)
-        self.put(store, "quiet_mask", quiet)
         self.put(store, "time_subbin", S)
 
 
@@ -170,7 +162,7 @@ class BuildSupport(Algorithm):
 class Solve(Algorithm):
     """Constrained solve: terms + engine + strategies from config."""
 
-    reads = ("op", "quiet_mask", "support", "warm.deconv_q",
+    reads = ("op", "support", "warm.deconv_q",
              "hits_view", "block_offset", "readout_config", "time_subbin")
     writes = ("solve.q", "solve.state")
 
@@ -184,10 +176,7 @@ class Solve(Algorithm):
         terms = [DataFidelity(op)]
         for tcfg in self.props.get("terms", []):
             kind = tcfg["type"]
-            if kind == "quiet":
-                terms.append(QuietHinge(op, store.get("quiet_mask"), thr,
-                                        beta=float(tcfg.get("beta", 1.0))))
-            elif kind == "censor":
+            if kind == "censor":
                 terms.append(CensorRunningMax.from_hits(
                     op, store.get("hits_view"), store.get("block_offset"),
                     csa_reset_time=float(rc.csa_reset_time or 0),

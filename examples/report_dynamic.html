@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dynamic LArPix Deconvolution Report</title>
+    <style>
+        :root {
+            --sidebar-width: 280px;
+            --primary-color: #007bff;
+            --bg-color: #f8f9fa;
+            --sidebar-bg: #343a40;
+        }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+            line-height: 1.6; 
+            color: #333; 
+            margin: 0; 
+            display: flex;
+            background-color: var(--bg-color); 
+        }
+        
+        /* Sidebar */
+        .sidebar {
+            width: var(--sidebar-width);
+            height: 100vh;
+            position: fixed;
+            left: 0; top: 0;
+            background-color: var(--sidebar-bg);
+            color: white;
+            overflow-y: auto;
+            padding: 20px;
+            box-sizing: border-box;
+            z-index: 1000;
+        }
+        .sidebar h2 { font-size: 1.2em; margin-bottom: 20px; border-bottom: 1px solid #495057; padding-bottom: 10px; }
+        .sidebar ul { list-style: none; padding: 0; margin: 0; }
+        .sidebar li { margin-bottom: 8px; }
+        .sidebar a {
+            color: #adb5bd;
+            text-decoration: none;
+            font-size: 0.85em;
+            display: block;
+            padding: 8px 12px;
+            border-radius: 4px;
+            transition: 0.2s;
+        }
+        .sidebar a:hover { background-color: #495057; color: white; }
+        .sidebar a.active { background-color: var(--primary-color); color: white; }
+
+        /* Main Content */
+        .main-content {
+            margin-left: var(--sidebar-width);
+            padding: 40px;
+            width: calc(100% - var(--sidebar-width));
+            box-sizing: border-box;
+        }
+
+        .header-controls {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+            margin-bottom: 30px;
+            position: sticky;
+            top: 0;
+            z-index: 900;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+        .header-controls label { font-weight: bold; }
+        .header-controls select {
+            padding: 8px 12px;
+            border-radius: 4px;
+            border: 1px solid #ced4da;
+            font-size: 1em;
+        }
+
+        h1 { color: #0056b3; margin-top: 0; }
+        h2 { color: #007bff; margin-top: 40px; border-bottom: 1px solid #dee2e6; padding-bottom: 5px; }
+        
+        .config-section { 
+            background: white; 
+            padding: 30px; 
+            border-radius: 8px; 
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05); 
+            margin-bottom: 50px; 
+            scroll-margin-top: 100px;
+        }
+        
+        .image-grid { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(450px, 1fr)); 
+            gap: 25px; 
+            margin-top: 20px;
+        }
+        .image-container { 
+            border: 1px solid #eee; 
+            padding: 15px; 
+            text-align: center; 
+            border-radius: 4px;
+        }
+        .image-container img { 
+            max-width: 100%; 
+            height: auto; 
+            display: block; 
+            margin: 0 auto 10px;
+            background: #f8f9fa;
+            min-height: 200px;
+        }
+        .image-label { font-size: 0.9em; color: #6c757d; font-weight: bold; }
+        
+        .tag { 
+            display: inline-block; 
+            background: #28a745; 
+            color: white; 
+            padding: 3px 10px; 
+            border-radius: 12px; 
+            font-size: 0.75em; 
+            font-weight: bold; 
+            margin-left: 10px; 
+            vertical-align: middle;
+        }
+
+        @media (max-width: 900px) {
+            .sidebar { display: none; }
+            .main-content { margin-left: 0; width: 100%; padding: 20px; }
+        }
+    </style>
+</head>
+<body>
+    <nav class="sidebar">
+        <h2>Runs</h2>
+        <ul id="sidebar-links">
+            <!-- Dynamic Links -->
+        </ul>
+    </nav>
+
+    <main class="main-content">
+        <div class="header-controls">
+            <h1>Analysis Results</h1>
+            <div style="flex-grow: 1;"></div>
+            <label for="dataset-select">Dataset:</label>
+            <select id="dataset-select">
+                <!-- Dynamic Options -->
+            </select>
+        </div>
+
+        <div id="report-container">
+            <!-- Dynamic Content -->
+        </div>
+    </main>
+
+    <script>
+        let configData = null;
+
+        async function init() {
+            try {
+                const response = await fetch('report_config.json');
+                configData = await response.json();
+                
+                renderControls();
+                renderReport();
+                
+                document.getElementById('dataset-select').addEventListener('change', renderReport);
+            } catch (err) {
+                console.error("Failed to load config:", err);
+                document.getElementById('report-container').innerHTML = "<h2>Error loading configuration.</h2>";
+            }
+        }
+
+        function getSigmaStr(val) {
+            const s = val.toString();
+            return s.includes('.') ? s.split('.')[1] : s;
+        }
+
+        function renderControls() {
+            const select = document.getElementById('dataset-select');
+            configData.datasets.forEach(ds => {
+                const opt = document.createElement('option');
+                opt.value = ds;
+                opt.textContent = ds;
+                select.appendChild(opt);
+            });
+
+            const sidebarUl = document.getElementById('sidebar-links');
+            configData.configurations.forEach(config => {
+                const li = document.createElement('li');
+                const a = document.createElement('a');
+                a.href = `#config${config.run}`;
+                a.textContent = `Run ${config.run}: ${config.tag}`;
+                li.appendChild(a);
+                sidebarUl.appendChild(li);
+            });
+        }
+
+        function renderReport() {
+            const dataset = document.getElementById('dataset-select').value;
+            const container = document.getElementById('report-container');
+            container.innerHTML = '';
+
+            configData.configurations.forEach(config => {
+                const sigmaTStr = "sp" + getSigmaStr(config['sigma-temporal']);
+                const sigmaPStr = "spp" + getSigmaStr(config['sigma-pixel']);
+                const basePrefix = `analysis_20260318_tpc0/v2_${dataset}_${sigmaTStr}_${sigmaPStr}`;
+
+                const section = document.createElement('section');
+                section.id = `config${config.run}`;
+                section.className = 'config-section';
+
+                section.innerHTML = `
+                    <h2>Run ${config.run}: σ<sub>t</sub>=${config['sigma-temporal']}, σ<sub>pxl</sub>=${config['sigma-pixel']} <span class="tag">${config.tag}</span></h2>
+                    <div class="image-grid">
+                        ${renderImageContainer(basePrefix + '_hist_2d_hits.png', '2D Charge Distribution (Hits)')}
+                        ${renderImageContainer(basePrefix + '_hist_deconv_q.png', 'Deconvoluted Charge Spectrum')}
+                        ${renderImageContainer(basePrefix + '_hist_diff.png', 'Difference Histogram')}
+                        ${renderImageContainer(basePrefix + '_signed_vs_true_scatter.png', 'Signed vs True Charge Scatter')}
+                    </div>
+                `;
+                container.appendChild(section);
+            });
+        }
+
+        function renderImageContainer(src, label) {
+            return `
+                <div class="image-container">
+                    <img src="${src}" alt="${label}" onerror="this.onerror=null; this.src='https://via.placeholder.com/450x350?text=Image+Not+Found';">
+                    <div class="image-label">${label}</div>
+                </div>
+            `;
+        }
+
+        // Active link highlighting
+        window.addEventListener('scroll', () => {
+            let current = '';
+            document.querySelectorAll('.config-section').forEach(section => {
+                const sectionTop = section.offsetTop;
+                if (pageYOffset >= sectionTop - 120) {
+                    current = section.getAttribute('id');
+                }
+            });
+
+            document.querySelectorAll('.sidebar a').forEach(a => {
+                a.classList.remove('active');
+                if (a.getAttribute('href').substring(1) === current) {
+                    a.classList.add('active');
+                }
+            });
+        });
+
+        init();
+    </script>
+</body>
+</html>

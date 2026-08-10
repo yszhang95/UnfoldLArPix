@@ -1,0 +1,58 @@
+{
+  "datasets": [
+    "thres5k_nburst256",
+    "thres1k_nburst256",
+    "thres5k_nburst4",
+    "thres5k_sefltrigger"
+  ],
+  "configurations": [
+    {
+      "run": 1,
+      "tag": "Standard",
+      "sigma-temporal": 0.005,
+      "sigma-pixel": 0.1
+    },
+    {
+      "run": 2,
+      "tag": "Broad Pixel",
+      "sigma-temporal": 0.005,
+      "sigma-pixel": 0.2
+    },
+    {
+      "run": 3,
+      "tag": "Intermediate",
+      "sigma-temporal": 0.004,
+      "sigma-pixel": 0.2
+    },
+    {
+      "run": 4,
+      "tag": "Fine Temporal",
+      "sigma-temporal": 0.003,
+      "sigma-pixel": 0.2
+    },
+    {
+      "run": 5,
+      "tag": "Fine Balanced",
+      "sigma-temporal": 0.003,
+      "sigma-pixel": 0.15
+    },
+    {
+      "run": 6,
+      "tag": "Coarse 1",
+      "sigma-temporal": 0.1,
+      "sigma-pixel": 0.8
+    },
+    {
+      "run": 7,
+      "tag": "Coarse 2",
+      "sigma-temporal": 0.2,
+      "sigma-pixel": 0.8
+    },
+    {
+      "run": 8,
+      "tag": "Coarse 3",
+      "sigma-temporal": 0.3,
+      "sigma-pixel": 0.8
+    }
+  ]
+}

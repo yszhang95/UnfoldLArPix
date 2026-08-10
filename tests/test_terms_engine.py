@@ -7,7 +7,6 @@ from unfoldlarpix.constrained_solver import LatchWindow
 from unfoldlarpix.model.operator import ZSOperator
 from unfoldlarpix.terms.base import CoordProx, IterCtx
 from unfoldlarpix.terms.data import DataFidelity
-from unfoldlarpix.terms.quiet import QuietHinge
 from unfoldlarpix.terms.censor import CensorRunningMax
 from unfoldlarpix.solve.engine import Fista
 from unfoldlarpix.solve.strategy import Ladder, SolveState
@@ -49,11 +48,6 @@ class TestGradientsVsAutograd:
     def test_data_fidelity(self):
         op = make_op()
         autograd_check(DataFidelity(op), op)
-
-    def test_quiet_hinge(self):
-        op = make_op()
-        quiet = np.ones(op.block_shape, bool); quiet[1, 1] = False
-        autograd_check(QuietHinge(op, quiet, threshold=0.4, beta=2.0), op)
 
     @pytest.mark.parametrize("norm", ["l2", "l1"])
     def test_censor_running_max(self, norm):

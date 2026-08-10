@@ -1,0 +1,51 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add *)",
+      "Bash(git add)",
+      "Bash(git commit *)",
+      "Bash(git commit)",
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git branch *)",
+      "Bash(git checkout *)",
+      "Bash(git switch *)",
+      "Bash(git stash *)",
+
+      "Bash(uv run *)",
+      "Bash(uv add *)",
+      "Bash(uv sync *)",
+      "Bash(uv pip *)",
+      "Bash(pip install *)",
+      "Bash(python *)",
+      "Bash(python3 *)",
+
+      "Bash(pytest *)",
+      "Bash(python -m pytest *)",
+
+      "Bash(ls *)",
+      "Bash(ls)",
+      "Bash(cat *)",
+      "Bash(find *)",
+      "Bash(mkdir *)",
+      "Bash(mv *)",
+      "Bash(cp *)",
+      "Bash(rm *)",
+      "Bash(touch *)",
+      "Bash(chmod *)",
+
+      "Bash(rg *)",
+      "Bash(grep *)",
+      "Bash(echo *)",
+      "Bash(pwd)",
+      "Bash(which *)",
+      "Bash(env)",
+      "Bash(export *)"
+    ],
+    "deny": [
+      "Bash(git push *)",
+      "Bash(git push)"
+    ]
+  }
+}
