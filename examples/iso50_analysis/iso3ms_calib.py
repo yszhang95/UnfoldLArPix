@@ -64,78 +64,85 @@ def collect(suffix, find_dec):
     return pool
 
 
-t_us = np.array([L.drift_time_us(float(t.split('_d')[1].replace('p', '.')))
-                 for t in A50.TAGS])
-mpvfn = lambda v: L.mpv_of(v)[0]
 
-print('collect 1 ms (calibration source)', flush=True)
-p1 = collect('', lambda tag, ev: A50.find_solved('C', tag, ev))
-print('collect 3 ms (test sample)', flush=True)
-p3 = collect('_3ms', find_3ms)
+def main():
+    # record convention: the shallowest depth (d = 1.5 cm) is excluded
+    A50.TAGS = A50.TAGS[1:]
+    t_us = np.array([L.drift_time_us(float(t.split('_d')[1].replace('p', '.')))
+                     for t in A50.TAGS])
+    mpvfn = lambda v: L.mpv_of(v)[0]
 
-# ---- calibration curves from the 1 ms sample --------------------------
-mpv1 = {k: np.array([mpvfn(np.concatenate(p1[k][tag])) for tag in A50.TAGS])
-        for k in COL}
-CAL = {k: mpv1[k] / mpv1['effq'] for k in ['decC', 'hits']}
+    print('collect 1 ms (calibration source)', flush=True)
+    p1 = collect('', lambda tag, ev: A50.find_solved('C', tag, ev))
+    print('collect 3 ms (test sample)', flush=True)
+    p3 = collect('_3ms', find_3ms)
 
-# ---- raw and calibrated tau on the 3 ms sample -------------------------
-res = {}
-for k in COL:
-    res[k] = dict(zip(('tau_raw', 'err_raw'),
-                      A50.boot_tau(t_us, [p3[k][t] for t in A50.TAGS], mpvfn)))
-for k in ['decC', 'hits']:
-    calseg = [[s / CAL[k][i] for s in p3[k][tag]]
-              for i, tag in enumerate(A50.TAGS)]
-    res[k].update(zip(('tau_cal', 'err_cal'),
-                      A50.boot_tau(t_us, calseg, mpvfn)))
+    # ---- calibration curves from the 1 ms sample --------------------------
+    mpv1 = {k: np.array([mpvfn(np.concatenate(p1[k][tag])) for tag in A50.TAGS])
+            for k in COL}
+    CAL = {k: mpv1[k] / mpv1['effq'] for k in ['decC', 'hits']}
 
-mpv3 = {k: np.array([mpvfn(np.concatenate(p3[k][tag])) for tag in A50.TAGS])
-        for k in COL}
-json.dump({'tau': res,
-           'cal_curve': {k: CAL[k].tolist() for k in CAL},
-           'mpv_1ms': {k: v.tolist() for k, v in mpv1.items()},
-           'mpv_3ms': {k: v.tolist() for k, v in mpv3.items()},
-           't_us': t_us.tolist()},
-          open(f'{OUT}/iso3ms_calib.json', 'w'), indent=1)
+    # ---- raw and calibrated tau on the 3 ms sample -------------------------
+    res = {}
+    for k in COL:
+        res[k] = dict(zip(('tau_raw', 'err_raw'),
+                          A50.boot_tau(t_us, [p3[k][t] for t in A50.TAGS], mpvfn)))
+    for k in ['decC', 'hits']:
+        calseg = [[s / CAL[k][i] for s in p3[k][tag]]
+                  for i, tag in enumerate(A50.TAGS)]
+        res[k].update(zip(('tau_cal', 'err_cal'),
+                          A50.boot_tau(t_us, calseg, mpvfn)))
 
-print('\n== tau on the 3 ms sample (truth: 3.0) ==')
-for k in COL:
-    line = f"{LBL[k]:26s} raw {res[k]['tau_raw']:6.2f} +- {res[k]['err_raw']:.2f}"
-    if 'tau_cal' in res[k]:
-        line += f"   calibrated(1ms curve) {res[k]['tau_cal']:6.2f} +- {res[k]['err_cal']:.2f}"
-    print(line, flush=True)
+    mpv3 = {k: np.array([mpvfn(np.concatenate(p3[k][tag])) for tag in A50.TAGS])
+            for k in COL}
+    json.dump({'tau': res,
+               'cal_curve': {k: CAL[k].tolist() for k in CAL},
+               'mpv_1ms': {k: v.tolist() for k, v in mpv1.items()},
+               'mpv_3ms': {k: v.tolist() for k, v in mpv3.items()},
+               't_us': t_us.tolist()},
+              open(f'{OUT}/iso3ms_calib.json', 'w'), indent=1)
 
-# ---- figure ------------------------------------------------------------
-fig, (a1, a2) = plt.subplots(1, 2, figsize=(11.5, 4.6))
-tt = np.linspace(0, 185, 50)
-for k in COL:
-    b, a = np.polyfit(t_us, np.log(mpv3[k]), 1)
-    a1.plot(t_us, mpv3[k], 'o', color=COL[k], ms=5)
-    a1.plot(tt, np.exp(a + b*tt), '-', color=COL[k], lw=1.2,
-            label=rf"{LBL[k]}: $\tau = {res[k]['tau_raw']:.2f} \pm {res[k]['err_raw']:.2f}$ ms")
-a1.plot(tt, np.exp(np.log(mpv3['effq'][0]) + t_us[0]/3000. - tt/3000.),
-        'k--', lw=1, label=r'true $\tau = 3$ ms (slope)')
-a1.set_title('uncalibrated')
-for k in ['decC', 'hits']:
-    m = mpv3[k] / CAL[k]
-    b, a = np.polyfit(t_us, np.log(m), 1)
-    a2.plot(t_us, m, 'o', color=COL[k], ms=5)
-    a2.plot(tt, np.exp(a + b*tt), '-', color=COL[k], lw=1.2,
-            label=rf"{LBL[k]} / 1ms curve: $\tau = {res[k]['tau_cal']:.2f} \pm {res[k]['err_cal']:.2f}$ ms")
-a2.plot(t_us, mpv3['effq'], 'o', color=COL['effq'], ms=4, alpha=0.6)
-b, a = np.polyfit(t_us, np.log(mpv3['effq']), 1)
-a2.plot(tt, np.exp(a + b*tt), '-', color=COL['effq'], lw=1.0, alpha=0.6,
-        label=rf"truth control: $\tau = {res['effq']['tau_raw']:.2f} \pm {res['effq']['err_raw']:.2f}$ ms")
-a2.set_title('calibrated with the 1 ms capture curve')
-for ax in (a1, a2):
-    ax.set_yscale('log')
-    ax.set_xlabel(r'drift time [$\mu$s]')
-    ax.set_ylabel('dQ/dx MPV [ke/cm] (3-cm segments)')
-    yt = [46, 50, 54, 58, 62]
-    ax.set_yticks(yt, [str(v) for v in yt])
-    ax.legend(fontsize=8)
-    ax.grid(alpha=0.3, which='both')
-fig.tight_layout()
-fig.savefig(f'{OUT}/calib_test.pdf')
-fig.savefig(f'{OUT}/calib_test.png', dpi=130)
-print(f'-> {OUT}/calib_test.pdf .png iso3ms_calib.json', flush=True)
+    print('\n== tau on the 3 ms sample (truth: 3.0) ==')
+    for k in COL:
+        line = f"{LBL[k]:26s} raw {res[k]['tau_raw']:6.2f} +- {res[k]['err_raw']:.2f}"
+        if 'tau_cal' in res[k]:
+            line += f"   calibrated(1ms curve) {res[k]['tau_cal']:6.2f} +- {res[k]['err_cal']:.2f}"
+        print(line, flush=True)
+
+    # ---- figure ------------------------------------------------------------
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(11.5, 4.6))
+    tt = np.linspace(0, 185, 50)
+    for k in COL:
+        b, a = np.polyfit(t_us, np.log(mpv3[k]), 1)
+        a1.plot(t_us, mpv3[k], 'o', color=COL[k], ms=5)
+        a1.plot(tt, np.exp(a + b*tt), '-', color=COL[k], lw=1.2,
+                label=rf"{LBL[k]}: $\tau = {res[k]['tau_raw']:.2f} \pm {res[k]['err_raw']:.2f}$ ms")
+    a1.plot(tt, np.exp(np.log(mpv3['effq'][0]) + t_us[0]/3000. - tt/3000.),
+            'k--', lw=1, label=r'true $\tau = 3$ ms (slope)')
+    a1.set_title('uncalibrated')
+    for k in ['decC', 'hits']:
+        m = mpv3[k] / CAL[k]
+        b, a = np.polyfit(t_us, np.log(m), 1)
+        a2.plot(t_us, m, 'o', color=COL[k], ms=5)
+        a2.plot(tt, np.exp(a + b*tt), '-', color=COL[k], lw=1.2,
+                label=rf"{LBL[k]} / 1ms curve: $\tau = {res[k]['tau_cal']:.2f} \pm {res[k]['err_cal']:.2f}$ ms")
+    a2.plot(t_us, mpv3['effq'], 'o', color=COL['effq'], ms=4, alpha=0.6)
+    b, a = np.polyfit(t_us, np.log(mpv3['effq']), 1)
+    a2.plot(tt, np.exp(a + b*tt), '-', color=COL['effq'], lw=1.0, alpha=0.6,
+            label=rf"truth control: $\tau = {res['effq']['tau_raw']:.2f} \pm {res['effq']['err_raw']:.2f}$ ms")
+    a2.set_title('calibrated with the 1 ms capture curve')
+    for ax in (a1, a2):
+        ax.set_yscale('log')
+        ax.set_xlabel(r'drift time [$\mu$s]')
+        ax.set_ylabel('dQ/dx MPV [ke/cm] (3-cm segments)')
+        yt = [46, 50, 54, 58, 62]
+        ax.set_yticks(yt, [str(v) for v in yt])
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.3, which='both')
+    fig.tight_layout()
+    fig.savefig(f'{OUT}/calib_test.pdf')
+    fig.savefig(f'{OUT}/calib_test.png', dpi=130)
+    print(f'-> {OUT}/calib_test.pdf .png iso3ms_calib.json', flush=True)
+
+if __name__ == '__main__':
+    main()

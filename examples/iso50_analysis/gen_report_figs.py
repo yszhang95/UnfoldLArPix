@@ -51,29 +51,37 @@ t_us = np.array([L.drift_time_us(float(t.split('_d')[1].replace('p', '.')))
 mpvfn = lambda v: L.mpv_of(v)[0]
 
 # ---- tau_fit.pdf ------------------------------------------------------
+# Fits exclude the shallowest depth (d = 1.5 cm): the acquisition-edge
+# response truncation (the Ramo prompt deficit, 1.3% there) puts the
+# point off-trend for every reconstructed estimator. It is plotted open.
+FIT = slice(1, None)
 fig, ax = plt.subplots(figsize=(6.4, 4.6))
 res = {}
 for k in COL:
     m = np.array([mpvfn(np.concatenate(seg3[k][tag])) for tag in A50.TAGS])
-    tau, err = A50.boot_tau(t_us, [seg3[k][tag] for tag in A50.TAGS], mpvfn)
+    tau, err = A50.boot_tau(t_us[FIT],
+                            [seg3[k][tag] for tag in A50.TAGS[FIT]], mpvfn)
     res[k] = {'tau3': tau, 'err3': err}
-    b, a = np.polyfit(t_us, np.log(m), 1)
-    ax.plot(t_us, m, 'o', color=COL[k], ms=5)
+    b, a = np.polyfit(t_us[FIT], np.log(m[FIT]), 1)
+    ax.plot(t_us[FIT], m[FIT], 'o', color=COL[k], ms=5)
+    ax.plot(t_us[:1], m[:1], 'o', mfc='none', color=COL[k], ms=6)
     tt = np.linspace(0, 185, 50)
     ax.plot(tt, np.exp(a + b*tt), '-', color=COL[k], lw=1.2,
             label=rf'{LBL[k]}: $\tau = {tau:.2f} \pm {err:.2f}$ ms')
-ax.plot(tt, np.exp(np.log(57.5) - tt/1000.), 'k--', lw=1,
+ax.plot(tt, np.exp(np.log(57.7) - tt/1000.), 'k--', lw=1,
         label=r'true $\tau = 1$ ms (slope)')
 ax.set_yscale('log')
 ax.set_xlabel(r'drift time [$\mu$s]')
 ax.set_ylabel('dQ/dx MPV [ke/cm] (3-cm segments)')
 ax.set_yticks([45, 50, 55, 60], ['45', '50', '55', '60'])
+ax.set_title('open marker: d = 1.5 cm, excluded from fits', fontsize=9)
 ax.legend(fontsize=9)
 ax.grid(alpha=0.3, which='both')
 fig.tight_layout(); fig.savefig(f'{OUT}/tau_fit.pdf'); plt.close(fig)
 
 for k in COL:
-    tau, err = A50.boot_tau(t_us, [seg4[k][tag] for tag in A50.TAGS], mpvfn)
+    tau, err = A50.boot_tau(t_us[FIT],
+                            [seg4[k][tag] for tag in A50.TAGS[FIT]], mpvfn)
     res[k].update(tau4=tau, err4=err)
 json.dump(res, open(f'{OUT}/tau_report.json', 'w'), indent=1)
 print('tau_fit.pdf', {k: round(v['tau3'], 3) for k, v in res.items()},
