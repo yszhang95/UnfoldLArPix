@@ -13,6 +13,7 @@ from ..model.operator import ZSOperator
 from ..model.warm_start import fft_warm_start
 from ..solve.engine import Fista
 from ..solve.strategy import FinalRefit, Ladder, SolveState
+from ..terms.base import IterCtx
 from ..terms.censor import CensorRunningMax
 from ..terms.data import DataFidelity
 
@@ -209,7 +210,7 @@ class Solve(Algorithm):
 
     reads = ("op", "support", "warm.deconv_q",
              "hits_view", "block_offset", "readout_config", "time_subbin")
-    writes = ("solve.q", "solve.state")
+    writes = ("solve.q", "solve.state", "solve.loss")
 
     def execute(self, store):
         op = store.get("op")
@@ -273,6 +274,18 @@ class Solve(Algorithm):
         for rec in state.history:
             print(f"[Solve] {rec.label}: alpha={rec.alpha} "
                   f"q_sum={rec.q_sum:.1f} nnz={rec.nnz}")
+        # loss ledger: every objective component evaluated at the final
+        # solution, with the weights actually used (censor includes beta).
+        # The l1 LOSS at the solution is alpha-field dependent; what is
+        # recorded is the norm (sum q) plus the configured weights, which
+        # together with the stored job_config reproduce the objective.
+        ctx = IterCtx(state.q, op)
+        loss = {type(t).__name__: float(t.value(ctx)) for t in terms}
+        loss["l1_sum_q"] = float(state.q.sum())
+        if "refit" in self.props:
+            loss["refit_alpha"] = float(
+                self.props["refit"].get("alpha", 0.0))
+        self.put(store, "solve.loss", loss)
         q = state.q.cpu().numpy().astype(np.float64)
         if S > 1:                       # fit at B/S, report at B (sum sub-bins)
             nx, ny, qt = q.shape

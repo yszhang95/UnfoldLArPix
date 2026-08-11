@@ -90,6 +90,9 @@ class WriteCharges(Algorithm):
             "charges_columns":
                 "pixel_x pixel_y t_center_tick charge_ke on_skeleton",
             "job_config": json.dumps(store.get("job.config"), default=str),
+            "loss_components": json.dumps(
+                store.get("solve.loss")
+                if "solve.loss" in store else None),
             "provenance": json.dumps(store.provenance()),
         }
         if u is not None:
