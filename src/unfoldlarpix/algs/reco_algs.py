@@ -122,19 +122,60 @@ class BuildMeasurement(Algorithm):
 class BuildSupport(Algorithm):
     """ROI support on the fit grid.
 
-    source=warm: threshold the (legacy-compatible: re-smoothed) warm
-    start.  ``smooth_first`` defaults to True for parity with the
+    source=warm (default): threshold the (legacy-compatible: re-smoothed)
+    warm start.  ``smooth_first`` defaults to True for parity with the
     adopted pipeline; FINDINGS item 18(b) documents that the direct
-    threshold is the clean equivalent.
+    threshold is the clean equivalent.  CAVEAT: the threshold ``eps`` is
+    an absolute charge, so the support SHRINKS as the signal attenuates
+    (measured: coverage 1.94% -> 1.40% over a 30-cm drift at 1 ms
+    lifetime) -- an amplitude coupling that a lifetime analysis sees as
+    fake decay.
+
+    source=hits: build the support from the DATA -- every pixel within
+    ``hits_dilate`` (Chebyshev) of a fired pixel, over each hit's
+    [trigger - t_pad, last latch + t_pad] time-bin extent.  Whether a
+    pixel fired is a binary fact, so this support is amplitude-blind by
+    construction.
     """
 
-    reads = ("warm.deconv_q", "op", "readout_config", "time_subbin")
+    reads = ("warm.deconv_q", "op", "readout_config", "time_subbin",
+             "hits_view", "block_offset")
     writes = ("support",)
+
+    def _from_hits(self, store, op, S):
+        rc = store.get("readout_config")
+        hv = store.get("hits_view")
+        boff = np.asarray(store.get("block_offset"), dtype=float)
+        B = float(rc.adc_hold_delay) / S
+        N = int(self.props.get("hits_dilate", 2))
+        tpad = int(self.props.get("t_pad", 2))
+        nx, ny, qt = op.q_shape
+        supp = np.zeros((nx, ny, qt), dtype=bool)
+        px = (hv.pixel_x - int(boff[0])).astype(int)
+        py = (hv.pixel_y - int(boff[1])).astype(int)
+        trig = (hv.trigger - boff[2]) / B
+        last = (hv.last_latch - boff[2]) / B
+        for i in range(len(px)):
+            if not (-N <= px[i] < nx + N and -N <= py[i] < ny + N):
+                continue
+            b0 = max(int(np.floor(trig[i])) - tpad, 0)
+            b1 = min(int(np.ceil(last[i])) + tpad + 1, qt)
+            if b1 <= b0:
+                continue
+            supp[max(px[i]-N, 0):px[i]+N+1,
+                 max(py[i]-N, 0):py[i]+N+1, b0:b1] = True
+        return supp
 
     def execute(self, store):
         rc = store.get("readout_config")
         op = store.get("op")
         S = int(store.get("time_subbin") or 1)
+        if self.props.get("source", "warm") == "hits":
+            support = self._from_hits(store, op, S)
+            print(f"[BuildSupport] {support.mean() * 100:.2f}% of q voxels "
+                  f"(source=hits)")
+            self.put(store, "support", support)
+            return
         dq = np.clip(store.get("warm.deconv_q"), 0.0, None)
         eps = float(self.props.get("eps", 0.3))
         dilate = int(self.props.get("dilate", 1))

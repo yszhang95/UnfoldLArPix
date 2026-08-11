@@ -113,3 +113,38 @@ def test_diag_mean_normalised_when_no_diff_rows():
     v = row_variances(metas, _RC())
     assert (1.0 / w) == pytest.approx(v / v.mean())
     assert np.average(v * w) == pytest.approx(v.mean())
+
+
+class TestHitsSupport:
+    """source=hits support: amplitude-blind, anchored on fired pixels."""
+
+    def test_covers_hit_neighbourhood(self):
+        import numpy as np
+        from unfoldlarpix.algs.reco_algs import BuildSupport
+        from unfoldlarpix.io.hits import HitsView
+
+        class _Op:
+            q_shape = (10, 10, 20)
+
+        class _Store(dict):
+            def get(self, k): return self[k]
+
+        loc = np.array([[5, 5, 60, 90, 120]])          # trigger 60, latch 90
+        dat = np.array([[0., 0., 0., 20.]])
+        st = _Store()
+        st['readout_config'] = _RC()
+        st['op'] = _Op()
+        st['time_subbin'] = 1
+        st['hits_view'] = HitsView(loc, dat, B)
+        st['block_offset'] = np.array([0, 0, 0], float)
+        st['warm.deconv_q'] = np.zeros((10, 10, 20))
+        alg = BuildSupport(source='hits', hits_dilate=2, t_pad=2)
+        out = {}
+        alg.put = lambda store, k, v: out.__setitem__(k, v)
+        alg.execute(st)
+        s = out['support']
+        # trigger bin 2, latch bin 3 -> padded window [0, 5]
+        assert s[5, 5, 2] and s[5, 5, 3]
+        assert s[3, 3, 2] and s[7, 7, 3]      # Chebyshev-2 neighbourhood
+        assert not s[5, 5, 8]                 # outside padded time window
+        assert not s[2, 5, 2]                 # outside pixel neighbourhood
