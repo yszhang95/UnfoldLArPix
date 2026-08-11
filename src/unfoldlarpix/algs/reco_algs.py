@@ -153,8 +153,12 @@ class BuildSupport(Algorithm):
         supp = np.zeros((nx, ny, qt), dtype=bool)
         px = (hv.pixel_x - int(boff[0])).astype(int)
         py = (hv.pixel_y - int(boff[1])).astype(int)
-        trig = (hv.trigger - boff[2]) / B
-        last = (hv.last_latch - boff[2]) / B
+        # hits live at the ANODE-ARRIVAL time; the charge grid lives at the
+        # response reference plane, one kernel length earlier.  The kernel
+        # length in bins is exactly the block/q time-extent difference.
+        kshift = op.block_shape[2] - qt
+        trig = (hv.trigger - boff[2]) / B - kshift
+        last = (hv.last_latch - boff[2]) / B - kshift
         for i in range(len(px)):
             if not (-N <= px[i] < nx + N and -N <= py[i] < ny + N):
                 continue

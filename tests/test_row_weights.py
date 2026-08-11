@@ -125,6 +125,7 @@ class TestHitsSupport:
 
         class _Op:
             q_shape = (10, 10, 20)
+            block_shape = (10, 10, 20)      # kshift = 0 in the toy
 
         class _Store(dict):
             def get(self, k): return self[k]
