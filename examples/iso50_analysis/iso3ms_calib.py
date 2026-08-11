@@ -77,6 +77,24 @@ def main():
     print('collect 3 ms (test sample)', flush=True)
     p3 = collect('_3ms', find_3ms)
 
+    def boot_pct(pool_by_tag, div=None, nboot=2000, seed=1):
+        rng = np.random.default_rng(seed)
+        dv = np.ones(len(A50.TAGS)) if div is None else div
+        taus = []
+        for _ in range(nboot):
+            m = []
+            for i, tag in enumerate(A50.TAGS):
+                segs = pool_by_tag[tag]
+                pick = rng.integers(0, len(segs), len(segs))
+                m.append(mpvfn(np.concatenate([segs[j] for j in pick]))
+                         / dv[i])
+            sl, _ = np.polyfit(t_us, np.log(m), 1)
+            taus.append(-1.0/sl/1000.0)
+        taus = np.array(taus)
+        med = float(np.median(taus))
+        lo, hi = np.percentile(taus, [15.87, 84.13])
+        return med, float(hi-med), float(med-lo)
+
     # ---- calibration curves from the 1 ms sample --------------------------
     mpv1 = {k: np.array([mpvfn(np.concatenate(p1[k][tag])) for tag in A50.TAGS])
             for k in COL}
@@ -85,13 +103,15 @@ def main():
     # ---- raw and calibrated tau on the 3 ms sample -------------------------
     res = {}
     for k in COL:
-        res[k] = dict(zip(('tau_raw', 'err_raw'),
-                          A50.boot_tau(t_us, [p3[k][t] for t in A50.TAGS], mpvfn)))
+        med, up, dn = boot_pct(p3[k])
+        res[k] = {'tau_raw': med, 'up_raw': up, 'dn_raw': dn,
+                  'lam_raw': 1.0/med,
+                  'lamerr_raw': 0.5*(1.0/(med-dn) - 1.0/(med+up))}
     for k in ['decC', 'hits']:
-        calseg = [[s / CAL[k][i] for s in p3[k][tag]]
-                  for i, tag in enumerate(A50.TAGS)]
-        res[k].update(zip(('tau_cal', 'err_cal'),
-                          A50.boot_tau(t_us, calseg, mpvfn)))
+        med, up, dn = boot_pct(p3[k], div=CAL[k])
+        res[k].update(tau_cal=med, up_cal=up, dn_cal=dn,
+                      lam_cal=1.0/med,
+                      lamerr_cal=0.5*(1.0/(med-dn) - 1.0/(med+up)))
 
     mpv3 = {k: np.array([mpvfn(np.concatenate(p3[k][tag])) for tag in A50.TAGS])
             for k in COL}
@@ -104,9 +124,11 @@ def main():
 
     print('\n== tau on the 3 ms sample (truth: 3.0) ==')
     for k in COL:
-        line = f"{LBL[k]:26s} raw {res[k]['tau_raw']:6.2f} +- {res[k]['err_raw']:.2f}"
+        line = (f"{LBL[k]:26s} raw {res[k]['tau_raw']:6.2f} "
+                f"+{res[k]['up_raw']:.2f} -{res[k]['dn_raw']:.2f}")
         if 'tau_cal' in res[k]:
-            line += f"   calibrated(1ms curve) {res[k]['tau_cal']:6.2f} +- {res[k]['err_cal']:.2f}"
+            line += (f"   cal {res[k]['tau_cal']:6.2f} "
+                     f"+{res[k]['up_cal']:.2f} -{res[k]['dn_cal']:.2f}")
         print(line, flush=True)
 
     # ---- figure ------------------------------------------------------------
@@ -116,20 +138,20 @@ def main():
         b, a = np.polyfit(t_us, np.log(mpv3[k]), 1)
         a1.plot(t_us, mpv3[k], 'o', color=COL[k], ms=5)
         a1.plot(tt, np.exp(a + b*tt), '-', color=COL[k], lw=1.2,
-                label=rf"{LBL[k]}: $\tau = {res[k]['tau_raw']:.2f} \pm {res[k]['err_raw']:.2f}$ ms")
+                label=rf"{LBL[k]}: $\lambda = {res[k]['lam_raw']:.3f} \pm {res[k]['lamerr_raw']:.3f}$/ms")
     a1.plot(tt, np.exp(np.log(mpv3['effq'][0]) + t_us[0]/3000. - tt/3000.),
-            'k--', lw=1, label=r'true $\tau = 3$ ms (slope)')
+            'k--', lw=1, label=r'true $\lambda = 1/3$ ms$^{-1}$ (slope)')
     a1.set_title('uncalibrated')
     for k in ['decC', 'hits']:
         m = mpv3[k] / CAL[k]
         b, a = np.polyfit(t_us, np.log(m), 1)
         a2.plot(t_us, m, 'o', color=COL[k], ms=5)
         a2.plot(tt, np.exp(a + b*tt), '-', color=COL[k], lw=1.2,
-                label=rf"{LBL[k]} / 1ms curve: $\tau = {res[k]['tau_cal']:.2f} \pm {res[k]['err_cal']:.2f}$ ms")
+                label=rf"{LBL[k]} / 1ms curve: $\lambda = {res[k]['lam_cal']:.3f} \pm {res[k]['lamerr_cal']:.3f}$/ms")
     a2.plot(t_us, mpv3['effq'], 'o', color=COL['effq'], ms=4, alpha=0.6)
     b, a = np.polyfit(t_us, np.log(mpv3['effq']), 1)
     a2.plot(tt, np.exp(a + b*tt), '-', color=COL['effq'], lw=1.0, alpha=0.6,
-            label=rf"truth control: $\tau = {res['effq']['tau_raw']:.2f} \pm {res['effq']['err_raw']:.2f}$ ms")
+            label=rf"truth control: $\lambda = {res['effq']['lam_raw']:.3f} \pm {res['effq']['lamerr_raw']:.3f}$/ms")
     a2.set_title('calibrated with the 1 ms capture curve')
     for ax in (a1, a2):
         ax.set_yscale('log')

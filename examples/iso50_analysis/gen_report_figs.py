@@ -66,10 +66,11 @@ for k in COL:
     ax.plot(t_us[FIT], m[FIT], 'o', color=COL[k], ms=5)
     ax.plot(t_us[:1], m[:1], 'o', mfc='none', color=COL[k], ms=6)
     tt = np.linspace(0, 185, 50)
+    lam, lerr = 1.0/tau, err/tau**2
     ax.plot(tt, np.exp(a + b*tt), '-', color=COL[k], lw=1.2,
-            label=rf'{LBL[k]}: $\tau = {tau:.2f} \pm {err:.2f}$ ms')
+            label=rf'{LBL[k]}: $\lambda = {lam:.3f} \pm {lerr:.3f}$ ms$^{{-1}}$')
 ax.plot(tt, np.exp(np.log(57.7) - tt/1000.), 'k--', lw=1,
-        label=r'true $\tau = 1$ ms (slope)')
+        label=r'true $\lambda = 1$ ms$^{-1}$ (slope)')
 ax.set_yscale('log')
 ax.set_xlabel(r'drift time [$\mu$s]')
 ax.set_ylabel('dQ/dx MPV [ke/cm] (3-cm segments)')
