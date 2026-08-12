@@ -358,3 +358,70 @@ Outputs: `examples/analysis_output/channel_coupling/row_covariance.json`,
 `/home/yousen/Documents/NDLAr2x2/tred_worktree/pgun_far_field/tests/pgun_farfield/`,
 which exist for `mu ang00/ang50 nb1` and `mu ang25/ang50/ang75 nb4`,
 `positron ang50 nb4`.
+
+### 3.4 The soft-seed alpha field is already an anisotropic prior — with the wrong anisotropy
+
+Audit of what is actually implemented (`solve/strategy.py:95`,
+`constrained_solver.py:307,326`), because §3 must not propose something
+the code already does under another name.
+
+**Where the field comes from.** Not from the support. `reco_algs.py:268`
+starts with `SolveState(q=q0)`, whose `skeleton` is `None`, so stage 0
+runs a **uniform scalar** `alpha = a` over the whole support. Each stage
+then sets `skeleton = q > seed_cut` (0.5 ke) from *its own solution*, and
+the next stage weights by `alpha_v = a * exp((d_v / soft_len)^p)` with
+`d_v` the Manhattan distance to that skeleton. The initial support never
+shapes the field; it only masks the feasible set in `CoordProx`.
+
+**There is no superposition.** `manhattan_distance_from` is a multi-source
+BFS returning the distance to the *nearest* seed. Verified: two seeds ten
+voxels apart give the midpoint exactly the same alpha as a single seed
+would (ratio 1.000). Consequences:
+
+* a bridge between two prongs is penalised identically to a dangling
+  tail — the field carries no "charge is likely on the line between two
+  seeds" information;
+* the seed amplitude is discarded (`q > 0.5` is boolean), so a 100 ke
+  voxel and a 0.51 ke voxel generate identical fields;
+* far from everything the distance saturates at
+  `d_max = ceil(8*soft_len) = 16`, i.e. a multiplier `exp(8) = 2981`.
+  With `a = 0.3` that is `alpha ~ 894`, effectively infinite against
+  `|A^T r|`. "Inside the support but far from all seeds" is therefore
+  **excluded**, and the cut-off distance is set by an implementation
+  constant, not a physics choice.
+
+**The ladder tightens rather than relaxes beyond ~2 voxels.** Nominally
+`a` descends 1.0 -> 0.5 -> 0.3, but the field simultaneously raises the
+penalty away from the skeleton:
+
+| d | stage0 (a=1.0) | stage1 (a=0.5) | stage2 (a=0.3) |
+|---|---|---|---|
+| 0 | 1.000 | 0.500 | 0.300 |
+| 1 | 1.000 | 0.824 | 0.495 |
+| 2 | 1.000 | 1.359 | 0.815 |
+| 3 | 1.000 | **2.241** | **1.345** |
+| 4 | 1.000 | **3.695** | **2.217** |
+
+Stage 1 exceeds the stage-0 uniform level at `d >= 2`, stage 2 at
+`d >= 3`. The ladder genuinely relaxes only in a one-voxel shell around
+what stage 0 already found; charge that stage 0 missed at distance >= 3
+becomes monotonically harder to activate. That is the intended
+strong-charge-first homotopy, but it means the ladder progressively locks
+in stage 0's topology rather than admitting more of the solution.
+
+**The metric is grid-index Manhattan, so the anisotropy is accidental.**
+One time bin is `adc_hold_delay * time_spacing = 30 * 0.05 us = 1.5 us`
+= **2.395 mm** at `vdrift = 1.59645 mm/us`; one pixel is **4.434 mm**.
+The same physical displacement therefore costs 1.85x more in the time
+direction than in the pixel direction, and Manhattan (not Euclidean)
+adds a further sqrt(2)-sqrt(3) penalty on diagonals. So the prior is
+already directional — just along the grid axes, for no physical reason.
+
+Three fixes, cheapest first:
+
+1. rescale the time axis by 1.85 so the metric is physically isotropic —
+   a constant, no new machinery;
+2. replace nearest-seed distance by an amplitude-weighted soft minimum
+   over seeds, which makes an inter-prong bridge cheaper than a dangling
+   tail and restores the information the boolean skeleton throws away;
+3. the track-tangent anisotropy of §3.2, which is the real change.
