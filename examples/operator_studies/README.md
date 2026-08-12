@@ -25,3 +25,19 @@ Interpreter: `~/Documents/NDLAr2x2/tred/.venv/bin/python` with
 `CUDA_VISIBLE_DEVICES`.
 
 Outputs: `analysis_output/channel_coupling/`, `analysis_output/slope_probe/`.
+
+## Error-model studies (row covariance and operator-error structure)
+
+- `row_covariance.py` — reconstructs the trigger sequences from the row
+  metadata and checks every entry of the analytic readout covariance
+  against the exact per-row error `d_r - d_exact_r` from the waveform
+  samples. Confirms the -1/2 adjacent-diff correlation, finds the
+  remainder-diff coupling that the `noise.py` docstring omits, and shows
+  the threshold dispersion is truncated by the crossing selection.
+- `anisotropy.py` — tests whether the operator's structural error is
+  anisotropic in (time, pixel). Shows the window-length trend is mostly a
+  row-kind artefact, identifies the charge in the partially covered
+  q-grid bins as the topology-transferable predictor, and measures the
+  operator error's correlation along a trigger sequence.
+
+Conclusions and the implementation plan they feed: `PLAN_error_model.md`.
