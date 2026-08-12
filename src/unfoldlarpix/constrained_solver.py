@@ -12,6 +12,7 @@ post-processing).
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -309,6 +310,13 @@ def manhattan_distance_from(mask: np.ndarray, d_max: int) -> np.ndarray:
 
     Computed by successive one-voxel dilations; voxels farther than
     ``d_max`` (including the case of an empty seed) get ``d_max``.
+
+    NOTE the boundary is PERIODIC: ``_dilate_mask`` grows the mask with
+    ``np.roll``, so on a 21-bin axis a seed at index 1 is two steps from
+    index 20, not nineteen.  It only bites when the skeleton comes within
+    ``d_max`` of a block edge, which the padding usually prevents, but it
+    is a real wrap and it is what the record pipeline used.
+    :func:`weighted_l1_distance_from` is the open-boundary alternative.
     """
     dist = np.full(mask.shape, int(d_max), dtype=np.int32)
     reached = mask.copy()
@@ -323,12 +331,48 @@ def manhattan_distance_from(mask: np.ndarray, d_max: int) -> np.ndarray:
     return dist
 
 
+def weighted_l1_distance_from(
+    mask: np.ndarray, d_max: float, axis_cost: Sequence[float]
+) -> np.ndarray:
+    """L1 distance with a per-axis step cost, capped at ``d_max``.
+
+    ``d(v) = min_s sum_ax c_ax * |v_ax - s_ax|``.  Because the cost is a
+    sum of per-axis terms this min-plus problem is separable, so one
+    forward and one backward sweep per axis is exact -- and reduces to
+    :func:`manhattan_distance_from` when every ``c_ax`` is 1.
+
+    The point of the per-axis cost is that the grid is not isotropic: one
+    pixel is 4.434 mm while one time bin is ``adc_hold_delay *
+    time_spacing * v_drift`` = 2.395 mm for the standard 2x2 readout.
+    With equal costs the soft-seed prior is 1.85x tighter per millimetre
+    along time than across pixels, which is an accident of the grid
+    rather than a statement about charge.  Passing
+    ``axis_cost=(1, 1, 0.54)`` makes a step cost its physical length.
+    """
+    cost = np.asarray(axis_cost, dtype=np.float64)
+    if cost.shape != (mask.ndim,):
+        raise ValueError(
+            f"axis_cost must have {mask.ndim} entries, got {cost.shape}")
+    if np.any(cost <= 0):
+        raise ValueError("axis_cost entries must be positive.")
+    d = np.where(mask, 0.0, float(d_max))
+    for ax, c in enumerate(cost):
+        d = np.swapaxes(d, 0, ax)
+        for i in range(1, d.shape[0]):                     # forward sweep
+            np.minimum(d[i], d[i - 1] + c, out=d[i])
+        for i in range(d.shape[0] - 2, -1, -1):            # backward sweep
+            np.minimum(d[i], d[i + 1] + c, out=d[i])
+        d = np.swapaxes(d, 0, ax)
+    return np.minimum(d, float(d_max))
+
+
 def exponential_alpha_field(
     seed_mask: np.ndarray,
     alpha: float,
     decay_len: float,
     d_max: int | None = None,
     exponent: float = 1.0,
+    axis_cost: Sequence[float] | None = None,
 ) -> np.ndarray:
     """Weighted-L1 field for a soft seed prior:
     ``alpha * exp((d / decay_len)**exponent)``.
@@ -342,6 +386,14 @@ def exponential_alpha_field(
     much harder beyond ~2*decay_len.  On the skeleton the penalty is the
     plain ``alpha``; a voxel activates only when |A^T residual| exceeds
     its alpha_i.
+
+    ``axis_cost`` gives the distance a per-axis step cost (see
+    :func:`weighted_l1_distance_from`); ``None`` keeps the plain
+    grid-index Manhattan metric.  Note the diffusion motivation above
+    applies to the SHAPE of the tail, not to ``decay_len``: at the 2x2
+    drift length diffusion is 0.16 pixel / 0.21 time bin, an order of
+    magnitude below the decay lengths in use, which are set by the
+    analysis filter and the anchoring convention instead.
     """
     if decay_len <= 0:
         raise ValueError("decay_len must be positive.")
@@ -349,8 +401,11 @@ def exponential_alpha_field(
         raise ValueError("exponent must be positive.")
     if d_max is None:
         d_max = int(np.ceil(8 * decay_len))
-    d = manhattan_distance_from(seed_mask, d_max)
-    return alpha * np.exp((d.astype(np.float64) / decay_len) ** exponent)
+    if axis_cost is None:
+        d = manhattan_distance_from(seed_mask, d_max).astype(np.float64)
+    else:
+        d = weighted_l1_distance_from(seed_mask, d_max, axis_cost)
+    return alpha * np.exp((d / decay_len) ** exponent)
 
 
 def _dilate_mask(mask: np.ndarray, iterations: int) -> np.ndarray:

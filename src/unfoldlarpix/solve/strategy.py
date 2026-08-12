@@ -76,13 +76,21 @@ class Ladder:
 
     def __init__(self, alphas, seed_cut: float = 0.5, soft_len: float = 2.0,
                  soft_exponent: float = 1.0, n_iter: int = 150,
-                 alpha_scale=None, trace_every: int = 0):
+                 alpha_scale=None, trace_every: int = 0,
+                 soft_axis_cost=None):
         if not list(alphas):
             raise ValueError("ladder alphas cannot be empty")
         self.alphas = [float(a) for a in alphas]
         self.seed_cut = float(seed_cut)
         self.soft_len = float(soft_len)
         self.soft_exponent = float(soft_exponent)
+        # Per-axis step cost for the seed distance.  None keeps the
+        # grid-index Manhattan metric, under which a time step (2.395 mm
+        # for the standard readout) costs the same as a pixel step
+        # (4.434 mm), so the prior is 1.85x tighter per mm along time --
+        # an accident of the grid, not a statement about charge.
+        self.soft_axis_cost = (None if soft_axis_cost is None
+                               else [float(c) for c in soft_axis_cost])
         self.n_iter = int(n_iter)
         # optional STATIC per-voxel multiplier on every stage's weights
         # (e.g. the measurement gain c_v: a coordinate activates when
@@ -99,7 +107,8 @@ class Ladder:
         else:
             field_np = exponential_alpha_field(
                 skeleton.cpu().numpy().astype(bool), a, self.soft_len,
-                exponent=self.soft_exponent)
+                exponent=self.soft_exponent,
+                axis_cost=self.soft_axis_cost)
             field = op.to_tensor(field_np)
         if self.alpha_scale is not None:
             field = field * self.alpha_scale

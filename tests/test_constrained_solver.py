@@ -103,6 +103,40 @@ class TestSoftSeedField:
         assert field[2, 2, 4] == pytest.approx(0.1 * np.e)
         assert np.all(np.diff(field[2, 2, 2:]) >= 0)
 
+    def test_manhattan_distance_is_periodic(self):
+        """Pins the wrap-around: _dilate_mask uses np.roll, so the seed
+        distance is periodic on every axis.  Documented, not endorsed --
+        the record pipeline was produced with this behaviour, and
+        weighted_l1_distance_from is the open-boundary alternative."""
+        from unfoldlarpix.constrained_solver import weighted_l1_distance_from
+        seed = np.zeros((1, 1, 21), dtype=bool)
+        seed[0, 0, 1] = True
+        d = manhattan_distance_from(seed, d_max=16)
+        assert d[0, 0, 20] == 2          # wraps: 2 steps, not 19
+        d_open = weighted_l1_distance_from(seed, 16, (1, 1, 1))
+        assert d_open[0, 0, 20] == 16    # open boundary, capped at d_max
+
+    def test_weighted_l1_matches_manhattan_at_unit_cost(self):
+        from unfoldlarpix.constrained_solver import weighted_l1_distance_from
+        seed = np.zeros((11, 13, 15), dtype=bool)
+        seed[5, 6, 7] = True
+        seed[4, 4, 4] = True
+        # both seeds are more than d_max from every edge, so the wrap
+        # never binds and the two metrics must agree voxel by voxel
+        a = manhattan_distance_from(seed, d_max=3).astype(float)
+        b = weighted_l1_distance_from(seed, 3, (1, 1, 1))
+        assert np.allclose(a, b)
+
+    def test_axis_cost_scales_the_field_along_that_axis(self):
+        seed = np.zeros((1, 1, 21), dtype=bool)
+        seed[0, 0, 10] = True
+        plain = exponential_alpha_field(seed, 0.3, 2.0)
+        cheap = exponential_alpha_field(seed, 0.3, 2.0,
+                                        axis_cost=(1.0, 1.0, 0.5))
+        assert plain[0, 0, 10] == pytest.approx(cheap[0, 0, 10])
+        # a half-cost time step is a half-distance step
+        assert cheap[0, 0, 14] == pytest.approx(plain[0, 0, 12])
+
 
 class TestSplitAndCentroid:
     def test_split_identity_sum_and_adjoint(self):
