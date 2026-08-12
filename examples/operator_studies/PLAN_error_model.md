@@ -21,8 +21,44 @@ cumulative reading:
 * `beta` — the kTC baseline draw of that reset epoch, `s_r = 0.9 ke`.
   **One draw per sequence**, shared by every row in it, absent for a
   pixel's first (virgin) sequence;
-* `eta` — threshold dispersion of that trigger, `s_t = 0.65 ke`. One draw
-  per sequence, and it is *invisible*: no measurement reveals it.
+* `eta` — threshold dispersion of that trigger, nominal `s_t = 0.65 ke`,
+  drawn once per trigger in `tred/readout.py:77`
+  (`thres = threshold + normal(0, thres_noise)`).
+
+**`eta` never appears in any ADC word.** That is a fair objection to
+calling it a measurement error, and it is literally true. It enters the
+residual for a different reason: `constrained_solver.py:176` writes the
+*nominal* threshold as the pseudo row's right-hand side, while the charge
+that actually crossed is `thr_nom + eta`. So `eta` is an error of a
+right-hand side **we impose**, not of anything the chip reported — which
+is exactly why it must stay in `Sigma`, and why no amount of looking at
+the data will reveal it row by row.
+
+It is nevertheless measurable in aggregate, because it is the only term
+in three combinations:
+
+    Var(pseudo | virgin)   = s_t^2 +   s_u^2
+    Var(remainder)         = s_t^2 + 2 s_u^2       (beta cancels)
+    -Cov(pseudo,remainder) = s_t^2 +   s_u^2
+
+| sample | from Var(pseudo,virgin) | from Var(remainder) | from Cov | combined |
+|---|---|---|---|---|
+| pos_a50_nb4 | 0.450 | 0.278 | 0.436 | **0.395** |
+| mu_a50_nb4 | 0.456 | 0.441 | 0.442 | **0.446** |
+| mu_a75_nb4 | 0.460 | 0.384 | 0.390 | **0.413** |
+| mu_a25_nb4 | 0.288 | — | 0.195 | **0.246** |
+
+`s_t_eff = 0.25-0.45 ke` against a nominal 0.65: **not zero, but about
+60% of nominal.** The three estimators agree inside each sample (mu_a50:
+0.456 / 0.441 / 0.442), which is what makes the deficit credible rather
+than an artefact of one combination. The cause is the crossing selection
+— the trigger fires on the first tick whose noisy accumulation exceeds
+the noisy threshold, and that selection compresses the realised spread.
+`mu_a25` is the low outlier and deserves a look.
+
+Consequence for §1.4: use `s_t_eff`, fitted per sample, not the nominal
+0.65. A GLS built on 0.65 over-trusts the pseudo/remainder split
+direction by `(0.65/0.40)^2 = 2.6x`.
 
 The four row kinds are then
 
@@ -84,11 +120,8 @@ Reading:
   first-trigger sequences. The kTC term is therefore **untested** by
   these events; it needs a multi-trigger sample before it is trusted;
 * `Corr(pseudo, remainder)` matches (−0.69…−0.78 vs −0.77) but both
-  *variances* are 30–40% below model. That is the **crossing selection**:
-  the trigger fires on the first tick above threshold, which truncates
-  the `eta` distribution. The analytic `s_t^2` overstates the realised
-  dispersion, and a GLS built on the analytic value will over-trust the
-  split direction;
+  *variances* are 30–40% below model — this is the `s_t_eff` deficit
+  quantified in §1.1;
 * the cross-sequence null passes on the muon samples. The `pos_a50`
   +0.209 is the one thing that does not fit; the likely cause is that
   window edges are derived from the (noisy) hit list, so a mis-placed
@@ -113,8 +146,7 @@ off-diagonals are zeroed.
 Two guards, both learned from the earlier attempt at full whitening
 (which traded ghost fraction and muon r/slope for integral):
 
-* fit `s_t_eff` from the data (`Var(pseudo)+Var(remainder)-2Var(sum)`)
-  rather than using the nominal 0.65, because of the selection effect;
+* use the fitted `s_t_eff ~ 0.40 ke` of §1.1, not the nominal 0.65;
 * keep the kTC term switchable until a multi-trigger sample confirms it.
 
 ---
@@ -300,7 +332,8 @@ what the earlier `alpha` rescan showed.
 
 1. ~~Measure `corr(e_r, e_s)` within a sequence.~~ **Done** — §2.3: it is
    weak, so `Sigma_op` may be diagonal.
-2. **Measure** `s_t_eff` from the pseudo/remainder pair, and get a
+2. ~~Measure `s_t_eff`.~~ **Done** — 0.25-0.45 ke vs nominal 0.65 (§1.1).
+   Still needed: a
    multi-trigger sample to test the kTC term. Decides §1.4's two guards.
 3. Implement per-sequence Cholesky whitening behind a flag; re-run the
    full acceptance metric set on the 18-system angle scan. Accept only

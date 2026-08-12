@@ -176,6 +176,36 @@ def analyse(tag, jobdir=f"{AO}/angscan_tau"):
         print("  %-24s %6d %9.3f %11.3f" % (f"{a} -> {b}", len(arr), c, cov),
               flush=True)
 
+    # the threshold dispersion eta never appears in any ADC word: it
+    # enters only because the pseudo row's right-hand side is the NOMINAL
+    # threshold while the true crossing charge is thr_nom + eta.  It is
+    # still measurable, three independent ways, because it is the only
+    # term in these combinations:
+    #   Var(pseudo | virgin)  = s_t^2 +   s_u^2
+    #   Var(remainder)        = s_t^2 + 2 s_u^2      (beta cancels)
+    #  -Cov(pseudo,remainder) = s_t^2 +   s_u^2
+    est = {}
+    virgin = [i for i in order if info[i][2] == "pseudo" and not info[i][3]]
+    if len(virgin) >= 20:
+        est["from_var_pseudo_virgin"] = float(
+            np.var([err[i] for i in virgin]) - s_u ** 2)
+    rem = [err[i] for i in order if info[i][2] == "remainder"]
+    if len(rem) >= 20:
+        est["from_var_remainder"] = float(np.var(rem) - 2 * s_u ** 2)
+    pr = res["pairs"].get("pseudo|remainder")
+    if pr:
+        est["from_cov"] = float(-pr["cov"] - s_u ** 2)
+    vals = [v for v in est.values() if v > 0]
+    res["s_t_eff"] = {k: (float(np.sqrt(v)) if v > 0 else None)
+                      for k, v in est.items()}
+    res["s_t_eff"]["combined"] = (float(np.sqrt(np.mean(vals)))
+                                  if vals else None)
+    res["s_t_nominal"] = s_t
+    print("  s_t_eff [ke]: " + "  ".join(
+        f"{k.replace('from_', '')}={'n/a' if v is None else f'{v:.3f}'}"
+        for k, v in res["s_t_eff"].items())
+        + f"   (nominal {s_t}, n_virgin_pseudo={len(virgin)})", flush=True)
+
     # null test: rows from DIFFERENT sequences on the same pixel
     cross = []
     bypix = defaultdict(list)
