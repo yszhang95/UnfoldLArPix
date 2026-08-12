@@ -425,3 +425,69 @@ Three fixes, cheapest first:
    over seeds, which makes an inter-prong bridge cheaper than a dangling
    tail and restores the information the boolean skeleton throws away;
 3. the track-tangent anisotropy of §3.2, which is the real change.
+
+### 3.5 Should L1 be weaker or stronger where the charge is large?
+
+Two knobs answer this, and they answer differently, which is the point.
+
+**`soft_len` — the near/far contrast during selection.**
+`alpha_v = a * exp(d_v / soft_len)` with `d_v` measured from the previous
+stage's skeleton, so `soft_len -> 0` is maximal relaxation ON large
+charge and `soft_len -> inf` is uniform alpha. Scanned over
+{0.5, 1, 2, 4, 8, 1000} (`softlen_scan.py`, record value 2.0):
+
+| tag | integ% at 0.5 | at 2 (record) | at 1000 | ghost% 0.5 -> 1000 | killed 0.5 -> 1000 |
+|---|---|---|---|---|---|
+| mu_a75_nb1 | −6.30 | −5.49 | −5.16 | 7.55 -> 7.39 | 132.0 -> 132.2 |
+| mu_a00_nb1 | −9.33 | −9.09 | −8.06 | 11.48 -> 12.34 | 202.1 -> 191.2 |
+| pos_a00_nb1 | −5.98 | −5.73 | −4.88 | 5.68 -> 6.07 | 473.0 -> 446.9 |
+
+`r` is flat to 4 decimals throughout; slope moves by <0.005. The whole
+knob is worth ~1.1 pp of integral out of a 5-9 pp deficit, and the sign
+is against the adaptive-lasso intuition: **relaxing L1 near large charge
+buys nothing**, and the more uniform the field the better the integral
+and the killed truth (at 0.4-0.9 pp more ghost).
+
+**`refit` — no L1 at all on the large charges.** The direct form of the
+question. `FinalRefit(eps, alpha=0)` freezes the strong support and
+re-solves the amplitudes unpenalised (`refit_test.py`):
+
+| tag | integ% none -> refit | slope | r | ghost% | iso-ghost | killed |
+|---|---|---|---|---|---|---|
+| mu_a75_nb1 | −5.49 -> **−2.46** | 0.874 -> 0.896 | 0.8971 -> 0.9037 | 7.57 -> 8.29 | 0.00 -> 0.00 | 132.6 -> 122.8 |
+| mu_a00_nb1 | −9.09 -> **−4.74** | 0.816 -> 0.836 | 0.9336 -> 0.9378 | 11.54 -> 12.91 | 0.53 -> 2.68 | 196.7 -> 166.4 |
+| mu_a50_nb1 | −7.20 -> **−3.21** | 0.675 -> 0.696 | 0.8246 -> 0.8227 | 19.41 -> 20.36 | 0.00 -> 0.00 | 290.3 -> 264.2 |
+| pos_a00_nb1 | −5.73 -> **−2.83** | 0.948 -> 0.962 | 0.9754 -> 0.9754 | 5.89 -> 6.86 | 5.56 -> 8.60 | 461.5 -> 413.1 |
+
+Roughly **half the integral deficit is L1 shrinkage on the strong
+voxels**, and removing it also moves the slope towards 1 and cuts killed
+truth in all four. `eps = 0.5` versus `0.2` changes the integral by
+0.2 pp at most, so the gain comes from dropping the penalty on the strong
+voxels, not from freezing more of them -- a clean control.
+
+**Resolution.** The two results are consistent once selection and
+amplitude are separated:
+
+* during selection alpha must stay finite (it *is* the selector), so
+  reshaping its near/far contrast is nearly inert -- hence the 1.1 pp;
+* the amplitude bias is a separate stage, and there the answer is not
+  "smaller" but **zero**;
+* the price is ghost, +0.7 to +1.4 pp, and iso-ghost specifically on the
+  two 0-degree topologies (0.53 -> 2.68 and 5.56 -> 8.60). That is the
+  prior doing real work: with no penalty the strong support absorbs
+  operator error into amplitude, exactly where §2.2 measured the model to
+  be least trustworthy (`|e| ~ kappa * q_part`, and `q_part` is largest
+  where the charge is).
+
+So the answer to "weaker or stronger near large charge" is: **weaker for
+amplitude (zero, via a refit), and the resulting ghost should be paid for
+with the data weight of §2.3 rather than with L1** -- because L1 charges
+the signal for the operator's error, while the weight charges the rows
+whose error it actually is.
+
+This re-measures a decision that is already open: the `refit:
+{eps: 0.5, alpha: 0}` stage has been the measured candidate default for
+nb1 since 2026-08-10 and adoption is still with the user. Nothing here is
+new physics; it is the same conclusion on four more configurations, plus
+the `soft_len` scan showing that the alternative route (reshaping alpha)
+cannot substitute for it.
