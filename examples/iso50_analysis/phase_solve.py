@@ -9,13 +9,11 @@ Usage: phase_solve.py [resp_override] [outdir]
 """
 import numpy as np, sys, os, json, gc, warnings, yaml, torch
 warnings.filterwarnings('ignore')
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-DRV = ('/home/yousen/Documents/NDLAr2x2/sp_deconv_tradition/UnfoldLArPix/'
-       'examples/analysis_output/_drivers')
-sys.path.insert(0, DRV)
-import iso50_analyse as A50
-from eval_alpha_beta import build_job, EventStore
+ROOT = '/home/yousen/Documents/NDLAr2x2/sp_deconv_tradition/UnfoldLArPix'
+os.chdir(ROOT)
+AO = f'{ROOT}/examples/analysis_output'
+from unfoldlarpix.fwk.runner import build_job
+from unfoldlarpix.fwk.store import EventStore
 from unfoldlarpix.fwk.component import ALGORITHMS
 from unfoldlarpix.constrained_solver import build_latch_rows
 from unfoldlarpix.model.conventions import resolve_burst_tau
@@ -30,13 +28,15 @@ RESP = (sys.argv[1] if len(sys.argv) > 1 else
         '/srv/storage1/yousen/tred_workspace/'
         'response_44_v2a_full_25x25pixel_tred.npz')
 OUTD = (sys.argv[2] if len(sys.argv) > 2 else
-        f'{A50.AO}/iso50_phase')
+        f'{AO}/iso50_phase')
+ASCALE = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0
+NEV = int(sys.argv[4]) if len(sys.argv) > 4 else 50
 TAGS3 = ['pgun_mu_3gev_iso50_d04p5', 'pgun_mu_3gev_iso50_d16p5',
          'pgun_mu_3gev_iso50_d28p5']
 
 
 def job_yaml(tag):
-    for base in [f'{A50.AO}/iso50/C', '/home/yousen/iso50_staging/C']:
+    for base in [f'{AO}/iso50/C', '/home/yousen/iso50_run/jobcfg']:
         p = f'{base}/job_{tag}.yaml'
         if os.path.exists(p):
             cfg = yaml.safe_load(open(p))
@@ -66,7 +66,7 @@ for tag in TAGS3:
     scfg = [e for e in cfg['sequence'] if 'Solve' in e][0]['Solve']
     tcfg = [t for t in scfg['terms'] if t['type'] == 'censor'][0]
     os.makedirs(f'{OUTD}/C/{tag}', exist_ok=True)
-    for ev in range(50):
+    for ev in range(NEV):
         outp = f'{OUTD}/C/{tag}/{tag}_event_0_{ev}.npz'
         store = EventStore()
         store.put('job.config', cfg, 'runner')
@@ -109,6 +109,8 @@ for tag in TAGS3:
                            [:, :, :opp.q_shape[2]])
         engine = Fista(n_iter=int(scfg['engine']['iters']))
         lad = dict(scfg['strategy']); lad.pop('type')
+        if ASCALE != 1.0:
+            lad['alphas'] = [a * ASCALE for a in lad['alphas']]
         state = Ladder(n_iter=engine.n_iter, **lad).run(
             engine, opp, terms, support, SolveState(q=q0))
         # inline refit (phase version of FinalRefit)
