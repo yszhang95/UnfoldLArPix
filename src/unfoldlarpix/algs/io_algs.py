@@ -93,6 +93,9 @@ class WriteCharges(Algorithm):
             "loss_components": json.dumps(
                 store.get("solve.loss")
                 if "solve.loss" in store else None),
+            "loss_trace": json.dumps(
+                store.get("solve.trace")
+                if "solve.trace" in store else None),
             "provenance": json.dumps(store.provenance()),
         }
         if u is not None:

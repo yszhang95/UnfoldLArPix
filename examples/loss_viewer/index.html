@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>UnfoldLArPix — solve viewer</title>
+<style>
+  :root{
+    --ink:#1b1f24; --ink2:#5b6570; --line:#d9dee4; --bg:#fbfcfd;
+    --panel:#fff; --accent:#c2410c;
+    --c1:#2e6fb7; --c2:#c2410c; --c3:#2e8b57; --c4:#8b5cf6; --c5:#a6304a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{padding:12px 18px;border-bottom:1px solid var(--line);background:var(--panel);
+         display:flex;gap:18px;align-items:baseline;flex-wrap:wrap}
+  h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.01em}
+  .sub{color:var(--ink2);font-size:12px}
+  main{display:grid;grid-template-columns:300px 1fr;gap:0;height:calc(100vh - 50px)}
+  aside{border-right:1px solid var(--line);background:var(--panel);overflow:auto;padding:12px}
+  section{overflow:auto;padding:16px 18px}
+  label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.05em;
+        color:var(--ink2);margin:12px 0 4px}
+  select,input{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:4px;
+               background:#fff;color:var(--ink);font-size:13px}
+  select[multiple]{height:260px}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0 4px}
+  .chip{font-size:11px;padding:3px 8px;border:1px solid var(--line);border-radius:99px;
+        cursor:pointer;user-select:none;background:#fff}
+  .chip.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+  canvas{width:100%;height:340px;background:var(--panel);
+         border:1px solid var(--line);border-radius:6px}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  table{border-collapse:collapse;font-size:12px;width:100%;margin-top:6px}
+  th,td{text-align:left;padding:3px 8px 3px 0;border-bottom:1px solid var(--line);
+        white-space:nowrap}
+  th{color:var(--ink2);font-weight:500}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  pre{font-size:11px;background:#f4f6f8;border:1px solid var(--line);border-radius:6px;
+      padding:10px;max-height:280px;overflow:auto}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;margin:8px 0 2px}
+  .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px}
+  .muted{color:var(--ink2)}
+  h2{font-size:13px;margin:20px 0 4px;font-weight:600}
+</style>
+</head>
+<body>
+<header>
+  <h1>UnfoldLArPix — solve viewer</h1>
+  <span class="sub" id="status">loading runs…</span>
+</header>
+<main>
+<aside>
+  <label for="run">configuration / run</label>
+  <select id="run"></select>
+  <label for="filter">filter events</label>
+  <input id="filter" placeholder="substring, e.g. _0_7">
+  <label for="ev">events <span class="muted">(ctrl/shift: overlay)</span></label>
+  <select id="ev" multiple></select>
+  <label>y axis</label>
+  <div class="chips" id="scale">
+    <span class="chip on" data-scale="log">log</span>
+    <span class="chip" data-scale="linear">linear</span>
+  </div>
+  <label>series</label>
+  <div class="chips" id="series"></div>
+</aside>
+<section>
+  <div class="legend" id="legend"></div>
+  <canvas id="plot"></canvas>
+  <div class="row">
+    <div>
+      <h2>final losses</h2>
+      <table id="losses"><tbody></tbody></table>
+      <h2>summary</h2>
+      <table id="summary"><tbody></tbody></table>
+    </div>
+    <div>
+      <h2>hyper-parameters (job_config)</h2>
+      <pre id="config">—</pre>
+    </div>
+  </div>
+</section>
+</main>
+<script>
+const COL = ['--c1','--c2','--c3','--c4','--c5'].map(v =>
+  getComputedStyle(document.documentElement).getPropertyValue(v).trim());
+const S = {runs: [], events: [], loaded: [], series: [], on: new Set(),
+           scale: 'log'};
+const $ = id => document.getElementById(id);
+
+async function j(u){ const r = await fetch(u); return r.json(); }
+
+async function init(){
+  S.runs = await j('/api/runs');
+  // runs with a trace first, then the rest -- the viewer is for traces
+  $('run').innerHTML = S.runs.map((r,i) =>
+    `<option value="${i}">${r.name} (${r.n})</option>`).join('');
+  const want = new URLSearchParams(location.search).get('run');
+  if (want){ const k = S.runs.findIndex(r => r.name.includes(want));
+             if (k >= 0) $('run').value = k; }
+  $('status').textContent = `${S.runs.length} runs`;
+  if (S.runs.length) loadRun();
+}
+async function loadRun(){
+  const r = S.runs[+$('run').value];
+  S.events = await j('/api/events?path=' + encodeURIComponent(r.path));
+  renderEvents();
+}
+function renderEvents(){
+  const f = $('filter').value.trim();
+  const list = S.events.filter(e => !f || e.file.includes(f));
+  $('ev').innerHTML = list.map(e =>
+    `<option value="${encodeURIComponent(e.file)}">${e.event}</option>`).join('');
+  if (list.length){ $('ev').selectedIndex = 0; loadSelection(); }
+}
+async function loadSelection(){
+  const picks = [...$('ev').selectedOptions].slice(0, 5);
+  S.loaded = [];
+  for (const o of picks){
+    const d = await j('/api/event?path=' + o.value);
+    d.label = o.textContent;
+    S.loaded.push(d);
+  }
+  const keys = new Set();
+  S.loaded.forEach(d => (d.trace || []).forEach(r =>
+    Object.keys(r).forEach(k => {
+      if (!['stage','iter','nnz'].includes(k)) keys.add(k);
+    })));
+  const fresh = [...keys];
+  if (JSON.stringify(fresh) !== JSON.stringify(S.series)){
+    S.series = fresh;
+    S.on = new Set(fresh.filter(k =>
+      ['objective','DataFidelity','l1'].includes(k)).slice(0,3));
+    if (!S.on.size) S.series.slice(0,2).forEach(k => S.on.add(k));
+    $('series').innerHTML = S.series.map(k =>
+      `<span class="chip${S.on.has(k)?' on':''}" data-k="${k}">${k}</span>`).join('');
+  }
+  draw(); tables();
+}
+function tables(){
+  const d = S.loaded[0] || {};
+  const L = d.loss || {};
+  $('losses').innerHTML = '<tr><th>component</th><th>value</th></tr>' +
+    Object.entries(L).map(([k,v]) =>
+      `<tr><td>${k}</td><td class="num">${(+v).toPrecision(6)}</td></tr>`).join('')
+    || '<tr><td class="muted">no loss_components stored</td></tr>';
+  $('summary').innerHTML = Object.entries(d.summary || {}).map(([k,v]) =>
+    `<tr><td>${k}</td><td class="num">${Array.isArray(v)?v.join(' x '):v}</td></tr>`)
+    .join('');
+  $('config').textContent = d.config ? JSON.stringify(d.config, null, 1) : '—';
+  $('status').textContent = d.trace ? `${d.trace.length} trace rows`
+    : 'no loss_trace in this file (re-run with Solve.trace_every > 0)';
+}
+function draw(){
+  const cv = $('plot'), dpr = devicePixelRatio || 1;
+  cv.width = cv.clientWidth * dpr; cv.height = cv.clientHeight * dpr;
+  const g = cv.getContext('2d'); g.scale(dpr, dpr);
+  const W = cv.clientWidth, H = cv.clientHeight;
+  const P = {l: 62, r: 14, t: 12, b: 30};
+  g.clearRect(0,0,W,H);
+  const curves = [];
+  S.loaded.forEach((d, di) => {
+    if (!d.trace) return;
+    [...S.on].forEach((k, ki) => {
+      const pts = d.trace.map((r,i) => ({x: i, y: +r[k], stage: r.stage}))
+                         .filter(p => isFinite(p.y));
+      if (pts.length) curves.push({
+        pts, label: (S.loaded.length>1? d.label+' · ':'') + k,
+        col: COL[(di*3 + ki) % COL.length]});
+    });
+  });
+  const legend = curves.map(c =>
+    `<span><i style="background:${c.col}"></i>${c.label}</span>`).join('');
+  $('legend').innerHTML = legend || '<span class="muted">no trace to plot</span>';
+  if (!curves.length) return;
+  const xs = curves.flatMap(c => c.pts.map(p => p.x));
+  let ys = curves.flatMap(c => c.pts.map(p => p.y));
+  const logs = S.scale === 'log';
+  if (logs) ys = ys.filter(v => v > 0);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs, 1);
+  let y0 = Math.min(...ys), y1 = Math.max(...ys);
+  if (logs){ y0 = Math.log10(Math.max(y0, 1e-12)); y1 = Math.log10(Math.max(y1,1e-11)); }
+  const pad = (y1 - y0) * 0.08 || 1; y0 -= pad; y1 += pad;
+  const X = v => P.l + (v - x0) / (x1 - x0 || 1) * (W - P.l - P.r);
+  const Y = v => { const t = logs ? Math.log10(Math.max(v,1e-12)) : v;
+                   return H - P.b - (t - y0) / (y1 - y0 || 1) * (H - P.t - P.b); };
+  g.strokeStyle = '#eceff2'; g.fillStyle = '#5b6570'; g.font = '11px sans-serif';
+  for (let i = 0; i <= 4; i++){
+    const yv = y0 + (y1 - y0) * i / 4, py = Y(logs ? Math.pow(10, yv) : yv);
+    g.beginPath(); g.moveTo(P.l, py); g.lineTo(W - P.r, py); g.stroke();
+    const lab = logs ? '1e' + yv.toFixed(1) : yv.toPrecision(3);
+    g.fillText(lab, 6, py + 3);
+  }
+  // stage boundaries from the first curve
+  const st = curves[0].pts;
+  st.forEach((p, i) => {
+    if (i && p.stage !== st[i-1].stage){
+      g.strokeStyle = '#c9ced6'; g.setLineDash([3,3]);
+      g.beginPath(); g.moveTo(X(p.x), P.t); g.lineTo(X(p.x), H - P.b); g.stroke();
+      g.setLineDash([]); g.fillStyle = '#8b949e';
+      g.fillText(p.stage, X(p.x) + 3, P.t + 10);
+    }
+  });
+  curves.forEach(c => {
+    g.strokeStyle = c.col; g.lineWidth = 1.8; g.beginPath();
+    c.pts.forEach((p, i) => i ? g.lineTo(X(p.x), Y(p.y)) : g.moveTo(X(p.x), Y(p.y)));
+    g.stroke();
+  });
+  g.fillStyle = '#5b6570';
+  g.fillText('sampled iteration', W/2 - 40, H - 8);
+}
+$('run').onchange = loadRun;
+$('filter').oninput = renderEvents;
+$('ev').onchange = loadSelection;
+$('series').onclick = e => {
+  if (!e.target.dataset.k) return;
+  const k = e.target.dataset.k;
+  S.on.has(k) ? S.on.delete(k) : S.on.add(k);
+  e.target.classList.toggle('on');
+  draw();
+};
+$('scale').onclick = e => {
+  if (!e.target.dataset.scale) return;
+  S.scale = e.target.dataset.scale;
+  [...$('scale').children].forEach(c =>
+    c.classList.toggle('on', c.dataset.scale === S.scale));
+  draw();
+};
+addEventListener('resize', draw);
+init();
+</script>
+</body>
+</html>

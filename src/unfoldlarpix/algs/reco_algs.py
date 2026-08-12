@@ -210,7 +210,7 @@ class Solve(Algorithm):
 
     reads = ("op", "support", "warm.deconv_q",
              "hits_view", "block_offset", "readout_config", "time_subbin")
-    writes = ("solve.q", "solve.state", "solve.loss")
+    writes = ("solve.q", "solve.state", "solve.loss", "solve.trace")
 
     def execute(self, store):
         op = store.get("op")
@@ -263,13 +263,15 @@ class Solve(Algorithm):
                                 float(ga.get("floor", 0.05)),
                                 float(ga.get("cap", 2.0)))
             scfg["alpha_scale"] = scale
-        ladder = Ladder(n_iter=engine.n_iter, **scfg)
+        tr = int(self.props.get("trace_every", 0))
+        ladder = Ladder(n_iter=engine.n_iter, trace_every=tr, **scfg)
         state = ladder.run(engine, op, terms, support, SolveState(q=q0))
         if "refit" in self.props:
             rcfg = self.props["refit"]
             state = FinalRefit(eps=float(rcfg.get("eps", 0.5)),
                                alpha=float(rcfg.get("alpha", 0.0)),
-                               n_iter=engine.n_iter).run(
+                               n_iter=engine.n_iter,
+                               trace_every=tr).run(
                 engine, op, terms, support, state)
         for rec in state.history:
             print(f"[Solve] {rec.label}: alpha={rec.alpha} "
@@ -286,6 +288,7 @@ class Solve(Algorithm):
             loss["refit_alpha"] = float(
                 self.props["refit"].get("alpha", 0.0))
         self.put(store, "solve.loss", loss)
+        self.put(store, "solve.trace", state.trace)
         q = state.q.cpu().numpy().astype(np.float64)
         if S > 1:                       # fit at B/S, report at B (sum sub-bins)
             nx, ny, qt = q.shape

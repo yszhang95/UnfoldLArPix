@@ -34,6 +34,35 @@ class SolveState:
     q: torch.Tensor
     skeleton: torch.Tensor | None = None
     history: list[StageRecord] = field(default_factory=list)
+    # optimization trace: one row per sampled iteration, filled only when
+    # a stage is run with trace_every > 0 (see make_tracer).
+    trace: list[dict] = field(default_factory=list)
+
+
+def make_tracer(terms, prox, stage: str, every: int, out: list):
+    """Callback for Fista.minimize recording the objective components.
+
+    Costs one extra value() per term per sampled iteration -- opt-in and
+    sampled, so a solve is unaffected unless tracing is requested.
+    """
+    def cb(k: int, ctx) -> None:
+        if every <= 0 or (k % every and k != 0):
+            return
+        row = {"stage": stage, "iter": int(k)}
+        tot = 0.0
+        for t in terms:
+            v = float(t.value(ctx))
+            row[type(t).__name__] = v
+            tot += v
+        a = prox.alpha
+        l1 = float((a * ctx.q).sum()) if torch.is_tensor(a) else \
+            float(a) * float(ctx.q.sum())
+        row["l1"] = l1
+        row["objective"] = tot + l1
+        row["q_sum"] = float(ctx.q.sum())
+        row["nnz"] = int((ctx.q > 0.01).sum())
+        out.append(row)
+    return cb
 
 
 class Ladder:
@@ -47,7 +76,7 @@ class Ladder:
 
     def __init__(self, alphas, seed_cut: float = 0.5, soft_len: float = 2.0,
                  soft_exponent: float = 1.0, n_iter: int = 150,
-                 alpha_scale=None):
+                 alpha_scale=None, trace_every: int = 0):
         if not list(alphas):
             raise ValueError("ladder alphas cannot be empty")
         self.alphas = [float(a) for a in alphas]
@@ -61,6 +90,7 @@ class Ladder:
         # uniform alpha systematically suppresses weak-coverage voxels;
         # alpha_v ~ c_v equalises the activation condition).
         self.alpha_scale = alpha_scale
+        self.trace_every = int(trace_every)
 
     def alpha_field(self, op, a: float, skeleton) -> torch.Tensor | float:
         """Per-voxel L1 weights for one stage (exposed for unit tests)."""
@@ -81,8 +111,11 @@ class Ladder:
         for k, a in enumerate(self.alphas):
             alpha = self.alpha_field(op, a, state.skeleton)
             prox = CoordProx(alpha, support)
+            cb = (make_tracer(smooth_terms, prox, f"ladder[{k}]",
+                              self.trace_every, state.trace)
+                  if self.trace_every else None)
             state.q = stage_engine.minimize(op, smooth_terms, prox,
-                                            q0=state.q)
+                                            q0=state.q, callback=cb)
             state.skeleton = state.q > self.seed_cut
             state.history.append(StageRecord(
                 label=f"ladder[{k}]", alpha=a,
@@ -100,10 +133,11 @@ class FinalRefit:
     """
 
     def __init__(self, eps: float = 0.5, alpha: float = 0.0,
-                 n_iter: int = 150):
+                 n_iter: int = 150, trace_every: int = 0):
         self.eps = float(eps)
         self.alpha = float(alpha)
         self.n_iter = int(n_iter)
+        self.trace_every = int(trace_every)
 
     def run(self, engine: Fista, op, smooth_terms, support,
             state: SolveState) -> SolveState:
@@ -113,9 +147,12 @@ class FinalRefit:
         terms = [DataFidelity(op, target=target) if isinstance(t, DataFidelity)
                  else t for t in smooth_terms]
         prox = CoordProx(self.alpha, strong.to(op.dtype))
+        cb = (make_tracer(terms, prox, "refit", self.trace_every,
+                          state.trace) if self.trace_every else None)
         q_strong = Fista(n_iter=self.n_iter, safety=engine.safety).minimize(
             op, terms, prox, q0=torch.where(strong, state.q,
-                                            torch.zeros_like(state.q)))
+                                            torch.zeros_like(state.q)),
+            callback=cb)
         state.q = q_strong + q_faint
         state.history.append(StageRecord(
             label="refit", alpha=self.alpha,
