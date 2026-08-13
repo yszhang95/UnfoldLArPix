@@ -243,20 +243,19 @@ def display(tag, jobdir=f"{AO}/nb1_fraccensor/B", out=None, pad=3,
     axt.plot(tvec, tprof_t, color=BLUE, lw=1.6, label="smeared truth")
     axt.plot(tvec, tprof_r, color=RED, lw=1.6, label="reco")
     axt.plot(tvec, hprof, color=GREEN, lw=1.2, ls="--",
-             label="raw hits (indicator: peak only)")
+             label=f"raw hits at trigger $-$ {lag_peak} bins")
     axt.set_ylabel("charge [ke]")
     axt.legend(loc="upper right", fontsize=9, frameon=False)
     axt.tick_params(labelbottom=False)
     axt.grid(alpha=0.15)
     axt.text(0.01, 0.97,
-             "time-profile asymmetry (truth / reco)\n"
+             "truth / reco\n"
              f"  fall/rise HWHM  {at['fall_over_rise']:.2f} / "
              f"{ar['fall_over_rise']:.2f}\n"
              f"  frac after peak {at['frac_after_peak']:.3f} / "
              f"{ar['frac_after_peak']:.3f}\n"
-             f"  peak            {at['peak']:.1f} / {ar['peak']:.1f} us"
-             f"  (raw {ah['peak']:.1f})\n"
-             "  raw shape is convention-dependent -- peak only",
+             f"  peak [us]       {at['peak']:.1f} / {ar['peak']:.1f}\n"
+             f"raw hit peak      {ah['peak']:.1f}",
              transform=axt.transAxes, va="top", ha="left", fontsize=8,
              family="monospace")
 
@@ -289,7 +288,7 @@ def display(tag, jobdir=f"{AO}/nb1_fraccensor/B", out=None, pad=3,
         a.plot(tvec, tprof_t, color=BLUE, lw=1.7, label="smeared truth")
         a.plot(tvec, tprof_r, color=RED, lw=1.7, label="reco")
         a.plot(tvec, hprof, color=GREEN, lw=1.3, ls="--",
-               label="raw hits (indicator: peak only)")
+               label=f"raw hits at trigger $-$ {lag_peak} bins")
         a.axvline(at["peak"], color="0.6", lw=0.8, ls="--")
         a.grid(alpha=0.15)
         a.set_ylabel("charge [ke]")
@@ -300,9 +299,7 @@ def display(tag, jobdir=f"{AO}/nb1_fraccensor/B", out=None, pad=3,
     ax2[0].set_title(
         f"{tag}: time profile summed over pixels   "
         f"fall/rise HWHM {at['fall_over_rise']:.2f} (truth) -> "
-        f"{ar['fall_over_rise']:.2f} (reco);  raw hits are collapsed "
-        f"window integrals -- only their peak is meaningful",
-        fontsize=10)
+        f"{ar['fall_over_rise']:.2f} (reco)", fontsize=11)
     with np.errstate(divide="ignore", invalid="ignore"):
         ratio = np.where(tprof_t > tprof_t.max() * 1e-3,
                          tprof_r / tprof_t, np.nan)
