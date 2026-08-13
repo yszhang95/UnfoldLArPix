@@ -6,9 +6,22 @@ acceptance metrics use, no second smearing anywhere.
 
 The main panel composites the two fields additively in RGB: truth-only
 cells go blue, reco-only cells go red, cells where both agree go dark.
-Raw hits are overlaid as an INDICATOR only. A hit is a window integral,\nso collapsing it to its trigger time (or spreading it over its window)\nis a convention: the two choices give fall/rise HWHM 0.117 and 0.299 on\nthe same event. Only the peak position is stable across conventions\n(-1.7 and -1.5 us against the truth). No asymmetry number may be quoted\nfor the raw hits.\n\nThe marginals are the charge profiles along each axis, and the time
-marginal carries the asymmetry numbers, since that profile is what the
-positron-shower argument rests on.
+Raw hits are overlaid as an INDICATOR only, and their placement is a
+FORCED alignment, not a measurement: a hit is a window integral, so
+collapsing it to its trigger time (or spreading it over its window) is a
+convention, and the two choices give fall/rise HWHM 0.117 and 0.299 on
+the same event.  Only the peak position survives the choice (-1.7 and
+-1.5 us against the truth), so the hits are shifted by whole bins to put
+their peak on the truth peak and the legend states both the lag that
+does it and the nominal response lag.  No asymmetry number may be quoted
+for the raw hits.
+
+The marginals are the charge profiles along each axis, and the time
+marginal carries the asymmetry numbers for truth and reco only, since
+that profile is what the positron-shower argument rests on.
+
+Time is the response-plane clock that effq and deconv_q share, so charge
+times are negative.
 """
 from __future__ import annotations
 
@@ -252,7 +265,7 @@ def display(tag, jobdir=f"{AO}/nb1_fraccensor/B", out=None, pad=3,
                 (hit_pix + 0.5) * PITCH_CM,
                 s=np.clip(hit_q * 0.55, 1.0, 45.0), marker="o",
                 facecolors="none", edgecolors=GREEN, linewidths=0.55,
-                alpha=0.75, label=f"raw hits, peak-aligned (lag {lag_used} bins)")
+                alpha=0.75, label=f"raw hits, FORCED peak alignment\n(shifted to lag {lag_used}, nominal {lag_peak})")
     axm.legend(loc="upper left", fontsize=9, framealpha=0.85)
     axm.set_xlabel(r"charge time at the response plane [$\mu$s]")
     axm.set_ylabel(f"pixel {'x' if ax_keep == 0 else 'y'} [cm]")
@@ -260,7 +273,7 @@ def display(tag, jobdir=f"{AO}/nb1_fraccensor/B", out=None, pad=3,
     axt.plot(tvec, tprof_t, color=BLUE, lw=1.6, label="smeared truth")
     axt.plot(tvec, tprof_r, color=RED, lw=1.6, label="reco")
     axt.plot(tvec, hprof, color=GREEN, lw=1.2, ls="--",
-             label=f"raw hits at trigger $-$ {lag_used} bins")
+             label=f"raw hits, FORCED peak alignment\n(shifted to lag {lag_used}, nominal {lag_peak})")
     axt.set_ylabel("charge [ke]")
     axt.legend(loc="upper right", fontsize=9, frameon=False)
     axt.tick_params(labelbottom=False)
@@ -305,7 +318,7 @@ def display(tag, jobdir=f"{AO}/nb1_fraccensor/B", out=None, pad=3,
         a.plot(tvec, tprof_t, color=BLUE, lw=1.7, label="smeared truth")
         a.plot(tvec, tprof_r, color=RED, lw=1.7, label="reco")
         a.plot(tvec, hprof, color=GREEN, lw=1.3, ls="--",
-               label=f"raw hits at trigger $-$ {lag_used} bins")
+               label=f"raw hits, FORCED peak alignment\n(shifted to lag {lag_used}, nominal {lag_peak})")
         a.axvline(at["peak"], color="0.6", lw=0.8, ls="--")
         a.grid(alpha=0.15)
         a.set_ylabel("charge [ke]")
