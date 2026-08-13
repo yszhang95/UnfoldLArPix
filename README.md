@@ -31,7 +31,7 @@ every stage and knob.
     CentroidPositions, WriteCharges; compute/detector/rng services).
   - `model/` — the single (torch) ZS operator, GPU FFT warm start,
     `conventions.py` (every tick/bin/phase convention, one place).
-  - `terms/`, `solve/` — objective terms (data, quiet, censor + the
+  - `terms/`, `solve/` — objective terms (data, censor + the
     coordinatewise prox) with autograd-checked gradients; FISTA engine;
     Ladder/FinalRefit strategies on an explicit SolveState.
   - `eval/` — the universal-grid evaluation protocol.

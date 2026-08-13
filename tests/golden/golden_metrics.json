@@ -1,6 +1,6 @@
 {
   "nb4_adopted_centroid_w1": {
-    "config": "ladder 1.0/0.5/0.3 + seed 0.5 + soft 2 + split-trigger + pad12 + support eps0.3 d1 + quiet 1.0 + iters150 + centroid w1 (fixed readout)",
+    "config": "ladder 1.0/0.5/0.3 + seed 0.5 + soft 2 + split-trigger + pad12 + support eps0.3 d1 + iters150 + centroid w1 (fixed readout)",
     "metrics": {
       "integral_pct": -2.133,
       "pearson_r": 0.98085,

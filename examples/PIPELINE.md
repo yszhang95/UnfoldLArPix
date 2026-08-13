@@ -26,7 +26,7 @@ PYTHONPATH=src <tred-venv>/python -m unfoldlarpix.fwk.runner configs/adopted_nb4
 The two reference configs (also the golden-regression configs):
 
 - `configs/adopted_nb4.yaml` — dense regime: soft-ladder (α 1.0/0.5/0.3),
-  quiet term, 150 iters, centroid w1.
+  no explicit term (`terms: []`), 150 iters, centroid w1.
 - `configs/sparse_nb1.yaml` — sparse regime: + censor term (L2 hinge,
   margin 3 ke), 600 iters, centroid w2.
 
@@ -45,8 +45,7 @@ sequence:
   - Solve:
       engine:   {iters: 150}
       strategy: {type: ladder, alphas: [1.0, 0.5, 0.3], seed_cut: 0.5, soft_len: 2.0}
-      terms:                                  # DataFidelity is implicit
-        - {type: quiet, beta: 1.0}
+      terms: []                               # DataFidelity is implicit
         # - {type: censor, beta: 1.0, margin: 3.0, norm: l2}   # sparse regime
   - CentroidPositions: {window: 1}
   - WriteCharges:      {out_dir: ..., prefix: ..., embed_truth: true}
