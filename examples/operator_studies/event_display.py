@@ -221,11 +221,22 @@ def display(tag, jobdir=f"{AO}/nb1_fraccensor/B", out=None, pad=3,
     hit_t, hit_q = ui[keep], hq[keep]
     hprof = np.zeros_like(tprof_t)
     np.add.at(hprof, hit_t - sl[2].start, hit_q)
+    # hard-align: the response peak lag is a nominal number, and only the
+    # raw peak position is stable across placement conventions, so put the
+    # raw peak onto the truth peak and report the lag that does it.
+    shift = int(tprof_t.argmax()) - int(hprof.argmax())
+    if shift:
+        hit_t = hit_t + shift
+        keep2 = ((hit_t >= sl[2].start) & (hit_t < sl[2].stop))
+        hit_t, hit_pix, hit_q = hit_t[keep2], hit_pix[keep2], hit_q[keep2]
+        hprof = np.zeros_like(tprof_t)
+        np.add.at(hprof, hit_t - sl[2].start, hit_q)
+    lag_used = lag_peak - shift
     ah = asymmetry(hprof, tvec)
     print(f"  raw hits: {keep.sum()}/{len(hq)} inside the window, "
           f"{hit_q.sum():.0f} ke (truth {truth.sum():.0f}, "
-          f"reco {reco.sum():.0f}); response lag peak {lag_peak} bins, "
-          f"centroid {lag_cen:.1f}", flush=True)
+          f"reco {reco.sum():.0f}); nominal lag {lag_peak} (centroid "
+          f"{lag_cen:.1f}), peak-aligned lag {lag_used}", flush=True)
 
     fig = plt.figure(figsize=(13.5, 8.2))
     gs = fig.add_gridspec(2, 2, width_ratios=[4, 1.15],
@@ -237,10 +248,11 @@ def display(tag, jobdir=f"{AO}/nb1_fraccensor/B", out=None, pad=3,
     ext = [tvec[0], tvec[-1] + TBIN_US, pvec[0], pvec[-1] + PITCH_CM]
     axm.imshow(composite(T2, R2), origin="lower", extent=ext,
                aspect="auto", interpolation="nearest")
-    axm.scatter((hit_t + 0.5) * TBIN_US, (hit_pix + 0.5) * PITCH_CM,
+    axm.scatter((hit_t + u_min + 0.5) * TBIN_US,
+                (hit_pix + 0.5) * PITCH_CM,
                 s=np.clip(hit_q * 0.55, 1.0, 45.0), marker="o",
                 facecolors="none", edgecolors=GREEN, linewidths=0.55,
-                alpha=0.75, label=f"raw hits (de-lagged {lag_peak} bins)")
+                alpha=0.75, label=f"raw hits, peak-aligned (lag {lag_used} bins)")
     axm.legend(loc="upper left", fontsize=9, framealpha=0.85)
     axm.set_xlabel(r"charge time at the response plane [$\mu$s]")
     axm.set_ylabel(f"pixel {'x' if ax_keep == 0 else 'y'} [cm]")
@@ -248,7 +260,7 @@ def display(tag, jobdir=f"{AO}/nb1_fraccensor/B", out=None, pad=3,
     axt.plot(tvec, tprof_t, color=BLUE, lw=1.6, label="smeared truth")
     axt.plot(tvec, tprof_r, color=RED, lw=1.6, label="reco")
     axt.plot(tvec, hprof, color=GREEN, lw=1.2, ls="--",
-             label=f"raw hits at trigger $-$ {lag_peak} bins")
+             label=f"raw hits at trigger $-$ {lag_used} bins")
     axt.set_ylabel("charge [ke]")
     axt.legend(loc="upper right", fontsize=9, frameon=False)
     axt.tick_params(labelbottom=False)
@@ -293,7 +305,7 @@ def display(tag, jobdir=f"{AO}/nb1_fraccensor/B", out=None, pad=3,
         a.plot(tvec, tprof_t, color=BLUE, lw=1.7, label="smeared truth")
         a.plot(tvec, tprof_r, color=RED, lw=1.7, label="reco")
         a.plot(tvec, hprof, color=GREEN, lw=1.3, ls="--",
-               label=f"raw hits at trigger $-$ {lag_peak} bins")
+               label=f"raw hits at trigger $-$ {lag_used} bins")
         a.axvline(at["peak"], color="0.6", lw=0.8, ls="--")
         a.grid(alpha=0.15)
         a.set_ylabel("charge [ke]")
@@ -320,7 +332,9 @@ def display(tag, jobdir=f"{AO}/nb1_fraccensor/B", out=None, pad=3,
     plt.close(f2)
 
     rec = {"tag": tag, "truth": at, "reco": ar, "raw": ah,
-           "sum_truth": float(truth.sum()), "sum_reco": float(reco.sum())}
+           "sum_truth": float(truth.sum()), "sum_reco": float(reco.sum()),
+           "lag_nominal": int(lag_peak), "lag_used": int(lag_used),
+           "lag_centroid": float(lag_cen)}
     print(f"{tag}: skew truth {at['skew']:+.3f} reco {ar['skew']:+.3f} raw {ah['skew']:+.3f}; "
           f"fall/rise {at['fall_over_rise']:.2f} / "
           f"{ar['fall_over_rise']:.2f}; -> {out}.png", flush=True)
