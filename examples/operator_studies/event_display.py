@@ -54,7 +54,7 @@ def universal_offsets(npz_path):
     p_min = (min(int(b_off[0]), int(s_off[0])),
              min(int(b_off[1]), int(s_off[1])))
     return (int(b_off[0]) - p_min[0], int(b_off[1]) - p_min[1],
-            int(i0[0]) - u_min, B)
+            int(i0[0]) - u_min, B, u_min)
 
 
 def response_lag(op):
@@ -101,7 +101,7 @@ def raw_hits_universal(tag, jobdir, npz_path):
     boff = np.asarray(store.get("block_offset"), float)
     loc = np.asarray(ev.hits.location)
     q = np.asarray(ev.hits.data, dtype=float)[:, 3]
-    dx, dy, dt, B = universal_offsets(npz_path)
+    dx, dy, dt, B, _ = universal_offsets(npz_path)
     lag_peak, lag_cen = response_lag(op)
     kq = np.floor((loc[:, 2] - boff[2]) / B).astype(int) - lag_peak
     return (loc[:, 0].astype(int) - int(boff[0]) + dx,
@@ -199,7 +199,12 @@ def display(tag, jobdir=f"{AO}/nb1_fraccensor/B", out=None, pad=3,
 
     t0 = sl[2].start
     p0 = sl[ax_keep].start
-    tvec = (np.arange(T2.shape[1]) + t0) * TBIN_US
+    # PHYSICAL time on the response-plane clock that effq and deconv_q
+    # share: universal bin m spans absolute ticks [m*B, (m+1)*B) and the
+    # array starts at m = u_min, so the charge times are negative -- the
+    # charge crosses the response plane before the acquisition epoch.
+    u_min = universal_offsets(p)[4]
+    tvec = (np.arange(T2.shape[1]) + t0 + u_min + 0.5) * TBIN_US
     pvec = (np.arange(T2.shape[0]) + p0) * PITCH_CM
     tprof_t, tprof_r = T2.sum(axis=0), R2.sum(axis=0)
     pprof_t, pprof_r = T2.sum(axis=1), R2.sum(axis=1)
@@ -237,7 +242,7 @@ def display(tag, jobdir=f"{AO}/nb1_fraccensor/B", out=None, pad=3,
                 facecolors="none", edgecolors=GREEN, linewidths=0.55,
                 alpha=0.75, label=f"raw hits (de-lagged {lag_peak} bins)")
     axm.legend(loc="upper left", fontsize=9, framealpha=0.85)
-    axm.set_xlabel(r"charge time (universal bins) [$\mu$s]")
+    axm.set_xlabel(r"charge time at the response plane [$\mu$s]")
     axm.set_ylabel(f"pixel {'x' if ax_keep == 0 else 'y'} [cm]")
 
     axt.plot(tvec, tprof_t, color=BLUE, lw=1.6, label="smeared truth")
@@ -308,7 +313,7 @@ def display(tag, jobdir=f"{AO}/nb1_fraccensor/B", out=None, pad=3,
     ax2[2].axvline(at["peak"], color="0.6", lw=0.8, ls="--")
     ax2[2].set_ylim(0.5, 1.5)
     ax2[2].set_ylabel("reco / truth")
-    ax2[2].set_xlabel(r"charge time (universal bins) [$\mu$s]")
+    ax2[2].set_xlabel(r"charge time at the response plane [$\mu$s]")
     ax2[2].grid(alpha=0.15)
     f2.savefig(f"{out}_timeprofile.png", dpi=150, bbox_inches="tight")
     f2.savefig(f"{out}_timeprofile.pdf", bbox_inches="tight")
