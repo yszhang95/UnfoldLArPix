@@ -46,7 +46,7 @@ PITCH_CM = 0.4434
 TBIN_US = 1.5
 BLUE = "#1a52a8"
 RED = "#c2270a"
-GREEN = "#1a7f37"
+GREEN = "#00a63e"
 
 
 def universal_offsets(npz_path):
@@ -155,8 +155,19 @@ def asymmetry(p, x):
             "frac_after_peak": float(p[k:].sum() / s)}
 
 
+AGREE_GREY = 0.50     # how dark a cell where truth and reco agree goes
+
+
 def composite(T, R):
-    """Additive RGB: blue = truth only, red = reco only, dark = both."""
+    """RGB where DISAGREEMENT is saturated and agreement stays light.
+
+    Painting truth and reco additively drives every cell they share to
+    near black, which is most of the event and buries both the residual
+    colour and any overlay.  Splitting each cell into the part they agree
+    on and the part only one of them has keeps the agreement a light grey
+    (``AGREE_GREY``) and spends the full colour range on the excess:
+    blue where the truth has charge the reco does not, red the other way.
+    """
     def norm(a):
         m = a.max()
         if m <= 0:
@@ -165,10 +176,13 @@ def composite(T, R):
         z = np.log10(np.clip(a, lo, None) / lo) / np.log10(m / lo)
         return np.clip(z, 0.0, 1.0)
     at, ar = norm(T), norm(R)
+    same = np.minimum(at, ar)
+    only_t, only_r = at - same, ar - same
+    g = AGREE_GREY * same
     img = np.ones((*T.shape, 3))
-    img[..., 0] = 1.0 - at                      # truth removes red
-    img[..., 1] = 1.0 - np.maximum(at, ar)
-    img[..., 2] = 1.0 - ar                      # reco removes blue
+    img[..., 0] = 1.0 - np.clip(only_t + g, 0.0, 1.0)
+    img[..., 1] = 1.0 - np.clip(only_t + only_r + g, 0.0, 1.0)
+    img[..., 2] = 1.0 - np.clip(only_r + g, 0.0, 1.0)
     return img
 
 
@@ -261,11 +275,16 @@ def display(tag, jobdir=f"{AO}/nb1_fraccensor/B", out=None, pad=3,
     ext = [tvec[0], tvec[-1] + TBIN_US, pvec[0], pvec[-1] + PITCH_CM]
     axm.imshow(composite(T2, R2), origin="lower", extent=ext,
                aspect="auto", interpolation="nearest")
-    axm.scatter((hit_t + u_min + 0.5) * TBIN_US,
-                (hit_pix + 0.5) * PITCH_CM,
-                s=np.clip(hit_q * 0.55, 1.0, 45.0), marker="o",
-                facecolors="none", edgecolors=GREEN, linewidths=0.55,
-                alpha=0.75, label=f"raw hits, FORCED peak alignment\n(shifted to lag {lag_used}, nominal {lag_peak})")
+    hxs = (hit_t + u_min + 0.5) * TBIN_US
+    hys = (hit_pix + 0.5) * PITCH_CM
+    hss = np.clip(hit_q * 0.55, 1.5, 45.0)
+    # white halo first so the markers read over the dark cells too
+    axm.scatter(hxs, hys, s=hss * 1.9, marker="o", facecolors="none",
+                edgecolors="white", linewidths=1.5, alpha=0.85)
+    axm.scatter(hxs, hys, s=hss, marker="o", facecolors="none",
+                edgecolors=GREEN, linewidths=0.9, alpha=0.95,
+                label=f"raw hits, FORCED peak alignment\n"
+                      f"(shifted to lag {lag_used}, nominal {lag_peak})")
     axm.legend(loc="upper left", fontsize=9, framealpha=0.85)
     axm.set_xlabel(r"charge time at the response plane [$\mu$s]")
     axm.set_ylabel(f"pixel {'x' if ax_keep == 0 else 'y'} [cm]")
