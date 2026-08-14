@@ -27,13 +27,17 @@ class DetectorService(Service):
 
     def initialize(self) -> None:
         self.response_path = self.props["response"]
+        # response_start_tick: offset of the kernel's bin-integration windows
+        # [fine ticks]; 0 is the shipped convention (alignment probe only).
+        self.start_tick = int(self.props.get("response_start_tick", 0))
         self._prepared: dict[int, object] = {}
 
     def prepared(self, adc_hold_delay: int):
         if adc_hold_delay not in self._prepared:
             from ..deconv_workflow import prepare_field_response
             self._prepared[adc_hold_delay] = prepare_field_response(
-                self.response_path, adc_hold_delay, normalized=False)
+                self.response_path, adc_hold_delay, normalized=False,
+                start_tick=self.start_tick)
         return self._prepared[adc_hold_delay]
 
 

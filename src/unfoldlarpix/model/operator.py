@@ -48,6 +48,9 @@ class ZSOperator:
         d_np = np.array([w.value for w in windows], dtype=np.float64)
         rows, cols, weights = windows_to_sampling(
             windows, self.block_shape, adc_hold_delay)
+        # kept for introspection: the weights are folded into d and the
+        # sampling weights below, so this is the only record that they were used
+        self.row_weights = row_weights
         if row_weights is not None:
             sw = np.sqrt(np.asarray(row_weights, dtype=np.float64))
             d_np = d_np * sw

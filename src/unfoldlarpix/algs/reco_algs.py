@@ -41,6 +41,8 @@ class FFTWarmStart(Algorithm):
             sigma_pixel=float(self.props.get("sigma_pixel", 0.2)),
             pad_pixels=int(self.props.get("pad_pixels", 0)),
             tau=None if tau is None else int(tau),
+            align_origin=bool(self.props.get("align_origin", False)),
+            align_phase=float(self.props.get("align_phase", 0.0)),
             device=comp.device, dtype=comp.dtype)
         self.put(store, "warm.deconv_q", ws.deconv_q)
         self.put(store, "block", ws.block)
@@ -52,7 +54,7 @@ class BuildMeasurement(Algorithm):
     """Immutable event measurement: latch windows and the operator A(d)."""
 
     reads = ("event", "readout_config", "block", "block_offset")
-    writes = ("op", "time_subbin")
+    writes = ("op", "time_subbin", "row_var")
 
     def execute(self, store):
         ev = store.get("event")
@@ -101,6 +103,14 @@ class BuildMeasurement(Algorithm):
             csa_reset_time=rc.csa_reset_time,
             split_threshold=thr if split else None,
             acq_start=acq, burst_tau=burst_tau)
+        # analytic per-row error variance [ke^2] from the readout noise model;
+        # published so a stopping rule can be referenced to the noise floor.
+        try:
+            from ..model.noise import row_variances
+            self.put(store, "row_var", row_variances(metas, rc))
+        except Exception as exc:                 # noiseless file -> no floor
+            print(f"[BuildMeasurement] row_var unavailable: {exc}")
+            self.put(store, "row_var", None)
         # row_weights: diagonal data-fidelity weighting from the readout
         # noise model (model.noise; scales travel with the data file).
         #   absent -> legacy unweighted;
@@ -223,8 +233,8 @@ def post_reset_wanted(tcfg: dict) -> bool:
 class Solve(Algorithm):
     """Constrained solve: terms + engine + strategies from config."""
 
-    reads = ("op", "support", "warm.deconv_q", "event",
-             "hits_view", "block_offset", "readout_config", "time_subbin")
+    reads = ("op", "support", "warm.deconv_q", "event", "hits_view",
+             "block_offset", "readout_config", "time_subbin", "row_var")
     writes = ("solve.q", "solve.state", "solve.loss", "solve.trace")
 
     def execute(self, store):
@@ -309,6 +319,27 @@ class Solve(Algorithm):
                                 float(ga.get("floor", 0.05)),
                                 float(ga.get("cap", 2.0)))
             scfg["alpha_scale"] = scale
+        # noise_floor: stop each FISTA run once the data term reaches
+        # `noise_floor` x the level the analytic noise model predicts
+        # (discrepancy principle).  Minimising past it fits structure the
+        # data cannot carry; on this operator that surplus is absorbed as
+        # displaced charge, not as a smaller error.  Absent -> minimise for
+        # the full iteration budget (shipped behaviour).
+        nf = self.props.get("noise_floor")
+        if nf:
+            rv = store.get("row_var")
+            if rv is None:
+                raise ValueError("noise_floor needs row_var; the input file "
+                                 "carries no usable noise model")
+            if op.row_weights is not None:
+                raise ValueError("noise_floor and row_weights together are "
+                                 "not implemented: the target would have to "
+                                 "be expressed in the weighted metric")
+            target = 0.5 * float(np.sum(np.asarray(rv))) * float(nf)
+            data_term = terms[0]
+            engine.stop_when = (
+                lambda ctx, _t=target, _d=data_term: float(_d.value(ctx)) <= _t)
+            print(f"[Solve] noise_floor={nf} -> data-term target {target:.1f}")
         tr = int(self.props.get("trace_every", 0))
         ladder = Ladder(n_iter=engine.n_iter, trace_every=tr, **scfg)
         state = ladder.run(engine, op, terms, support, SolveState(q=q0))

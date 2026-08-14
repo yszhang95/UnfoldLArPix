@@ -90,12 +90,24 @@ def build_cumulative_template(response: np.ndarray) -> np.ndarray:
     return np.maximum.accumulate(cumulative)
 
 
-def integrate_kernel_over_time(kernel: np.ndarray, ticks_per_bin: int) -> np.ndarray:
-    """Integrate a time-domain kernel into coarser bins."""
+def integrate_kernel_over_time(kernel: np.ndarray, ticks_per_bin: int,
+                               start_tick: int = 0) -> np.ndarray:
+    """Integrate a time-domain kernel into coarser bins.
+
+    ``start_tick`` offsets the integration windows: bin j covers fine ticks
+    ``[start_tick + j*ticks_per_bin, start_tick + (j+1)*ticks_per_bin)``.  The
+    default 0 is the shipped convention.  A non-zero value shifts the whole
+    kernel earlier by that many ticks and DISCARDS the leading
+    ``start_tick`` ticks of response — an alignment probe, not a repair.
+    """
     if ticks_per_bin <= 0:
         raise ValueError("ticks_per_bin must be positive.")
+    if start_tick < 0:
+        raise ValueError("start_tick must be non-negative.")
 
     kernel = np.asarray(kernel)
+    if start_tick:
+        kernel = kernel[..., start_tick:]
     n_ticks = kernel.shape[-1] // ticks_per_bin * ticks_per_bin
     if np.any(np.abs(kernel[..., n_ticks:]) > 1e-6):
         raise ValueError(
@@ -140,6 +152,7 @@ def prepare_field_response(
     *,
     normalized: bool = False,
     response_template: ResponseTemplateMode = "center",
+    start_tick: int = 0,
 ) -> PreparedFieldResponse:
     """Load, process, and integrate the field response for deconvolution."""
     processor = FieldResponseProcessor(field_response_path, normalized=normalized)
@@ -165,7 +178,8 @@ def prepare_field_response(
         if response_template == "collection_plus_neighbors"
         else "monotonic"
     )
-    integrated_response = integrate_kernel_over_time(full_response, adc_hold_delay)
+    integrated_response = integrate_kernel_over_time(
+        full_response, adc_hold_delay, start_tick=start_tick)
     return PreparedFieldResponse(
         processor=processor,
         full_response=full_response,
@@ -241,6 +255,8 @@ def hits_to_merged_block(
     deposit_mode: str = "floor",
     deposit_phase: float = 0.0,
     pad_pixels: int = 0,
+    align_origin: bool = False,
+    align_phase: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, float, tuple[TemplateCompensationAnchor, ...]]:
     """Convert hit bursts into a dense 3D block for deconvolution."""
     burst_processor = create_burst_processor(
@@ -265,6 +281,8 @@ def hits_to_merged_block(
         deposit_mode=deposit_mode,
         deposit_phase=deposit_phase,
         pad_pixels=pad_pixels,
+        align_origin=align_origin,
+        align_phase=align_phase,
     )
     return (
         block_offset,

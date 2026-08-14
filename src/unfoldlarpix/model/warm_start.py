@@ -82,6 +82,8 @@ def fft_warm_start(
     pad_pixels: int = 0,
     npadbin: int = 50,
     tau: int | None = None,
+    align_origin: bool = False,
+    align_phase: float = 0.0,
     processor_cls=None,
     device: str | torch.device = "cuda",
     dtype: torch.dtype = torch.float32,
@@ -107,7 +109,8 @@ def fft_warm_start(
         template_search_mode=prepared_response.template_search_mode,
         npadbin=npadbin, response_indu=response_indu,
         deposit_mode=DEPOSIT_MODE, deposit_phase=DEPOSIT_PHASE,
-        pad_pixels=pad_pixels,
+        pad_pixels=pad_pixels, align_origin=align_origin,
+        align_phase=align_phase,
     )
     dev = torch.device(device)
     block_t = torch.as_tensor(block_data, dtype=dtype, device=dev)

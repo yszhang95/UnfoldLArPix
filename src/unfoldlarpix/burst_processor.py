@@ -748,6 +748,8 @@ def merged_sequences_to_block(
     deposit_mode: str = "floor",
     deposit_phase: float = 0.0,
     pad_pixels: int = 0,
+    align_origin: bool = False,
+    align_phase: float = 0.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Convert a MergedSequence to block format with specified bin size.
 
@@ -766,6 +768,20 @@ def merged_sequences_to_block(
             ``deposit_mode="linear"``; use it to match the phase convention
             of the deconvolution kernel (0.0 keeps the floor-mode convention
             as the zero-fraction limit).
+        align_origin: Snap the block's time origin DOWN to a multiple of
+            ``bin_size``, so the fit-grid bin edges coincide with the
+            universal evaluation grid (edges at global multiples of
+            ``adc_hold_delay``).  Default False reproduces the shipped
+            behaviour, where the origin is an arbitrary fine-tick value
+            (min latch time minus the padding) and the fit grid carries an
+            arbitrary phase with respect to the universal grid.  This is a
+            SAMPLING-PHASE choice for the fit, not a convention repair: the
+            per-pixel latch ladders keep their own phases either way.
+        align_phase: Fraction of a bin added to the snap target when
+            ``align_origin`` is set.  0.0 puts the block's bin EDGES on the
+            universal edges; combined with the half-bin write-time
+            declaration this lands the declared voxel centres exactly on
+            universal edges.  0.5 lands them on universal bin centres.
         pad_pixels: Zero-padding added on every side of the SPATIAL extent
             (the hit bounding box).  The field response couples up to half
             the kernel width in pixels, so true charge just outside the
@@ -791,6 +807,14 @@ def merged_sequences_to_block(
     shape[:2] = pmax - pmin + 1
     tmin, tmax = [np.min(merged_seqs[pixel_key].times) for pixel_key in pixel_keys], [np.max(merged_seqs[pixel_key].times) for pixel_key in pixel_keys]
     tmin, tmax = np.min(tmin) - pad_length, np.max(tmax) + pad_length
+    if align_origin:
+        # snap DOWN so the block never loses span; costs at most one bin.
+        # align_phase shifts the snap target by that fraction of a bin, so
+        # align_phase=0.5 puts the DECLARED voxel centres (which carry the
+        # half-bin write-time declaration) on universal bin centres instead
+        # of universal bin edges.
+        tmin = float(
+            (np.floor(tmin / bin_size - align_phase) + align_phase) * bin_size)
     shape[2] = (int(np.ceil((tmax - tmin) / bin_size)) + 1)
     spatial_offset = np.asarray(pmin, dtype=int)
     offset = np.array([spatial_offset[0], spatial_offset[1], tmin], dtype=float)

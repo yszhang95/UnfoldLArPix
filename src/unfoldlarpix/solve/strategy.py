@@ -117,6 +117,8 @@ class Ladder:
     def run(self, engine: Fista, op, smooth_terms, support,
             state: SolveState) -> SolveState:
         stage_engine = Fista(n_iter=self.n_iter, safety=engine.safety)
+        # carry any stopping rule attached to the caller's engine
+        stage_engine.stop_when = getattr(engine, "stop_when", None)
         for k, a in enumerate(self.alphas):
             alpha = self.alpha_field(op, a, state.skeleton)
             prox = CoordProx(alpha, support)
@@ -158,7 +160,11 @@ class FinalRefit:
         prox = CoordProx(self.alpha, strong.to(op.dtype))
         cb = (make_tracer(terms, prox, "refit", self.trace_every,
                           state.trace) if self.trace_every else None)
-        q_strong = Fista(n_iter=self.n_iter, safety=engine.safety).minimize(
+        refit_engine = Fista(n_iter=self.n_iter, safety=engine.safety)
+        # the shifted target leaves the PHYSICAL residual unchanged, so the
+        # caller's noise-floor target applies here too
+        refit_engine.stop_when = getattr(engine, "stop_when", None)
+        q_strong = refit_engine.minimize(
             op, terms, prox, q0=torch.where(strong, state.q,
                                             torch.zeros_like(state.q)),
             callback=cb)

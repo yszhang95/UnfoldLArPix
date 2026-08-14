@@ -26,7 +26,9 @@ class Fista:
         prox: CoordProx,
         q0: torch.Tensor | None = None,
         callback: Callable[[int, IterCtx], None] | None = None,
+        stop_when: Callable[[IterCtx], bool] | None = None,
     ) -> torch.Tensor:
+        stop_when = stop_when or getattr(self, "stop_when", None)
         L = sum(t.curvature() for t in terms)
         step = 1.0 / (self.safety * max(L, 1e-12))
         x = (torch.zeros(op.q_shape, dtype=op.dtype, device=op.device)
@@ -44,4 +46,12 @@ class Fista:
             x, t = x_new, t_new
             if callback is not None:
                 callback(k, ctx)
+            # Discrepancy principle: stop as soon as the data term reaches the
+            # level the noise model predicts.  Minimising past it means fitting
+            # structure the data cannot carry, which on this operator is
+            # absorbed as displaced charge rather than as a smaller error.
+            if stop_when is not None and stop_when(ctx):
+                self.stopped_at = k + 1
+                return x_new
+        self.stopped_at = self.n_iter
         return x
