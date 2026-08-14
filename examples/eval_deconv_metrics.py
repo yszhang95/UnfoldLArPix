@@ -47,7 +47,8 @@ def evaluate(npz_path: Path, corr_threshold: float = 0.5,
              deposit_shape: str = "linear",
              use_fitted_offsets: bool = False,
              sigma_time: float = 0.005,
-             sigma_pxl: float = 0.2) -> dict:
+             sigma_pxl: float = 0.2,
+             edge_anchor: str = "universal") -> dict:
     if universal:
         time_offsets = None
         if use_fitted_offsets:
@@ -66,6 +67,7 @@ def evaluate(npz_path: Path, corr_threshold: float = 0.5,
             sigma_time=sigma_time,
             sigma_pxl=sigma_pxl,
             time_offsets=time_offsets,
+            edge_anchor=edge_anchor,
         )
     else:
         f = np.load(npz_path, allow_pickle=True)
@@ -131,6 +133,13 @@ def main() -> None:
     p.add_argument("--sigma-pxl", type=float, default=0.2,
                    help="Universal gaussian mode: spatial filter width "
                         "[cycles/pixel]; must match the truth smearing.")
+    p.add_argument("--edge-anchor", choices=("universal", "fit"),
+                   default="universal",
+                   help="Universal mode: bin edges at global multiples of "
+                        "adc_hold_delay (default), or anchored on the "
+                        "reconstruction's own block origin ('fit'). Only the "
+                        "edge set changes; deposit shape and sub-bin centers "
+                        "are unaffected.")
     p.add_argument("--json", default=None, help="Optional output JSON path.")
     args = p.parse_args()
 
@@ -150,7 +159,8 @@ def main() -> None:
                                   deposit_shape=args.deposit_shape,
                                   use_fitted_offsets=args.use_fitted_offsets,
                                   sigma_time=args.sigma_time,
-                                  sigma_pxl=args.sigma_pxl)
+                                  sigma_pxl=args.sigma_pxl,
+                                  edge_anchor=args.edge_anchor)
 
     header = (f"{'label':<28} {'int%':>7} {'r':>8} {'slope':>7} "
               f"{'ghost%':>7} {'gAdj%':>6} {'gIso%':>6} "

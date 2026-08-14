@@ -31,7 +31,8 @@ def universal_rebin(npz_path: Path, truth_npz: Path | None = None,
                     deposit_shape: str = "linear",
                     sigma_time: float = 0.005,
                     sigma_pxl: float = 0.2,
-                    time_offsets: np.ndarray | None = None):
+                    time_offsets: np.ndarray | None = None,
+                    edge_anchor: str = "universal"):
     """Rebin truth and reco INDEPENDENTLY onto the universal grid.
 
     Universal time bins have edges at global multiples of adc_hold_delay
@@ -59,6 +60,16 @@ def universal_rebin(npz_path: Path, truth_npz: Path | None = None,
     ``time_offsets`` (gaussian mode only): optional array shaped like
     ``deconv_q_sharp`` with a per-voxel shift [fine ticks] added to that
     charge's deposit center — the hook for sub-bin regressed positions.
+
+    ``edge_anchor`` selects the bin EDGES both sides are binned against:
+    - "universal": edges at global multiples of adc_hold_delay.  Neither
+      binning depends on the reconstruction — the protocol required for
+      absolute (cross-config, cross-event) statements.
+    - "fit": edges anchored on the reconstruction's own declared block
+      origin, i.e. the fit grid.  Everything else (the deposit shape, the
+      sub-bin centers, the truth smearing) is unchanged, so this isolates
+      the EDGE SET as the only difference.  Reconstruction-dependent by
+      construction: each event is then scored on its own grid.
     """
     f = np.load(npz_path, allow_pickle=True)
     t = np.load(truth_npz, allow_pickle=True) if truth_npz is not None else f
@@ -68,19 +79,28 @@ def universal_rebin(npz_path: Path, truth_npz: Path | None = None,
     dq = np.asarray(f["deconv_q"], dtype=np.float64)
     b_off = np.asarray(f["boffset"], dtype=np.float64)
 
-    # ---- truth: fine ticks -> universal bins (pad front to a bin edge)
-    pre = int(s_off[2] - (s_off[2] // B) * B)
+    # bin m spans [phi + m*B, phi + (m+1)*B).  phi = 0 is the universal grid;
+    # phi = b_off[2] mod B puts the edges on the reconstruction's own bins.
+    if edge_anchor == "universal":
+        phi = 0.0
+    elif edge_anchor == "fit":
+        phi = float(b_off[2] - np.floor(b_off[2] / B) * B)
+    else:
+        raise ValueError(f"unknown edge_anchor: {edge_anchor}")
+
+    # ---- truth: fine ticks -> bins (pad front to a bin edge)
+    pre = int(s_off[2] - (np.floor((s_off[2] - phi) / B) * B + phi))
     nt_f = smeared.shape[2] + pre
     post = (-nt_f) % B
     tr_fine = np.pad(smeared, ((0, 0), (0, 0), (pre, post)))
     tr_u = tr_fine.reshape(*tr_fine.shape[:2], -1, B).sum(axis=3)
-    tr_t0 = int(s_off[2] // B)          # first universal bin index
+    tr_t0 = int(np.floor((s_off[2] - phi) / B))     # first bin index
     tr_p0 = (int(s_off[0]), int(s_off[1]))
 
-    # ---- reco: physical bin centers -> universal bins (linear split)
+    # ---- reco: physical bin centers -> bins
     nx, ny, ntq = dq.shape
     centers = b_off[2] + (np.arange(ntq) + 0.5) * B + content_offset_ticks
-    fpos = centers / B - 0.5            # fractional universal-bin position
+    fpos = (centers - phi) / B - 0.5    # fractional bin position
     i0 = np.floor(fpos).astype(np.int64)
     frac = fpos - i0
     u_min = int(min(i0.min(), tr_t0))
@@ -99,7 +119,7 @@ def universal_rebin(npz_path: Path, truth_npz: Path | None = None,
 
         q_sharp = np.asarray(f["deconv_q_sharp"], dtype=np.float64)
         sig_ticks = 1.0 / (2.0 * np.pi * float(sigma_time))
-        edges = (np.arange(u_min, u_max + 2) * B).astype(np.float64)
+        edges = (np.arange(u_min, u_max + 2) * B + phi).astype(np.float64)
         erf = np.vectorize(math.erf)
         if time_offsets is None:
             # weight of fit-bin k in universal bin m: Gaussian mass
@@ -117,7 +137,7 @@ def universal_rebin(npz_path: Path, truth_npz: Path | None = None,
             reach = int(np.ceil(6.0 * sig_ticks / B)) + 1
             for x, y, k in zip(xs, ys, ks):
                 c = centers[k] + off[x, y, k]
-                m_c = int(np.floor(c / B)) - u_min
+                m_c = int(np.floor((c - phi) / B)) - u_min
                 m0 = max(m_c - reach, 0)
                 m1 = min(m_c + reach + 1, ntu)
                 if m1 <= m0:
@@ -184,6 +204,20 @@ def metrics_from_blocks(smear_summed: np.ndarray, aligned_dq: np.ndarray,
     ghost_iso_frac = float(ghost_iso.sum() / n_sel)
     ghost_iso_charge = float(aligned_dq[ghost_iso].sum())
 
+    # Per-voxel residual reco - truth [ke-] over the SIGNAL REGION: every
+    # voxel where either side is above the cut, so the sample contains the
+    # ghosts (reco-only) and the killed truth (truth-only) as well as the
+    # matched voxels.  Restricting to reco > cut alone would hide the killed
+    # truth, which is half the failure mode.
+    sig = mask | (smear_summed > corr_threshold)
+    resid = (aligned_dq - smear_summed)[sig]
+    if resid.size:
+        resid_mean = float(resid.mean())
+        resid_rms = float(np.sqrt((resid ** 2).mean()))   # about zero
+        resid_sd = float(resid.std())                     # about the mean
+    else:
+        resid_mean = resid_rms = resid_sd = float("nan")
+
     return {
         "sum_deconv_q": round(sum_dq, 2),
         "sum_truth": round(sum_truth, 2),
@@ -195,6 +229,10 @@ def metrics_from_blocks(smear_summed: np.ndarray, aligned_dq: np.ndarray,
         "ghost_iso_frac": round(ghost_iso_frac, 5),
         "ghost_iso_charge": round(ghost_iso_charge, 2),
         "true_killed": round(true_killed, 2),
+        "resid_mean": round(resid_mean, 5),
+        "resid_rms": round(resid_rms, 5),
+        "resid_sd": round(resid_sd, 5),
+        "n_voxels_signal": int(resid.size),
         "n_voxels_gt_thr": int(x.size),
         "corr_threshold": corr_threshold,
     }
