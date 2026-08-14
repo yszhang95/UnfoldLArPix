@@ -86,9 +86,10 @@ def row_weights(metas, readout_config, mode: str) -> np.ndarray:
         Only the two trigger-split rows are re-weighted by their
         equivalent noise; every real measurement keeps weight 1.
     mode ``'diag'``
-        Every row is weighted ``ref_var / var`` (post-reset first windows
-        down-weighted by the kTC baseline, virgin first windows
-        up-weighted).
+        Every row is weighted ``ref_var / var``: a first window is
+        down-weighted by the kTC baseline when it follows a reset on that
+        pixel (``RowMeta.post_reset``) and up-weighted when no reset
+        precedes it.
     """
     if mode not in ("split", "diag"):
         raise ValueError(f"row_weights mode must be 'split' or 'diag', "

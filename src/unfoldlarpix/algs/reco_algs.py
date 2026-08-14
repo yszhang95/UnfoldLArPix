@@ -14,7 +14,7 @@ from ..model.warm_start import fft_warm_start
 from ..solve.engine import Fista
 from ..solve.strategy import FinalRefit, Ladder, SolveState
 from ..terms.base import IterCtx
-from ..terms.censor import CensorRunningMax
+from ..terms.censor import CensorRunningMax, pre_trigger_censors
 from ..terms.data import DataFidelity
 
 
@@ -204,11 +204,26 @@ class BuildSupport(Algorithm):
         self.put(store, "support", support)
 
 
+def post_reset_wanted(tcfg: dict) -> bool:
+    """Resolve the censor_pre interval scope from a term config.
+
+    ``include_post_reset`` is the key.  ``max_slot`` is a LEGACY alias kept
+    read-only: the archived censor_pre* campaigns wrote it (0 = the
+    pre-trigger interval alone, None = every interval), and dropping it would
+    make their embedded job_config unreplayable.
+    """
+    if "include_post_reset" in tcfg:
+        return bool(tcfg["include_post_reset"])
+    if "max_slot" in tcfg:
+        return tcfg["max_slot"] is None
+    return False
+
+
 @algorithm("Solve")
 class Solve(Algorithm):
     """Constrained solve: terms + engine + strategies from config."""
 
-    reads = ("op", "support", "warm.deconv_q",
+    reads = ("op", "support", "warm.deconv_q", "event",
              "hits_view", "block_offset", "readout_config", "time_subbin")
     writes = ("solve.q", "solve.state", "solve.loss", "solve.trace")
 
@@ -232,6 +247,37 @@ class Solve(Algorithm):
                     margin=float(tcfg.get("margin", 3.0)),
                     norm=tcfg.get("norm", "l2"),
                     bin_ticks=bin_ticks))
+            elif kind == "censor_pre":
+                # silence BEFORE a trigger: the pre-trigger interval (a
+                # pixel's first) plus, with include_post_reset, the later
+                # post-reset ones.  The pre-trigger reference is the
+                # acquisition edge, so it must match BuildMeasurement's
+                # acq_start convention: pass acq_start: event to take it from
+                # the event, as the operator does.
+                acq = tcfg.get("acq_start")
+                if acq == "event":
+                    acq = getattr(store.get("event"), "acq_start", None)
+                    if acq is None:
+                        raise ValueError("censor_pre acq_start: 'event' but "
+                                         "the event carries no acq_start")
+                elif acq is not None:
+                    acq = float(acq)
+                pre = pre_trigger_censors(
+                    op, store.get("hits_view"), store.get("block_offset"),
+                    csa_reset_time=float(rc.csa_reset_time or 0),
+                    threshold=thr, acq_start=acq,
+                    npad_bins=int(tcfg.get("npad_bins", 50)) * S,
+                    beta=float(tcfg.get("beta", 1.0)),
+                    margin=float(tcfg.get("margin", 3.0)),
+                    norm=tcfg.get("norm", "l1"),
+                    bin_ticks=bin_ticks,
+                    one_tick=float(rc.one_tick or 1),
+                    close_back=float(tcfg.get("close_back", 20.0)),
+                    include_post_reset=post_reset_wanted(tcfg))
+                print(f"[Solve] censor_pre: {len(pre)} interval kind(s), "
+                      f"{sum(int(t.armed.any(dim=2).sum()) for t in pre)} "
+                      f"constrained pixel-intervals")
+                terms.extend(pre)
             else:
                 raise ValueError(f"unknown term type: {kind}")
 
