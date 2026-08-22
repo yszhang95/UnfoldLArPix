@@ -82,6 +82,13 @@ import torch
 
 from ..fwk.component import Algorithm, algorithm
 
+# An eigenvector is treated as well separated when its eigenvalue gap exceeds
+# this fraction of lambda_max.  float32 eps is 1.2e-7; 1e-4 leaves three orders
+# of headroom, which is what the measured spread between a float32 and a
+# float64 run of the same job needs.
+EIGVEC_GAP_FACTOR = 1e-4
+LMAX = [1.0]                       # set per record, read by _mode_stats
+
 SPACES = ("measurement", "charge")
 # "channel" was the name in the standalone scripts.  It is wrong: the index of
 # G is a ROW -- one latch window -- and a pixel that latches four times
@@ -248,18 +255,39 @@ def _slq_ranks(theta_all, tau_all, n: int, fracs=(0.9, 0.99, 0.999)):
 # --------------------------------------------------------------------------
 # geometry of one mode (charge space)
 # --------------------------------------------------------------------------
-def _mode_stats(v, ix, iy, it, q, lam):
+def _mode_stats(v, ix, iy, it, q, lam, gap=None, q_med=None):
     w = v ** 2                                       # sum(w) = 1
     cx, cy, ct = (w * ix).sum(), (w * iy).sum(), (w * it).sum()
-    return {
+    med = np.median(q) if q_med is None else q_med
+    out = {
         "eig": float(lam),
         "participation": float(1.0 / (w ** 2).sum()),
         "pixel_rms": float(np.sqrt((w * ((ix - cx) ** 2
                                          + (iy - cy) ** 2)).sum())),
         "time_rms_bins": float(np.sqrt((w * (it - ct) ** 2).sum())),
         "q_weighted_mean_ke": float((w * q).sum()),
+        "q_frac_below_median": float(w[q < med].sum()),
         "sign_balance": float(abs(v.sum()) / np.abs(v).sum()),
     }
+    if gap is not None:
+        # An individual eigenvector is only defined to within a rotation inside
+        # the cluster of eigenvalues it is degenerate with.  Under a matrix
+        # perturbation of size delta the eigenvector moves by ~delta/gap, and
+        # delta here is the operator's own precision, ~eps(float32)*lambda_max.
+        # So this flag says whether the per-mode geometry above means anything
+        # for THIS mode; the aggregates over a group of modes are invariant
+        # either way.
+        out["eig_gap_to_neighbour"] = float(gap)
+        out["eigvec_well_separated"] = bool(gap > EIGVEC_GAP_FACTOR * LMAX[0])
+    return out
+
+
+def _eig_gaps(w):
+    """Distance from each eigenvalue to its nearest neighbour in the spectrum."""
+    if w.size < 2:
+        return np.full(w.size, np.inf)
+    d = np.abs(np.diff(w))
+    return np.minimum(np.r_[np.inf, d], np.r_[d, np.inf])
 
 
 def _effective_ranks(w, fracs=(0.9, 0.99, 0.999)):
@@ -293,12 +321,22 @@ class _SpectrumAlgorithm(Algorithm):
         if self.restrict not in RESTRICTS:
             raise ValueError(f"restrict must be one of {RESTRICTS}")
         self.active_cut = float(props.get("active_cut", 0.01))
-        self.sing_tol = float(props.get("singular_tol", 1e-12))
+        # An eigenvalue below sing_tol * lambda_max is indistinguishable from
+        # zero at the precision the operator applies in.  The default is tied
+        # to float32 (eps ~ 1.2e-7), not to float64: on mu_a75_nb1's active
+        # system the smallest eigenvalues come out at 5e-7 .. 5e-9 against
+        # lambda_max = 121, i.e. 4e-9 .. 4e-11 relative -- pure round-off, and
+        # a condition number built from them is a division by noise.
+        self.sing_tol = float(props.get("singular_tol", 1e-6))
         self.out_path = props.get("out_path")
         # reads depend on the restriction, so they are set per instance;
         # validate_sequence reads the instance attribute, which is what makes
         # 'restrict: active' provably ordered after Solve.
         reads = ["op"]
+        if self.space == "measurement":
+            # row identity, for the per-kind coupling statistics; published by
+            # BuildMeasurement so nothing has to re-run build_latch_rows
+            reads.append("row_meta")
         if self.restrict == "support":
             reads.append("support")
         elif self.restrict == "active":
@@ -470,10 +508,18 @@ class OperatorSpectrum(_SpectrumAlgorithm):
         w = np.clip(w[::-1], 0.0, None)
         V = V[:, ::-1]
         lmax, lmin = float(w[0]), float(w[-1])
+        n_noise = int((w <= self.sing_tol * max(lmax, 1e-30)).sum())
         rec.update({
             "method": "dense_eigh",
             "n_live": int(live.sum()), "n_blind": n_blind,
             "lambda_max": lmax, "lambda_min": lmin,
+            "singular_tol": self.sing_tol,
+            # eigenvalues at or below sing_tol * lambda_max: numerically zero
+            # at the operator's precision, so neither they nor anything derived
+            # from them (cond_sqrt, the individual weakest eigenvectors) carries
+            # information
+            "n_eig_at_roundoff": n_noise,
+            "numerically_singular": bool(n_noise > 0),
             "cond_sqrt": _cond_sqrt(lmax, lmin, self.sing_tol),
             "trace": float(w.sum()),
             "eig_top20": [float(x) for x in w[:20]],
@@ -487,7 +533,10 @@ class OperatorSpectrum(_SpectrumAlgorithm):
         if self.space == "charge":
             self._charge_geometry(store, op, idx, live, w, V, n_modes, rec)
         else:
-            self._measurement_geometry(op, live, w, V, n_modes, rec)
+            self._measurement_geometry(
+                op, live, w, V, n_modes, rec,
+                store.get("row_meta") if "row_meta" in store else None,
+                Ml)
         print(f"[{self.name}] {self.space}/{self.restrict} n={mv.n} "
               f"live={rec['n_live']} lmax={lmax:.4g} lmin={lmin:.4g} "
               f"rank99={rec['rank_99pct']} ({mv.calls} matvecs, "
@@ -504,10 +553,35 @@ class OperatorSpectrum(_SpectrumAlgorithm):
         rec["q_ke"] = {"median": float(np.median(q)), "mean": float(q.mean()),
                        "min": float(q.min()), "max": float(q.max())}
         k = min(n_modes, V.shape[1])
-        rec["weak_modes"] = [_mode_stats(V[:, -i], ix, iy, it, q, w[-i])
-                             for i in range(1, k + 1)]
-        rec["strong_modes"] = [_mode_stats(V[:, i], ix, iy, it, q, w[i])
-                               for i in range(k)]
+        LMAX[0] = float(w[0]) if w.size else 1.0
+        q_med = float(np.median(q))
+        gaps = _eig_gaps(w)
+        rec["weak_modes"] = [
+            _mode_stats(V[:, -i], ix, iy, it, q, w[-i],
+                        gaps[len(w) - i], q_med) for i in range(1, k + 1)]
+        rec["strong_modes"] = [
+            _mode_stats(V[:, i], ix, iy, it, q, w[i], gaps[i], q_med)
+            for i in range(k)]
+        rec["n_modes_well_separated"] = int(
+            (gaps > EIGVEC_GAP_FACTOR * LMAX[0]).sum())
+        # charge level occupied by the strong and the weak half of the
+        # spectrum: the aggregate answer to "is weak the same as low charge?".
+        # A half is a subspace, so unlike an individual mode it is invariant
+        # under rotations inside a degenerate cluster -- except where the
+        # halving boundary itself falls inside one, which is why the gap at the
+        # boundary is reported alongside.
+        nh = V.shape[1] // 2
+        for lab, sl in (("strong_half", slice(0, nh)),
+                        ("weak_half", slice(nh, V.shape[1]))):
+            W = V[:, sl] ** 2
+            tot = W.sum()
+            rec[f"q_weighted_mean_{lab}_ke"] = (
+                float((W.sum(1) / tot) @ q) if tot > 0 else None)
+        rec["eig_gap_at_half_boundary"] = (float(gaps[nh])
+                                           if nh < gaps.size else None)
+        rec["half_boundary_well_separated"] = (
+            bool(gaps[nh] > EIGVEC_GAP_FACTOR * LMAX[0])
+            if nh < gaps.size else None)
         if bool(self.props.get("deciles", True)):
             n = V.shape[1]
             dec = []
@@ -537,28 +611,42 @@ class OperatorSpectrum(_SpectrumAlgorithm):
             rec["spectrum_deciles"] = dec
 
     # -- measurement space: which windows see the same charge -------------
-    def _measurement_geometry(self, op, live, w, V, n_modes, rec):
-        # each latch window sits on one pixel, so the row's pixel is the
-        # pixel of any block cell it samples
-        nx, ny, nt = op.block_shape
-        rows = op._rows.cpu().numpy()
-        cols = op._cols.cpu().numpy()
-        rpx = np.full(int(op.n_data), -1.0)
-        rpy = np.full(int(op.n_data), -1.0)
-        first = np.full(int(op.n_data), -1, dtype=np.int64)
-        for r, c in zip(rows, cols):
-            if first[r] < 0:
-                first[r] = c
-        has = first >= 0
-        pix = first[has] // nt
-        rpx[has] = pix // ny
-        rpy[has] = pix % ny
+    def _measurement_geometry(self, op, live, w, V, n_modes, rec, meta=None,
+                              Gl=None):
+        if meta is not None:
+            rpx = np.asarray(meta["px"], dtype=float)
+            rpy = np.asarray(meta["py"], dtype=float)
+            kind = kind_all = np.asarray(meta["kind"], dtype=object)
+        else:
+            # fallback: each latch window sits on one pixel, so the row's pixel
+            # is the pixel of any block cell it samples
+            nx, ny, nt = op.block_shape
+            rows = op._rows.cpu().numpy()
+            cols = op._cols.cpu().numpy()
+            rpx = np.full(int(op.n_data), -1.0)
+            rpy = np.full(int(op.n_data), -1.0)
+            first = np.full(int(op.n_data), -1, dtype=np.int64)
+            for r, c in zip(rows, cols):
+                if first[r] < 0:
+                    first[r] = c
+            has = first >= 0
+            pix = first[has] // nt
+            rpx[has] = pix // ny
+            rpy[has] = pix % ny
+            kind = kind_all = None
         rpx, rpy = rpx[live], rpy[live]
+        if kind is not None:
+            kind = kind[live]
         dpx = np.abs(rpx[:, None] - rpx[None, :])
         dpy = np.abs(rpy[:, None] - rpy[None, :])
         dpix = np.maximum(dpx, dpy)
-        # normalised coupling rho_ij = G_ij / sqrt(G_ii G_jj)
-        Gl = V @ np.diag(w) @ V.T
+        # normalised coupling rho_ij = G_ij / sqrt(G_ii G_jj), from the Gram
+        # ITSELF.  An earlier version reconstructed it as V diag(w) V^T, which
+        # is a round trip through an eigendecomposition whose negative
+        # eigenvalues have been clipped to zero -- on a near-singular system
+        # the clipped mass is exactly the size of the smallest rho entries, so
+        # the reconstruction corrupted precisely the long-range coupling the
+        # profile is there to measure.
         d = np.sqrt(np.clip(np.diag(Gl), 1e-30, None))
         RHO = Gl / d[:, None] / d[None, :]
         np.fill_diagonal(RHO, np.nan)
@@ -571,11 +659,52 @@ class OperatorSpectrum(_SpectrumAlgorithm):
             prof.append({"d": k, "n": int(m.sum()), "mean": float(a.mean()),
                          "p90": float(np.percentile(a, 90)),
                          "max": float(a.max()),
-                         "frac_gt_0.1": float((a > 0.1).mean())})
+                         "frac_gt_0.1": float((a > 0.1).mean()),
+                         "frac_gt_0.5": float((a > 0.5).mean())})
         rec["rho_profile"] = prof
         same = (dpix == 0) & np.isfinite(RHO)
         rec["mean_abs_rho_same_pixel"] = (float(np.abs(RHO[same]).mean())
                                           if same.sum() else None)
+        # beyond the response half-width the two kernels do not overlap, so
+        # anything left here is round-off (or a normalisation artefact on rows
+        # that see almost no charge)
+        khalf = int(self.props.get("kernel_half_width", 12))
+        far = (dpix > khalf) & np.isfinite(RHO)
+        rec["mean_abs_rho_beyond_kernel"] = (float(np.abs(RHO[far]).mean())
+                                             if far.sum() else None)
+        # the coupling resolved on the two pixel axes separately, not just on
+        # the Chebyshev distance: an anisotropic response shows up here
+        M = np.full((khalf + 3, khalf + 3), np.nan)
+        for a1 in range(M.shape[0]):
+            for a2 in range(M.shape[1]):
+                m = (dpx == a1) & (dpy == a2) & np.isfinite(RHO)
+                if m.sum() >= 3:
+                    M[a1, a2] = float(np.abs(RHO[m]).mean())
+        rec["map_dpx_dpy"] = [[None if np.isnan(x) else float(x) for x in row]
+                              for row in M]
+        # mean |rho| between rows of each pair of kinds: are two windows of the
+        # same kind more alike than two of different kinds?
+        if kind is not None:
+            kinds = sorted(set(kind.tolist()))
+            kp = {}
+            for k1 in kinds:
+                i1 = np.flatnonzero(kind == k1)
+                for k2 in kinds:
+                    i2 = np.flatnonzero(kind == k2)
+                    if not (i1.size and i2.size):
+                        continue
+                    sub = RHO[np.ix_(i1, i2)]
+                    sub = sub[np.isfinite(sub)]
+                    kp[f"{k1}|{k2}"] = (float(np.abs(sub).mean())
+                                        if sub.size else None)
+            rec["kind_pairs"] = kp
+            # over ALL rows, matching the archived top-level field: the row
+            # kinds are a property of the operator, not of the restriction.
+            # An earlier version counted only the live rows, which made this
+            # move between the free and the restricted systems of one event.
+            rec["row_kinds"] = {k: int(v) for k, v in
+                                zip(*np.unique(kind_all, return_counts=True))}
+            rec["row_kinds_live"] = {k: int((kind == k).sum()) for k in kinds}
         # pixel-space spread of the least-constrained window combinations
         k = min(n_modes, V.shape[1])
         loc = []
@@ -585,8 +714,28 @@ class OperatorSpectrum(_SpectrumAlgorithm):
             loc.append({"eig": float(w[-i]),
                         "pixel_rms": float(np.sqrt(
                             (v2 * ((rpx - cx) ** 2 + (rpy - cy) ** 2)).sum())),
+                        "participation": float(1.0 / (v2 ** 2).sum()),
                         "sign_balance": float(abs(V[:, -i].sum())
                                               / np.abs(V[:, -i]).sum())})
         rec["weak_dirs"] = loc
         rec["weak_dirs_mean_pixel_rms"] = float(
             np.mean([o["pixel_rms"] for o in loc])) if loc else None
+        gaps = _eig_gaps(w)
+        for i, o in enumerate(loc, start=1):
+            g = float(gaps[len(w) - i])
+            o["eig_gap_to_neighbour"] = g
+            o["eigvec_well_separated"] = bool(g > EIGVEC_GAP_FACTOR * w[0])
+        n_strong = int(self.props.get("n_strong", 5))
+        strong = []
+        for i in range(min(n_strong, V.shape[1])):
+            v2 = V[:, i] ** 2
+            cx, cy = (v2 * rpx).sum(), (v2 * rpy).sum()
+            strong.append({"eig": float(w[i]),
+                           "pixel_rms": float(np.sqrt(
+                               (v2 * ((rpx - cx) ** 2
+                                      + (rpy - cy) ** 2)).sum())),
+                           "participation": float(1.0 / (v2 ** 2).sum()),
+                           "eig_gap_to_neighbour": float(gaps[i]),
+                           "eigvec_well_separated":
+                               bool(gaps[i] > EIGVEC_GAP_FACTOR * w[0])})
+        rec["strong_dirs"] = strong

@@ -54,7 +54,7 @@ class BuildMeasurement(Algorithm):
     """Immutable event measurement: latch windows and the operator A(d)."""
 
     reads = ("event", "readout_config", "block", "block_offset")
-    writes = ("op", "time_subbin", "row_var")
+    writes = ("op", "time_subbin", "row_var", "row_meta")
 
     def execute(self, store):
         ev = store.get("event")
@@ -127,6 +127,28 @@ class BuildMeasurement(Algorithm):
                         row_weights=weights)
         self.put(store, "op", op)
         self.put(store, "time_subbin", S)
+        # Per-row identity, aligned to the operator's own row indexing.  The
+        # operator keeps only the sampling triplet, so without this any
+        # downstream row-level statistic (kind pairs, per-kind residuals) has
+        # to re-run build_latch_rows outside the job and hope the arguments
+        # still match -- which is exactly how two archived studies ended up on
+        # different events under one tag name.  The filter below is the same
+        # one windows_to_sampling applies, so index r here is row r of op.
+        keep = [i for i, w in enumerate(windows)
+                if 0 <= w.px < nx and 0 <= w.py < ny
+                and w.t_hi > max(w.t_lo, 0.0)]
+        if len(keep) != op.n_data:
+            raise RuntimeError(f"row_meta: {len(keep)} kept rows against "
+                               f"op.n_data={op.n_data}; the filter here and "
+                               f"the one in windows_to_sampling disagree")
+        self.put(store, "row_meta", {
+            "kind": [metas[i].kind for i in keep],
+            "post_reset": [bool(metas[i].post_reset) for i in keep],
+            "px": [int(windows[i].px) for i in keep],
+            "py": [int(windows[i].py) for i in keep],
+            "t_lo": [float(windows[i].t_lo) for i in keep],
+            "t_hi": [float(windows[i].t_hi) for i in keep],
+        })
 
 
 @algorithm("BuildSupport")
