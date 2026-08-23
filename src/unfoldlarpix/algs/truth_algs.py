@@ -88,7 +88,10 @@ def _resid_conventions(op):
 class BuildTruth(Algorithm):
     """Bin the event's effective charge onto the operator's fit grid.
 
-    Props: ``convention`` (round|floor|linear, default round).
+    Props: ``convention`` (round|floor|linear|shift, default round) and
+    ``out_prefix`` (default ``truth``).  The prefix makes the write keys
+    instance-level, so several conventions can be built in one sequence --
+    the store is write-once, so a fixed key would collide.
     """
 
     reads = ("event", "readout_config", "block_offset", "op")
@@ -101,6 +104,8 @@ class BuildTruth(Algorithm):
         if self.convention not in CONVENTIONS:
             raise ValueError(f"convention must be one of {CONVENTIONS}, "
                              f"got {self.convention!r}")
+        self.prefix = str(props.get("out_prefix", "truth"))
+        self.writes = (f"{self.prefix}.q", f"{self.prefix}.meta")
 
     def execute(self, store):
         conv = self.convention
@@ -158,8 +163,8 @@ class BuildTruth(Algorithm):
               f"{total:.1f} ke on the fit grid "
               f"({100 * meta['off_grid_frac']:.3f}% off grid, "
               f"{meta['outside_pixels']} deposits outside the pixel range)")
-        self.put(store, "truth.q", q)
-        self.put(store, "truth.meta", meta)
+        self.put(store, f"{self.prefix}.q", q)
+        self.put(store, f"{self.prefix}.meta", meta)
 
 
 @algorithm("RowResidual")
