@@ -20,8 +20,22 @@ DEPOSIT_PHASE: float = -0.5
 DEPOSIT_MODE: str = "linear"    # charge-conserving linear split
 
 
+# Time convention of the written q grid.  "release_point" declares bin k at
+# the operator's own release instant, boffset_raw + k*B, and the evaluator
+# deposits it there -- one statement instead of two half bins that cancelled.
+# Files written before 2026-08-16 carry no marker and use the LEGACY pair:
+# boffset = raw - B + B//2, deposited at boffset + (k+1/2)*B.  For even B the
+# two are identical; the readers keep the legacy branch until it is dropped.
+TIME_CONVENTION: str = "release_point"
+
+
 def solver_time_shift(adc_hold_delay: int) -> int:
-    """Declared time offset of the solver's q grid vs the raw block.
+    """LEGACY declared time offset of the solver's q grid vs the raw block.
+
+    Superseded by ``TIME_CONVENTION = "release_point"``: the writer now
+    declares the raw corner and the evaluator deposits at ``b_off + k*B``,
+    which is the same instant without the two cancelling half bins.  Kept
+    so that files written before the change can still be read.
 
     The window->bin overlap convention of the fit sits half a bin later
     than the linear pipeline's deposit-phase(-0.5) convention, so solver

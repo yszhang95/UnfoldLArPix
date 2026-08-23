@@ -9,7 +9,7 @@ import numpy as np
 from ..constrained_solver import gaussian_post_smooth, split_deposit
 from ..fwk.component import Algorithm, algorithm
 from ..io.hits import HitsView
-from ..model.conventions import solver_time_shift
+from ..model.conventions import TIME_CONVENTION
 
 
 @algorithm("LoadEvent")
@@ -65,9 +65,12 @@ class WriteCharges(Algorithm):
         sigma_pxl = float(self.props.get("sigma_pixel", 0.2))
         q_smooth = gaussian_post_smooth(q_dep, B, sigma, sigma_pxl)
 
-        tshift = solver_time_shift(B)
+        # The written grid is declared at the operator's own release point:
+        # bin k means charge released at boffset_raw + k*B.  The legacy pair
+        # (declare half a bin early, deposit at the bin centre) cancelled to
+        # the same instant; it is recorded in the file only as the ABSENCE of
+        # `time_convention`.
         boffset = raw_off.copy()
-        boffset[2] += tshift
 
         ci, cj, ck = np.where(q_hat > 0.01)
         t_centers = raw_off[2] + ck * float(B)
@@ -82,6 +85,7 @@ class WriteCharges(Algorithm):
             "deconv_q_sharp": q_hat.astype(np.float32),
             "boffset": boffset,
             "boffset_raw": raw_off,
+            "time_convention": TIME_CONVENTION,
             "adc_hold_delay": B,
             "readout_nburst": hv.nburst,
             "readout_threshold": float(rc.threshold),

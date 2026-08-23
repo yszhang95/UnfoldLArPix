@@ -39,7 +39,8 @@ def universal_rebin(npz_path: Path, truth_npz: Path | None = None,
     (anchored to tick 0 of the common clock); pixels are absolute
     hardware indices.  The smeared truth is summed from its own fine-tick
     grid; the reconstruction's bin contents are deposited from their
-    PHYSICAL centers (declared boffset + (k + 1/2)*B, plus an optional
+    PHYSICAL centers (boffset + k*B under the release-point convention,
+    boffset + (k + 1/2)*B for legacy files, plus an optional
     diagnostic ``content_offset_ticks``).  Neither binning depends on the
     other — the protocol required for absolute (cross-config,
     cross-event) statements.
@@ -99,7 +100,14 @@ def universal_rebin(npz_path: Path, truth_npz: Path | None = None,
 
     # ---- reco: physical bin centers -> bins
     nx, ny, ntq = dq.shape
-    centers = b_off[2] + (np.arange(ntq) + 0.5) * B + content_offset_ticks
+    # bin k's physical instant.  New files declare the release point
+    # (boffset = raw corner, charge at b_off + k*B); legacy files declare
+    # half a bin early and are deposited at the bin centre, which lands on
+    # the same instant for even B.  The marker distinguishes them.
+    conv = f["time_convention"] if "time_convention" in f else None
+    conv = str(conv) if conv is not None else "legacy_half_bin"
+    half = 0.0 if conv == "release_point" else 0.5
+    centers = b_off[2] + (np.arange(ntq) + half) * B + content_offset_ticks
     fpos = (centers - phi) / B - 0.5    # fractional bin position
     i0 = np.floor(fpos).astype(np.int64)
     frac = fpos - i0
