@@ -113,7 +113,9 @@ class WriteCharges(Algorithm):
         for key, name in (("truth.q", "truth_q_fitgrid"),
                           ("truth.meta", "truth_meta"),
                           ("resid.rows", "resid_rows"),
-                          ("resid.summary", "resid_summary")):
+                          ("resid.summary", "resid_summary"),
+                          ("resid.solution", "resid_solution"),
+                          ("resid.solution_summary", "resid_solution_summary")):
             if key in store:
                 v = store.get(key)
                 if v is not None:

@@ -163,6 +163,11 @@ class RowResidual(Algorithm):
             # because a small signed sum can hide large cancelling rows
             "R_res_ke": float(r.sum()),
             "abs_norm_ke": float(np.linalg.norm(r)),
+            "sq_norm": float(r @ r),
+            # the objective's data term carries a 1/2, so this is the number
+            # a loss ledger reports and it is HALF the squared norm above.
+            # Naming both is cheaper than rediscovering the factor.
+            "half_sq_norm": float(0.5 * (r @ r)),
             "mean_row_ke": float(r.mean()),
             "rms_row_ke": float(np.sqrt((r ** 2).mean())),
             "row_bias_frac": (float(dv.sum() / av.sum() - 1.0)
@@ -186,3 +191,101 @@ class RowResidual(Algorithm):
         self.put(store, "resid.rows",
                  r if bool(self.props.get("store_rows", True)) else None)
         self.put(store, "resid.summary", summary)
+
+
+@algorithm("SolutionResidual")
+class SolutionResidual(Algorithm):
+    """``d - A q_hat`` per row at the solution -- the measurement residual.
+
+    The counterpart of :class:`RowResidual`, and the one a downstream study
+    actually needs: ``RowResidual`` is a property of the operator and the truth
+    with no solver in it, this one is what the fit left on the table.  Seven
+    scripts under ``analysis_output`` recompute it; ``Solve`` publishes only
+    ``solve.loss``, in which ``DataFidelity`` has already collapsed it to the
+    scalar :math:`\\|Aq-d\\|^2`, so the per-row vector was nowhere.
+
+    Reported against three references, because they answer different questions
+    and the note keeps them apart:
+
+    ``d``                the fit's own target.  ``R_fit`` is the signed sum;
+                         a solver that is converged and unconstrained would
+                         drive it to zero, and the amount by which it does not
+                         is what positivity, the l1 and the censor hold back.
+    ``A q_truth``        available when BuildTruth ran: the part of the
+                         residual that is the operator's own error rather than
+                         the fit's, so ``(d - A q_hat) - (d - A q_truth)
+                         = A(q_truth - q_hat)`` isolates the charge the fit
+                         moved from where the truth put it.
+    ``row_var``          the analytic per-row readout variance, when
+                         BuildMeasurement could compute it.  ``chi2_per_row``
+                         is the only form in which the residual can be called
+                         large or small without a further convention.
+
+    Props: ``store_rows`` (bool, default True).
+    """
+
+    reads = ("op", "solve.q")
+    writes = ("resid.solution", "resid.solution_summary")
+
+    def execute(self, store):
+        op = store.get("op")
+        q = np.asarray(store.get("solve.q"), dtype=np.float64)
+        Aq = op.forward(op.to_tensor(q)).detach()
+        d = op.d.detach()
+        r = (d - Aq).cpu().numpy().astype(np.float64).ravel()
+        dv = d.cpu().numpy().astype(np.float64).ravel()
+        av = Aq.cpu().numpy().astype(np.float64).ravel()
+
+        s = {
+            "n_rows": int(r.size),
+            "sum_d_ke": float(dv.sum()),
+            "sum_Aq_hat_ke": float(av.sum()),
+            "R_fit_ke": float(r.sum()),
+            "abs_norm_ke": float(np.linalg.norm(r)),
+            "sq_norm": float(r @ r),
+            # what DataFidelity and the loss ledger report: the objective's
+            # data term carries a 1/2.  The archived analyze_round.py's
+            # `L_qhat` is this number, not sq_norm.
+            "half_sq_norm": float(0.5 * (r @ r)),
+            "mean_row_ke": float(r.mean()),
+            "rms_row_ke": float(np.sqrt((r ** 2).mean())),
+            "n_rows_positive": int((r > 0).sum()),
+        }
+        # against the truth's own forward image: what the fit moved
+        if "resid.rows" in store and store.get("resid.rows") is not None:
+            rt = np.asarray(store.get("resid.rows"), dtype=np.float64).ravel()
+            moved = r - rt                    # = A(q_truth - q_hat)
+            s["vs_truth"] = {
+                "R_res_ke": float(rt.sum()),
+                "sum_A_dq_ke": float(moved.sum()),
+                "abs_norm_A_dq_ke": float(np.linalg.norm(moved)),
+                # how much of the operator's row residual the fit absorbed
+                "absorbed_frac": (float(1.0 - r.sum() / rt.sum())
+                                  if rt.sum() else None),
+            }
+        # against the noise model: the only scale-free statement available
+        rv = store.get("row_var") if "row_var" in store else None
+        if rv is not None:
+            v = np.asarray(rv, dtype=np.float64).ravel()
+            ok = v > 0
+            if ok.any():
+                s["chi2_per_row"] = float((r[ok] ** 2 / v[ok]).mean())
+                s["n_rows_with_var"] = int(ok.sum())
+        if "row_meta" in store:
+            kind = np.asarray(store.get("row_meta")["kind"], dtype=object)
+            s["by_kind"] = {
+                k: {"n": int((kind == k).sum()),
+                    "R_fit_ke": float(r[kind == k].sum()),
+                    "rms_row_ke": float(np.sqrt((r[kind == k] ** 2).mean())),
+                    "n_positive": int((r[kind == k] > 0).sum())}
+                for k in sorted(set(kind.tolist()))}
+        print(f"[SolutionResidual] {s['n_rows']} rows, R_fit = "
+              f"{s['R_fit_ke']:+.2f} ke, |r| = {s['abs_norm_ke']:.2f} ke"
+              + (f", chi2/row = {s['chi2_per_row']:.3g}"
+                 if "chi2_per_row" in s else ", no row_var")
+              + (f", absorbed {100 * s['vs_truth']['absorbed_frac']:.1f}% of "
+                 f"R_res" if "vs_truth" in s
+                 and s["vs_truth"]["absorbed_frac"] is not None else ""))
+        self.put(store, "resid.solution",
+                 r if bool(self.props.get("store_rows", True)) else None)
+        self.put(store, "resid.solution_summary", s)
