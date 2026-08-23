@@ -265,6 +265,26 @@ def _spearman(x, y):
 
 _CUR = "current_tpc0_batch0"
 
+# Index alignment between a window's tick range and the stored current array.
+# The archived construction (examples/operator_studies/anisotropy.py) used 0.
+# CALIBRATED, not assumed: on the one sample with a NOISELESS readout whose
+# current is in the data file (pgun_positron_3gev_ang50_tred_nb4_wf_nonoise),
+# physics fixes the answer -- with no noise the recorded value must equal the
+# integral of the simulated current over the window.  Scanning the offset:
+#
+#     offset   -2      -1       0      +1      +2
+#     |n| ke   46.98   31.21   15.68    3.84   16.15
+#
+# a sharp minimum at +1, and there the two row kinds that integrate a whole
+# window close EXACTLY: d/E_1 = 1.0000 for both `diff` and `lumped`, against
+# 0.9994 and 0.9928 at offset 0.  A scale factor was tested at the same time
+# (one_tick = 2) and rejected: scale 2 is worse by two orders of magnitude.
+#
+# What does NOT go away at +1 is the `pseudo` (0.9907) and `remainder`
+# (1.0281) discrepancy -- the two kinds the trigger split creates.  So the
+# note's unexplained pair-sum excess is real and is now isolated to them.
+_CUR_TICK_OFFSET = 1
+
 
 def _resolve_current(src, wf_prop):
     """Locate the noiseless induced current, and say where it came from.
@@ -399,16 +419,17 @@ class OperatorError(Algorithm):
             t_lo = max(float(rm["t_lo"][r]), 0.0)
             t_hi = float(rm["t_hi"][r])
             k = (int(rm["px"][r] + boff[0]), int(rm["py"][r] + boff[1]))
-            a = int(np.clip(t_lo + t0, 0, Nt))
-            b = int(np.clip(t_hi + t0, 0, Nt))
+            a = int(np.clip(t_lo + t0 + _CUR_TICK_OFFSET, 0, Nt))
+            b = int(np.clip(t_hi + t0 + _CUR_TICK_OFFSET, 0, Nt))
             dt[r] = t_hi - t_lo
             if k not in cs:
                 missing += 1
                 continue
             if b > a:
                 d_ex[r] = cs[k][b] - cs[k][a]
-                lo_e = t0 + ((a - t0) // B + 1) * B
-                hi_e = t0 + ((b - t0) // B) * B
+                t0o = t0 + _CUR_TICK_OFFSET
+                lo_e = t0o + ((a - t0o) // B + 1) * B
+                hi_e = t0o + ((b - t0o) // B) * B
                 if hi_e <= lo_e:              # window inside a single fit bin
                     q_part[r] = d_ex[r]
                 else:
@@ -446,6 +467,7 @@ class OperatorError(Algorithm):
         summary = {
             "current_file": str(wf),
             "current_from": cur_from,
+            "current_tick_offset": _CUR_TICK_OFFSET,
             "truth_convention": store.get(f"{self.prefix}.meta")["convention"],
             "identity_checked": "(d - A q_truth) == n - e",
             "identity_worst_abs": worst,
