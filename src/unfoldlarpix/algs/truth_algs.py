@@ -263,6 +263,47 @@ def _spearman(x, y):
     return float(a @ b / den) if den else None
 
 
+_CUR = "current_tpc0_batch0"
+
+
+def _resolve_current(src, wf_prop):
+    """Locate the noiseless induced current, and say where it came from.
+
+    The simulation stores it only when ``save_waveform`` is on, and then it
+    may sit EITHER in the data file itself OR in a companion written by a
+    separate noiseless run.  Both occur in this campaign, so both are tried:
+
+    1. an explicit ``wf`` prop (override, for a hand-picked companion);
+    2. the ``current_tpc0_batch0`` field of the data file itself;
+    3. the ``<input>_wf.npz`` companion beside it.
+
+    Raises with ``save_waveform`` quoted, so "no decomposition possible" is
+    distinguishable from "looked in the wrong place".
+    """
+    tried = []
+    for cand, label in ((wf_prop, "wf prop"), (src, "data file"),
+                        (str(src).replace(".npz", "_wf.npz"), "companion")):
+        if cand is None:
+            continue
+        pth = Path(cand)
+        tried.append(f"{label}={pth.name}")
+        if not pth.exists():
+            continue
+        z = np.load(pth, allow_pickle=True)
+        if _CUR in z.files:
+            return z, str(pth), label
+    sw = "unknown"
+    if Path(src).exists():
+        zz = np.load(src, allow_pickle=True)
+        if "save_waveform" in zz.files:
+            sw = str(zz["save_waveform"].item())
+    raise FileNotFoundError(
+        f"OperatorError needs the noiseless current and found none. "
+        f"Tried: {', '.join(tried)}. The data file reports "
+        f"save_waveform={sw} -- if that is False and no companion exists, the "
+        f"current was never stored and this sample cannot be decomposed.")
+
+
 @algorithm("OperatorError")
 class OperatorError(Algorithm):
     """Split the row residual into OPERATOR error and READOUT error.
@@ -307,12 +348,17 @@ class OperatorError(Algorithm):
       function of window length or partial-bin charge was found that
       explains it.
 
-    Props: ``wf`` (path to the waveform file; default is the event's input
-    with ``.npz`` -> ``_wf.npz``), ``truth_prefix`` (default ``truth``),
+    Props: ``wf`` (explicit path to a file carrying the current; by default
+    it is looked up, see below), ``truth_prefix`` (default ``truth``),
     ``store_rows`` (bool, default True).
 
-    Requires a waveform companion file; raises if it is absent, rather than
-    silently reporting a decomposition it cannot make.
+    The current is stored only when the simulation ran with
+    ``save_waveform``, and then it may sit either in the data file itself or
+    in a companion from a separate noiseless run.  Both are tried, in that
+    order, and ``current_from`` records which was used.  In the present
+    campaign 1 of 121 data files carries it in place and 7 have a companion,
+    so 113 samples cannot be decomposed at all -- the error message quotes
+    ``save_waveform`` so that case is distinguishable from a wrong path.
     """
 
     reads = ("event", "readout_config", "op", "block_offset", "row_meta")
@@ -331,20 +377,12 @@ class OperatorError(Algorithm):
         S = int(store.get("time_subbin")) if "time_subbin" in store else 1
         B = int(rc.adc_hold_delay) // S
 
-        wf = self.props.get("wf")
-        if wf is None:
-            src = getattr(store.get("event"), "source", None) or \
-                store.get("job.config")["sequence"][0]["LoadEvent"]["input"]
-            wf = str(src).replace(".npz", "_wf.npz")
-        if not Path(wf).exists():
-            raise FileNotFoundError(
-                f"OperatorError needs the noiseless current: {wf} not found. "
-                "Only the samples with a _wf.npz companion can be decomposed.")
-
-        z = np.load(wf, allow_pickle=True)
-        cur = np.asarray(z["current_tpc0_batch0"])
+        src = getattr(store.get("event"), "source", None) or \
+            store.get("job.config")["sequence"][0]["LoadEvent"]["input"]
+        z, wf, cur_from = _resolve_current(src, self.props.get("wf"))
+        cur = np.asarray(z[_CUR])
         cur = cur.reshape(-1, cur.shape[-1])
-        cl = np.asarray(z["current_tpc0_batch0_location"])
+        cl = np.asarray(z[_CUR + "_location"])
         Nt = cur.shape[1]
         # cumulative current per pixel, with a leading zero so that
         # cs[b] - cs[a] is the integral over [a, b)
@@ -406,7 +444,8 @@ class OperatorError(Algorithm):
         frac = np.where(np.abs(d_ex) > 0, q_part / np.abs(d_ex), np.nan)
         ok = np.isfinite(rel) & np.isfinite(frac)
         summary = {
-            "waveform": str(wf),
+            "current_file": str(wf),
+            "current_from": cur_from,
             "truth_convention": store.get(f"{self.prefix}.meta")["convention"],
             "identity_checked": "(d - A q_truth) == n - e",
             "identity_worst_abs": worst,
@@ -441,6 +480,12 @@ class OperatorError(Algorithm):
                 "rel_median": (float(np.nanmedian(rel[mo]))
                                if mo.any() else None),
                 "mean_q_part_ke": float(q_part[m].mean()) if m.any() else None,
+                # d/E_1 per kind: the ratio tab:truecurrent quotes, so it is
+                # reproducible from a store product instead of a script
+                "sum_d_ke": float(d[m].sum()),
+                "sum_d_exact_ke": float(d_ex[m].sum()),
+                "d_over_exact": (float(d[m].sum() / d_ex[m].sum())
+                                 if d_ex[m].sum() else None),
                 "spearman_rel_vs_dt": _spearman(dt[mo], rel[mo]),
                 "spearman_rel_vs_q_part": _spearman(q_part[mo], rel[mo]),
                 "part_frac_median": (float(np.nanmedian(frac[mo]))
