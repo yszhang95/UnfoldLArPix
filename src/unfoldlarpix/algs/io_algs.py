@@ -101,6 +101,20 @@ class WriteCharges(Algorithm):
         if u is not None:
             payload["deconv_q_offsets"] = (u * float(B)).astype(np.float32)
 
+        # the FIT-GRID truth and the row residual, if BuildTruth/RowResidual
+        # ran.  Distinct from `smeared_true` below: that one is the smeared
+        # evaluation truth on the universal grid, this one is the operator's
+        # own grid under a declared binning convention, and it is what
+        # d - A q_truth is built from.
+        for key, name in (("truth.q", "truth_q_fitgrid"),
+                          ("truth.meta", "truth_meta"),
+                          ("resid.rows", "resid_rows"),
+                          ("resid.summary", "resid_summary")):
+            if key in store:
+                v = store.get(key)
+                if v is not None:
+                    payload[name] = (np.asarray(v) if not isinstance(v, dict)
+                                     else np.array(v, dtype=object))
         if bool(self.props.get("embed_truth", False)):
             # self-contained output: eval/plots need no external truth ref
             from ..deconv_workflow import smear_effective_charge
