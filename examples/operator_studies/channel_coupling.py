@@ -1,3 +1,38 @@
+"""SUPERSEDED as a production path -- kept as the record of what was run.
+
+Replaced by the framework algorithms in
+``src/unfoldlarpix/algs/spectrum_algs.py``:
+
+    OperatorConditioning   matrix-free (Lanczos), cost independent of n
+    OperatorSpectrum       dense Gram + eigh, full spectrum and mode geometry
+
+They read the operator from the write-once event store, so the spectrum is
+provably of the same A the solver used, and the record carries the resolved job
+config.  This script rebuilt the operator from a job YAML outside the solver's
+run and wrote a JSON that names neither -- which is how two archived campaigns
+ended up on different events under one set of tag names (mu_a00_nb1 at 856 rows
+here, 887 in charge_space_modes/), invisible until both were replayed.
+
+Equivalence was established field by field, not asserted: see
+``examples/analysis_output/spectrum_algs/replace_archived_studies.py`` and its
+report.  That exercise found four defects in the PORT, not here, and three
+reporting defects here:
+
+  * ``cond_sqrt`` divides by ``max(lambda_min, 1e-30)`` and so prints ~1e15 on a
+    numerically singular system.  The algorithms report null plus
+    ``n_eig_at_roundoff``.
+  * per-mode geometry (``weak_dirs``, ``weak_modes``) is emitted with nothing to
+    say it is defined only up to a rotation inside a degenerate cluster.  The
+    algorithms report ``eig_gap_to_neighbour`` and ``eigvec_well_separated`` per
+    mode; quote the aggregates.
+  * no provenance in the output.
+
+DO NOT delete or edit: the JSONs in analysis_output/ were produced by this code
+and the note still cites them for the archived campaigns.  New work goes through
+the algorithms.
+
+Original docstring follows.
+"""
 """Which measurement channels carry the same information, over what range
 in pixel space, and what do the l1/support terms do to that geometry?
 
@@ -54,8 +89,12 @@ from unfoldlarpix.terms.censor import CensorRunningMax  # noqa: E402
 
 TAG = sys.argv[1] if len(sys.argv) > 1 else "mu_a00_nb1"
 ARM = sys.argv[2] if len(sys.argv) > 2 else "B"
-JOB = f"{AO}/nb1_fraccensor/{ARM}/job_{TAG}.yaml"
-SOLVED = f"{AO}/nb1_fraccensor/{ARM}/{TAG}/{TAG}_event_0_0.npz"
+CAMP = sys.argv[3] if len(sys.argv) > 3 else "nb1_fraccensor"
+JOB = f"{AO}/{CAMP}/{ARM}/job_{TAG}.yaml" if CAMP == "nb1_fraccensor" \
+    else f"{AO}/{CAMP}/job_{TAG}.yaml"
+SOLVED = (f"{AO}/{CAMP}/{ARM}/{TAG}/{TAG}_event_0_0.npz"
+          if CAMP == "nb1_fraccensor"
+          else f"{AO}/{CAMP}/{TAG}/{TAG}_event_0_0.npz")
 OUT = f"{AO}/channel_coupling"
 KHALF = 12          # response half-width in pixels (25 x 25 kernel)
 
@@ -129,8 +168,12 @@ def analyse(G, rpx, rpy, kind):
     V = V[:, ::-1]
     tot = max(w.sum(), 1e-30)
     cum = np.cumsum(w) / tot
-    eff = {f"rank_{int(100*p)}pct": int(np.searchsorted(cum, p) + 1)
-           for p in (0.9, 0.99, 0.999)}
+    # NB: an earlier version built these keys with int(100*p), so p=0.999
+    # collided with p=0.99 (int(99.9) == 99) and the 99.9% count overwrote
+    # the 99% one.  Every "rank_99pct" written before this fix is in fact
+    # the 99.9% count.
+    eff = {f"rank_{p*100:g}pct".replace('.0pct', 'pct'):
+           int(np.searchsorted(cum, p) + 1) for p in (0.9, 0.99, 0.999)}
     # pixel-space localisation of the 20 weakest directions
     loc = []
     for i in range(1, 21):
