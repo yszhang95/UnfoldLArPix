@@ -266,24 +266,35 @@ def _spearman(x, y):
 _CUR = "current_tpc0_batch0"
 
 # Index alignment between a window's tick range and the stored current array.
-# The archived construction (examples/operator_studies/anisotropy.py) used 0.
-# CALIBRATED, not assumed: on the one sample with a NOISELESS readout whose
-# current is in the data file (pgun_positron_3gev_ang50_tred_nb4_wf_nonoise),
-# physics fixes the answer -- with no noise the recorded value must equal the
-# integral of the simulated current over the window.  Scanning the offset:
+# DERIVED from the readout, not calibrated: tred's accumulator is
+# ``Xacc = X.cumsum(dim=taxis)`` (readout.py:60), an INCLUSIVE prefix sum, so
+# the value latched at tick t is the current over ticks [0, t].  The array here
+# carries a leading zero, so cs[k] == Xacc[k-1] and the integral of ticks
+# (a, b] is cs[b+1] - cs[a+1].  The archived construction
+# (operator_studies/anisotropy.py) used cs[b] - cs[a], i.e. both edges one tick
+# early.
 #
-#     offset   -2      -1       0      +1      +2
-#     |n| ke   46.98   31.21   15.68    3.84   16.15
+# The LOWER edge then depends on what bounds it, and only two cases occur:
 #
-# a sharp minimum at +1, and there the two row kinds that integrate a whole
-# window close EXACTLY: d/E_1 = 1.0000 for both `diff` and `lumped`, against
-# 0.9994 and 0.9928 at offset 0.  A scale factor was tested at the same time
-# (one_tick = 2) and rejected: scale 2 is worse by two orders of magnitude.
+#   +1  the edge is an instant whose own tick is already accounted for -- a
+#       previous latch (`diff`, `lumped`) or the trigger sample (`remainder`),
+#       so the window is half-open there;
+#    0  the edge is where accumulation STARTS (`pseudo`, whose lower edge is
+#       the restart / acquisition edge), so its own tick contributes.
 #
-# What does NOT go away at +1 is the `pseudo` (0.9907) and `remainder`
-# (1.0281) discrepancy -- the two kinds the trigger split creates.  So the
-# note's unexplained pair-sum excess is real and is now isolated to them.
-_CUR_TICK_OFFSET = 1
+# Verified on the one noiseless sample, where physics fixes the answer: rows
+# bounded by latches then close EXACTLY, d/E_1 = 1.00000 for both `diff` and
+# `lumped`.  `pseudo` and `remainder` deviate by equal and opposite amounts
+# (-0.0944 and +0.0911 ke per row) because both measure the same threshold
+# OVERSHOOT -- the check runs only every ``one_tick`` ticks, so the accumulator
+# has already passed the threshold the `pseudo` row asserts.  That overshoot
+# cancels in the pair sum, which closes to 0.99960.
+#
+# Getting either convention wrong is what produced the note's "+1.36% pair sum,
+# origin not established": at cs[b]-cs[a] with a uniform lower edge the pair
+# sum reads 1.0136, at the derived convention it reads 0.9996.
+_CUR_TICK_OFFSET_HI = 1
+_CUR_LO_OFFSET = {"pseudo": 0}          # default 1; see above
 
 
 def _resolve_current(src, wf_prop):
@@ -419,15 +430,16 @@ class OperatorError(Algorithm):
             t_lo = max(float(rm["t_lo"][r]), 0.0)
             t_hi = float(rm["t_hi"][r])
             k = (int(rm["px"][r] + boff[0]), int(rm["py"][r] + boff[1]))
-            a = int(np.clip(t_lo + t0 + _CUR_TICK_OFFSET, 0, Nt))
-            b = int(np.clip(t_hi + t0 + _CUR_TICK_OFFSET, 0, Nt))
+            lo_off = _CUR_LO_OFFSET.get(str(rm["kind"][r]), 1)
+            a = int(np.clip(t_lo + t0 + lo_off, 0, Nt))
+            b = int(np.clip(t_hi + t0 + _CUR_TICK_OFFSET_HI, 0, Nt))
             dt[r] = t_hi - t_lo
             if k not in cs:
                 missing += 1
                 continue
             if b > a:
                 d_ex[r] = cs[k][b] - cs[k][a]
-                t0o = t0 + _CUR_TICK_OFFSET
+                t0o = t0 + lo_off
                 lo_e = t0o + ((a - t0o) // B + 1) * B
                 hi_e = t0o + ((b - t0o) // B) * B
                 if hi_e <= lo_e:              # window inside a single fit bin
@@ -467,7 +479,8 @@ class OperatorError(Algorithm):
         summary = {
             "current_file": str(wf),
             "current_from": cur_from,
-            "current_tick_offset": _CUR_TICK_OFFSET,
+            "current_tick_offset_hi": _CUR_TICK_OFFSET_HI,
+            "current_lo_offset": dict(_CUR_LO_OFFSET),
             "truth_convention": store.get(f"{self.prefix}.meta")["convention"],
             "identity_checked": "(d - A q_truth) == n - e",
             "identity_worst_abs": worst,
