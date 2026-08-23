@@ -53,6 +53,8 @@ without failing.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from ..fwk.component import Algorithm, algorithm
@@ -240,6 +242,222 @@ class RowResidual(Algorithm):
         self.put(store, "resid.rows",
                  r if bool(self.props.get("store_rows", True)) else None)
         self.put(store, "resid.summary", summary)
+
+
+def _rank(x):
+    """Ranks with ties broken by position -- enough for a rank correlation
+    on continuous quantities, and avoids a scipy dependency."""
+    o = np.argsort(x, kind="stable")
+    r = np.empty_like(o, dtype=np.float64)
+    r[o] = np.arange(x.size, dtype=np.float64)
+    return r
+
+
+def _spearman(x, y):
+    if x.size < 3:
+        return None
+    a, b = _rank(np.asarray(x, float)), _rank(np.asarray(y, float))
+    a = a - a.mean()
+    b = b - b.mean()
+    den = float(np.sqrt((a @ a) * (b @ b)))
+    return float(a @ b / den) if den else None
+
+
+@algorithm("OperatorError")
+class OperatorError(Algorithm):
+    """Split the row residual into OPERATOR error and READOUT error.
+
+    With the noiseless induced current available as a companion waveform
+    file, every row's exact window integral is known, so the two error
+    sources separate:
+
+        d_exact_r                            exact charge in the window
+        e_r = (A q_truth)_r - d_exact_r      operator model error
+        n_r = d_r          - d_exact_r       readout error
+
+    and :class:`RowResidual`'s ``(d - A q_truth)_r`` is identically
+    ``n_r - e_r``.  That identity is ASSERTED here, so a convention slip in
+    either path fails at this algorithm instead of propagating into a plot.
+
+    Also reported per row, because the operator's error is expected to
+    depend on them: ``dt`` (window length in ticks) and ``q_part`` (the
+    charge sitting in the two partially-covered fit bins at the window
+    edges -- the part the within-bin model has to guess).  The summary gives
+    the rank correlation of the relative error against both, which is the
+    measurement that distinguishes "long windows are more accurate" from
+    "the error is set by partial-bin charge".
+
+    MEASURED, so that these are not re-derived (6 samples with waveforms,
+    setup B, ``round`` truth):
+
+    * ``|e|`` exceeds ``|n|`` in 5 of 6 -- the operator error dominates the
+      readout error, by 2.7x on ``pos_a50_nb4``.  This is the reason a
+      residual target set by the noise model does not help.
+    * ``dt`` is CONFOUNDED with the row kind: ``remainder`` and ``diff``
+      windows are one bin long by construction (30 ticks), ``lumped`` runs
+      190-470 and ``pseudo`` 800-1860.  A correlation of error against ``dt``
+      is therefore a comparison between kinds, not a trend within one, and
+      its sign flips across samples (-0.30 to +0.15).
+    * ``part_frac`` is DEGENERATE: it is identically 1 for ``remainder`` and
+      ``diff``, which are most of the rows, so it cannot discriminate.  Do
+      not read its correlation as a mechanism.
+    * What is stable is the per-kind median relative error: ``pseudo`` and
+      ``lumped`` low (0.04-0.15), ``remainder`` and ``diff`` high
+      (0.07-0.26).  The operator error is a per-kind property; no smooth
+      function of window length or partial-bin charge was found that
+      explains it.
+
+    Props: ``wf`` (path to the waveform file; default is the event's input
+    with ``.npz`` -> ``_wf.npz``), ``truth_prefix`` (default ``truth``),
+    ``store_rows`` (bool, default True).
+
+    Requires a waveform companion file; raises if it is absent, rather than
+    silently reporting a decomposition it cannot make.
+    """
+
+    reads = ("event", "readout_config", "op", "block_offset", "row_meta")
+    writes = ("error.rows", "error.summary")
+
+    def __init__(self, **props):
+        super().__init__(**props)
+        self.prefix = str(props.get("truth_prefix", "truth"))
+        self.reads = tuple(self.reads) + (f"{self.prefix}.q",)
+
+    def execute(self, store):
+        op = store.get("op")
+        rc = store.get("readout_config")
+        rm = store.get("row_meta")
+        boff = np.asarray(store.get("block_offset"), dtype=float)
+        S = int(store.get("time_subbin")) if "time_subbin" in store else 1
+        B = int(rc.adc_hold_delay) // S
+
+        wf = self.props.get("wf")
+        if wf is None:
+            src = getattr(store.get("event"), "source", None) or \
+                store.get("job.config")["sequence"][0]["LoadEvent"]["input"]
+            wf = str(src).replace(".npz", "_wf.npz")
+        if not Path(wf).exists():
+            raise FileNotFoundError(
+                f"OperatorError needs the noiseless current: {wf} not found. "
+                "Only the samples with a _wf.npz companion can be decomposed.")
+
+        z = np.load(wf, allow_pickle=True)
+        cur = np.asarray(z["current_tpc0_batch0"])
+        cur = cur.reshape(-1, cur.shape[-1])
+        cl = np.asarray(z["current_tpc0_batch0_location"])
+        Nt = cur.shape[1]
+        # cumulative current per pixel, with a leading zero so that
+        # cs[b] - cs[a] is the integral over [a, b)
+        cs = {(int(a), int(b)): np.concatenate([[0.0], np.cumsum(cur[i])])
+              for i, (a, b) in enumerate(cl[:, :2])}
+
+        n_rows = int(op.n_data)
+        d_ex = np.zeros(n_rows)
+        q_part = np.zeros(n_rows)
+        dt = np.zeros(n_rows)
+        t0 = int(boff[2])
+        missing = 0
+        for r in range(n_rows):
+            t_lo = max(float(rm["t_lo"][r]), 0.0)
+            t_hi = float(rm["t_hi"][r])
+            k = (int(rm["px"][r] + boff[0]), int(rm["py"][r] + boff[1]))
+            a = int(np.clip(t_lo + t0, 0, Nt))
+            b = int(np.clip(t_hi + t0, 0, Nt))
+            dt[r] = t_hi - t_lo
+            if k not in cs:
+                missing += 1
+                continue
+            if b > a:
+                d_ex[r] = cs[k][b] - cs[k][a]
+                lo_e = t0 + ((a - t0) // B + 1) * B
+                hi_e = t0 + ((b - t0) // B) * B
+                if hi_e <= lo_e:              # window inside a single fit bin
+                    q_part[r] = d_ex[r]
+                else:
+                    q_part[r] = ((cs[k][min(lo_e, Nt)] - cs[k][a])
+                                 + (cs[k][b] - cs[k][max(hi_e, 0)]))
+
+        qt = store.get(f"{self.prefix}.q")
+        Aqt = op.forward(op.to_tensor(qt)).detach().cpu().numpy()
+        Aqt = np.asarray(Aqt, np.float64).ravel()
+        d = np.asarray(op.d.detach().cpu().numpy(), np.float64).ravel()
+        sw, weighted = _resid_conventions(op)
+        if weighted:                  # decompose in CHARGE units, always
+            d = d / sw
+            Aqt = Aqt / sw
+
+        e = Aqt - d_ex                # operator model error
+        n = d - d_ex                  # readout error
+        # RowResidual computes d - A q_truth; it must equal n - e exactly
+        resid = d - Aqt
+        worst = float(np.max(np.abs(resid - (n - e)))) if n_rows else 0.0
+        if not np.allclose(resid, n - e, rtol=0, atol=1e-6):
+            raise AssertionError(
+                f"(d - A q_truth) != n - e, worst {worst:.3g} -- the two "
+                "paths disagree on a convention")
+
+        kind = np.asarray(rm["kind"], dtype=object)
+        rel = np.where(np.abs(d_ex) > 0, np.abs(e) / np.abs(d_ex), np.nan)
+        # the mechanism-level variable: what FRACTION of the window's charge
+        # sits in the two partially-covered fit bins.  dt is a poor proxy for
+        # it because the row kind fixes both (remainder/diff windows are one
+        # bin long by construction), so a correlation against dt is a
+        # comparison BETWEEN kinds, not a trend within one.
+        frac = np.where(np.abs(d_ex) > 0, q_part / np.abs(d_ex), np.nan)
+        ok = np.isfinite(rel) & np.isfinite(frac)
+        summary = {
+            "waveform": str(wf),
+            "truth_convention": store.get(f"{self.prefix}.meta")["convention"],
+            "identity_checked": "(d - A q_truth) == n - e",
+            "identity_worst_abs": worst,
+            "row_weights_active": weighted,
+            "units": "ke (un-whitened)" if weighted else "ke",
+            "n_rows": n_rows,
+            "n_rows_no_current": int(missing),
+            "sum_d_exact_ke": float(d_ex.sum()),
+            "operator_error": {
+                "sum_ke": float(e.sum()), "abs_norm_ke": float(np.linalg.norm(e)),
+                "mean_abs_ke": float(np.abs(e).mean()),
+                "rel_median": (float(np.nanmedian(rel)) if ok.any() else None)},
+            "readout_error": {
+                "sum_ke": float(n.sum()), "abs_norm_ke": float(np.linalg.norm(n)),
+                "mean_abs_ke": float(np.abs(n).mean())},
+            # the measurement that separates the two candidate explanations
+            "spearman_rel_err_vs_dt": _spearman(dt[ok], rel[ok]),
+            "spearman_rel_err_vs_q_part": _spearman(q_part[ok], rel[ok]),
+            "spearman_abs_err_vs_q_part": _spearman(q_part, np.abs(e)),
+            "spearman_rel_err_vs_part_frac": _spearman(frac[ok], rel[ok]),
+            "part_frac_median": float(np.nanmedian(frac[ok])) if ok.any() else None,
+            "by_kind": {},
+        }
+        for k in sorted(set(kind.tolist())):
+            m = kind == k
+            mo = m & ok
+            summary["by_kind"][k] = {
+                "n": int(m.sum()),
+                "mean_dt_ticks": float(dt[m].mean()) if m.any() else None,
+                "sum_e_ke": float(e[m].sum()),
+                "mean_abs_e_ke": float(np.abs(e[m]).mean()) if m.any() else None,
+                "rel_median": (float(np.nanmedian(rel[mo]))
+                               if mo.any() else None),
+                "mean_q_part_ke": float(q_part[m].mean()) if m.any() else None,
+                "spearman_rel_vs_dt": _spearman(dt[mo], rel[mo]),
+                "spearman_rel_vs_q_part": _spearman(q_part[mo], rel[mo]),
+                "part_frac_median": (float(np.nanmedian(frac[mo]))
+                                     if mo.any() else None),
+                "spearman_rel_vs_part_frac": _spearman(frac[mo], rel[mo]),
+            }
+        print(f"[OperatorError] {n_rows} rows, |e| = "
+              f"{summary['operator_error']['abs_norm_ke']:.2f} ke, |n| = "
+              f"{summary['readout_error']['abs_norm_ke']:.2f} ke, "
+              f"rho(rel err, dt) = {summary['spearman_rel_err_vs_dt']}, "
+              f"rho(rel err, part frac) = "
+              f"{summary['spearman_rel_err_vs_part_frac']}")
+        self.put(store, "error.rows",
+                 {"e": e, "n": n, "d_exact": d_ex, "q_part": q_part,
+                  "part_frac": frac, "dt": dt}
+                 if bool(self.props.get("store_rows", True)) else None)
+        self.put(store, "error.summary", summary)
 
 
 @algorithm("SolutionResidual")
