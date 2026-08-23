@@ -37,6 +37,14 @@ fixes which bin a release time ``t_f`` goes to:
                                                  tred-vs-synth gaps.
     linear  charge split between k and k+1 in    charge-conserving, and the
             proportion to the sub-bin phase      only one with no binning bias
+    shift   k = floor((t_f - boff_z)/B - 0.5)    CONTROL, deliberately wrong.
+                                                 Displaces the release another
+                                                 half bin EARLIER than floor,
+                                                 which is already ~0.47 B early,
+                                                 so it bounds the scale of the
+                                                 effect from the wrong side.
+                                                 Faithful to `shift_half` in
+                                                 noiseless_closure/rowbias_decomp.py.
 
 Charge that lands outside the fit grid in any axis is NOT dropped silently:
 ``off_grid_ke`` and ``off_grid_frac`` are reported, because a truth sum that
@@ -49,7 +57,31 @@ import numpy as np
 
 from ..fwk.component import Algorithm, algorithm
 
-CONVENTIONS = ("round", "floor", "linear")
+CONVENTIONS = ("round", "floor", "linear", "shift")
+
+
+def _resid_conventions(op):
+    """The two conventions a row residual carries, and the un-whitening factor.
+
+    SIGN.  These algorithms use ``d - A q``, which is the note's convention for
+    ``R_res``: positive means the readout recorded more than the operator says
+    it should have.  ``terms.data.DataFidelity`` uses the OPPOSITE order,
+    ``A q - target``, because it is minimising.  The squared norms agree; the
+    signed sums do not, so both are labelled.
+
+    WEIGHTING.  When ``BuildMeasurement`` was given ``row_weights``, the
+    operator folds ``sqrt(w)`` into BOTH ``op.d`` and the sampling weights, so
+    ``op.d - A q`` is the WHITENED residual and its sum is not a charge.  The
+    factor is returned so the charge-unit residual can be recovered; without it
+    a summary would report whitened numbers labelled ``ke``, which is wrong
+    wherever ``row_weights: diag`` was used (the ``nb1_diag`` campaign).
+    """
+    w = getattr(op, "row_weights", None)
+    if w is None:
+        return None, False
+    import numpy as _np
+    sw = _np.sqrt(_np.asarray(w, dtype=_np.float64)).ravel()
+    return sw, True
 
 
 @algorithm("BuildTruth")
@@ -100,8 +132,8 @@ class BuildTruth(Algorithm):
                 ok = in_px & (kk >= 0) & (kk < nt)
                 placed[ok] += eq[ok] * ww[ok]
         else:
-            k = (np.floor(tf + 0.5) if conv == "round"
-                 else np.floor(tf)).astype(np.int64)
+            off = {"round": 0.5, "floor": 0.0, "shift": -0.5}[conv]
+            k = np.floor(tf + off).astype(np.int64)
             ok = in_px & (k >= 0) & (k < nt)
             np.add.at(q, (ix[ok], iy[ok], k[ok]), eq[ok])
             placed = np.where(ok, eq, 0.0)
@@ -153,9 +185,13 @@ class RowResidual(Algorithm):
         r = (d - Aq).cpu().numpy().astype(np.float64).ravel()
         dv = d.cpu().numpy().astype(np.float64).ravel()
         av = Aq.cpu().numpy().astype(np.float64).ravel()
+        sw, weighted = _resid_conventions(op)
 
         summary = {
             "truth_convention": tm["convention"],
+            "sign_convention": "d - A q  (DataFidelity uses A q - target)",
+            "row_weights_active": weighted,
+            "units": "whitened (sqrt(w) folded in)" if weighted else "ke",
             "n_rows": int(r.size),
             "sum_d_ke": float(dv.sum()),
             "sum_Aq_truth_ke": float(av.sum()),
@@ -174,6 +210,14 @@ class RowResidual(Algorithm):
                               if av.sum() else None),
             "n_rows_positive": int((r > 0).sum()),
         }
+        if weighted:
+            # recover charge units: op.d = sqrt(w) d_raw and A = sqrt(w) A_raw
+            rc = r / sw
+            summary["charge_units"] = {
+                "R_res_ke": float(rc.sum()),
+                "abs_norm_ke": float(np.linalg.norm(rc)),
+                "rms_row_ke": float(np.sqrt((rc ** 2).mean())),
+            }
         if "row_meta" in store:
             kind = np.asarray(store.get("row_meta")["kind"], dtype=object)
             summary["by_kind"] = {
@@ -221,6 +265,21 @@ class SolutionResidual(Algorithm):
                          is the only form in which the residual can be called
                          large or small without a further convention.
 
+    The reference is ``op.d``, recorded as ``reference`` in the summary, and
+    that is deliberately the PHYSICAL residual rather than whatever the solver
+    internally minimised.  Two jobs differ from the naive reading:
+
+    * the amplitude refit overrides ``DataFidelity``'s target with
+      ``d - A q_faint`` (``solve/strategy.py``).  Since the reported solution is
+      ``q_strong + q_faint``, ``op.d - A q_hat`` is the same residual --- which
+      is what that code's own comment asserts and what makes the caller's
+      noise-floor target still apply.
+    * the synthetic arm of the closure test overrides the target with
+      ``A q_truth``.  There ``op.d`` is still the tred data, so this algorithm
+      reports the residual against the DATA, not the residual the solver drove
+      to zero.  Both are wanted; they are not the same number, and the
+      ``reference`` field says which one this is.
+
     Props: ``store_rows`` (bool, default True).
     """
 
@@ -235,9 +294,14 @@ class SolutionResidual(Algorithm):
         r = (d - Aq).cpu().numpy().astype(np.float64).ravel()
         dv = d.cpu().numpy().astype(np.float64).ravel()
         av = Aq.cpu().numpy().astype(np.float64).ravel()
+        sw, weighted = _resid_conventions(op)
 
         s = {
             "n_rows": int(r.size),
+            "sign_convention": "d - A q  (DataFidelity uses A q - target)",
+            "reference": "op.d",
+            "row_weights_active": weighted,
+            "units": "whitened (sqrt(w) folded in)" if weighted else "ke",
             "sum_d_ke": float(dv.sum()),
             "sum_Aq_hat_ke": float(av.sum()),
             "R_fit_ke": float(r.sum()),
@@ -251,6 +315,13 @@ class SolutionResidual(Algorithm):
             "rms_row_ke": float(np.sqrt((r ** 2).mean())),
             "n_rows_positive": int((r > 0).sum()),
         }
+        if weighted:
+            rc = r / sw
+            s["charge_units"] = {
+                "R_fit_ke": float(rc.sum()),
+                "abs_norm_ke": float(np.linalg.norm(rc)),
+                "rms_row_ke": float(np.sqrt((rc ** 2).mean())),
+            }
         # against the truth's own forward image: what the fit moved
         if "resid.rows" in store and store.get("resid.rows") is not None:
             rt = np.asarray(store.get("resid.rows"), dtype=np.float64).ravel()
