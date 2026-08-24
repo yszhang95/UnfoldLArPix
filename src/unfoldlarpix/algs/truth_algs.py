@@ -475,7 +475,13 @@ class OperatorError(Algorithm):
         # bin long by construction), so a correlation against dt is a
         # comparison BETWEEN kinds, not a trend within one.
         frac = np.where(np.abs(d_ex) > 0, q_part / np.abs(d_ex), np.nan)
-        ok = np.isfinite(rel) & np.isfinite(frac)
+        # A relative error needs a denominator floor or it is meaningless: a
+        # window holding ~0 charge gives |e|/q of order 1e4 and dominates any
+        # mean.  The floor is the note's standard 0.5 ke charge cut, and the
+        # number of rows it removes is reported rather than left implicit.
+        q_floor = float(self.props.get("rel_q_floor", 0.5))
+        big = np.abs(d_ex) >= q_floor
+        ok = np.isfinite(rel) & np.isfinite(frac) & big
         summary = {
             "current_file": str(wf),
             "current_from": cur_from,
@@ -501,7 +507,15 @@ class OperatorError(Algorithm):
             "spearman_rel_err_vs_q_part": _spearman(q_part[ok], rel[ok]),
             "spearman_abs_err_vs_q_part": _spearman(q_part, np.abs(e)),
             "spearman_rel_err_vs_part_frac": _spearman(frac[ok], rel[ok]),
+            # kappa: the error SCALE the note transfers between topologies,
+            # |e_r| ~ kappa * q_part(r), quoted as a ratio of rms values
+            "kappa_rms": (float(np.sqrt((e ** 2).mean())
+                                / np.sqrt((q_part ** 2).mean()))
+                          if (q_part ** 2).mean() else None),
+            "rel_err_mean": float(np.nanmean(rel[ok])) if ok.any() else None,
             "part_frac_median": float(np.nanmedian(frac[ok])) if ok.any() else None,
+            "rel_q_floor_ke": q_floor,
+            "n_rows_below_q_floor": int((~big).sum()),
             "by_kind": {},
         }
         for k in sorted(set(kind.tolist())):
@@ -511,9 +525,23 @@ class OperatorError(Algorithm):
                 "n": int(m.sum()),
                 "mean_dt_ticks": float(dt[m].mean()) if m.any() else None,
                 "sum_e_ke": float(e[m].sum()),
+                # the aggregate ||e||/||n|| hides where the operator error
+                # lives: it concentrates on the kinds that integrate across
+                # bin boundaries (diff, lumped) and is the SMALLER term on the
+                # trigger-split pair (pseudo, remainder)
+                "norm_e_ke": float(np.linalg.norm(e[m])),
+                "norm_n_ke": float(np.linalg.norm(n[m])),
+                "e_over_n": (float(np.linalg.norm(e[m]) / np.linalg.norm(n[m]))
+                             if np.linalg.norm(n[m]) else None),
+                "frac_of_e_sq": (float((e[m] ** 2).sum() / (e ** 2).sum())
+                                 if (e ** 2).sum() else None),
                 "mean_abs_e_ke": float(np.abs(e[m]).mean()) if m.any() else None,
                 "rel_median": (float(np.nanmedian(rel[mo]))
                                if mo.any() else None),
+                "rel_mean": (float(np.nanmean(rel[mo])) if mo.any() else None),
+                "kappa_rms": (float(np.sqrt((e[m] ** 2).mean())
+                                    / np.sqrt((q_part[m] ** 2).mean()))
+                              if m.any() and (q_part[m] ** 2).mean() else None),
                 "mean_q_part_ke": float(q_part[m].mean()) if m.any() else None,
                 # d/E_1 per kind: the ratio tab:truecurrent quotes, so it is
                 # reproducible from a store product instead of a script
