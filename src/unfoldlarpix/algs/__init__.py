@@ -1,4 +1,5 @@
 """Framework algorithms — importing registers them with the factory."""
-from . import (eval_algs, io_algs, reco_algs, rowsplit_algs,  # noqa: F401
+from . import (budget_algs, eval_algs, io_algs, reco_algs,  # noqa: F401
+               rowsplit_algs,
                spectrum_algs,
                truth_algs)

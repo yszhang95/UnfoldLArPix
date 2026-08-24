@@ -18,6 +18,64 @@ from ..terms.censor import CensorRunningMax, pre_trigger_censors
 from ..terms.data import DataFidelity
 
 
+def build_terms(term_cfgs, store, op, rc):
+    """The objective's smooth terms, exactly as Solve builds them.
+
+    Shared so a diagnostic that needs the terms without solving --
+    a curvature or step-size probe -- cannot drift from the solver.
+    """
+    thr = float(rc.threshold)
+    S = int(store.get("time_subbin") or 1)
+    bin_ticks = int(rc.adc_hold_delay) // S
+    terms = [DataFidelity(op)]
+    for tcfg in term_cfgs:
+        kind = tcfg["type"]
+        if kind == "censor":
+            terms.append(CensorRunningMax.from_hits(
+                op, store.get("hits_view"), store.get("block_offset"),
+                csa_reset_time=float(rc.csa_reset_time or 0),
+                threshold=thr,
+                npad_bins=int(tcfg.get("npad_bins", 50)) * S,
+                beta=float(tcfg.get("beta", 1.0)),
+                margin=float(tcfg.get("margin", 3.0)),
+                norm=tcfg.get("norm", "l2"),
+                bin_ticks=bin_ticks))
+        elif kind == "censor_pre":
+            # silence BEFORE a trigger: the pre-trigger interval (a
+            # pixel's first) plus, with include_post_reset, the later
+            # post-reset ones.  The pre-trigger reference is the
+            # acquisition edge, so it must match BuildMeasurement's
+            # acq_start convention: pass acq_start: event to take it from
+            # the event, as the operator does.
+            acq = tcfg.get("acq_start")
+            if acq == "event":
+                acq = getattr(store.get("event"), "acq_start", None)
+                if acq is None:
+                    raise ValueError("censor_pre acq_start: 'event' but "
+                                     "the event carries no acq_start")
+            elif acq is not None:
+                acq = float(acq)
+            pre = pre_trigger_censors(
+                op, store.get("hits_view"), store.get("block_offset"),
+                csa_reset_time=float(rc.csa_reset_time or 0),
+                threshold=thr, acq_start=acq,
+                npad_bins=int(tcfg.get("npad_bins", 50)) * S,
+                beta=float(tcfg.get("beta", 1.0)),
+                margin=float(tcfg.get("margin", 3.0)),
+                norm=tcfg.get("norm", "l1"),
+                bin_ticks=bin_ticks,
+                one_tick=float(rc.one_tick or 1),
+                close_back=float(tcfg.get("close_back", 20.0)),
+                include_post_reset=post_reset_wanted(tcfg))
+            print(f"[Solve] censor_pre: {len(pre)} interval kind(s), "
+                  f"{sum(int(t.armed.any(dim=2).sum()) for t in pre)} "
+                  f"constrained pixel-intervals")
+            terms.extend(pre)
+        else:
+            raise ValueError(f"unknown term type: {kind}")
+    return terms
+
+
 @algorithm("FFTWarmStart")
 class FFTWarmStart(Algorithm):
     """Compensated-block FFT deconvolution (GPU) — warm-start provider.
@@ -267,53 +325,8 @@ class Solve(Algorithm):
         S = int(store.get("time_subbin") or 1)
         bin_ticks = int(rc.adc_hold_delay) // S
 
-        terms = [DataFidelity(op)]
-        for tcfg in self.props.get("terms", []):
-            kind = tcfg["type"]
-            if kind == "censor":
-                terms.append(CensorRunningMax.from_hits(
-                    op, store.get("hits_view"), store.get("block_offset"),
-                    csa_reset_time=float(rc.csa_reset_time or 0),
-                    threshold=thr,
-                    npad_bins=int(tcfg.get("npad_bins", 50)) * S,
-                    beta=float(tcfg.get("beta", 1.0)),
-                    margin=float(tcfg.get("margin", 3.0)),
-                    norm=tcfg.get("norm", "l2"),
-                    bin_ticks=bin_ticks))
-            elif kind == "censor_pre":
-                # silence BEFORE a trigger: the pre-trigger interval (a
-                # pixel's first) plus, with include_post_reset, the later
-                # post-reset ones.  The pre-trigger reference is the
-                # acquisition edge, so it must match BuildMeasurement's
-                # acq_start convention: pass acq_start: event to take it from
-                # the event, as the operator does.
-                acq = tcfg.get("acq_start")
-                if acq == "event":
-                    acq = getattr(store.get("event"), "acq_start", None)
-                    if acq is None:
-                        raise ValueError("censor_pre acq_start: 'event' but "
-                                         "the event carries no acq_start")
-                elif acq is not None:
-                    acq = float(acq)
-                pre = pre_trigger_censors(
-                    op, store.get("hits_view"), store.get("block_offset"),
-                    csa_reset_time=float(rc.csa_reset_time or 0),
-                    threshold=thr, acq_start=acq,
-                    npad_bins=int(tcfg.get("npad_bins", 50)) * S,
-                    beta=float(tcfg.get("beta", 1.0)),
-                    margin=float(tcfg.get("margin", 3.0)),
-                    norm=tcfg.get("norm", "l1"),
-                    bin_ticks=bin_ticks,
-                    one_tick=float(rc.one_tick or 1),
-                    close_back=float(tcfg.get("close_back", 20.0)),
-                    include_post_reset=post_reset_wanted(tcfg))
-                print(f"[Solve] censor_pre: {len(pre)} interval kind(s), "
-                      f"{sum(int(t.armed.any(dim=2).sum()) for t in pre)} "
-                      f"constrained pixel-intervals")
-                terms.extend(pre)
-            else:
-                raise ValueError(f"unknown term type: {kind}")
-
+        terms = build_terms(self.props.get("terms", []), store,
+                            op, rc)
         support_np = store.get("support")
         support = op.to_tensor(support_np.astype(np.float64))
         q0_np = np.clip(store.get("warm.deconv_q"), 0.0, None)
