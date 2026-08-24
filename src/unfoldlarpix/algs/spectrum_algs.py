@@ -479,6 +479,15 @@ class OperatorSpectrum(_SpectrumAlgorithm):
 
     _prefix = "spectrum"
 
+    @staticmethod
+    def _coarse_bin(store):
+        """adc_hold_delay, in the operator's own bin units."""
+        if "readout_config" not in store:
+            return None
+        B = int(store.get("readout_config").adc_hold_delay)
+        S = int(store.get("time_subbin")) if "time_subbin" in store else 1
+        return B // S
+
     def execute(self, store):
         op, mask, idx, mv, rec = self._setup(store)
         n_modes = int(self.props.get("n_modes", 20))
@@ -536,7 +545,7 @@ class OperatorSpectrum(_SpectrumAlgorithm):
             self._measurement_geometry(
                 op, live, w, V, n_modes, rec,
                 store.get("row_meta") if "row_meta" in store else None,
-                Ml)
+                Ml, coarse_bin=self._coarse_bin(store))
         print(f"[{self.name}] {self.space}/{self.restrict} n={mv.n} "
               f"live={rec['n_live']} lmax={lmax:.4g} lmin={lmin:.4g} "
               f"rank99={rec['rank_99pct']} ({mv.calls} matvecs, "
@@ -612,11 +621,14 @@ class OperatorSpectrum(_SpectrumAlgorithm):
 
     # -- measurement space: which windows see the same charge -------------
     def _measurement_geometry(self, op, live, w, V, n_modes, rec, meta=None,
-                              Gl=None):
+                              Gl=None, coarse_bin=None):
+        rt = None
         if meta is not None:
             rpx = np.asarray(meta["px"], dtype=float)
             rpy = np.asarray(meta["py"], dtype=float)
             kind = kind_all = np.asarray(meta["kind"], dtype=object)
+            # the row's latch instant is its window's upper edge
+            rt = np.asarray(meta["t_hi"], dtype=float)
         else:
             # fallback: each latch window sits on one pixel, so the row's pixel
             # is the pixel of any block cell it samples
@@ -635,6 +647,8 @@ class OperatorSpectrum(_SpectrumAlgorithm):
             rpy[has] = pix % ny
             kind = kind_all = None
         rpx, rpy = rpx[live], rpy[live]
+        if rt is not None:
+            rt = rt[live]
         if kind is not None:
             kind = kind[live]
         dpx = np.abs(rpx[:, None] - rpx[None, :])
@@ -682,6 +696,85 @@ class OperatorSpectrum(_SpectrumAlgorithm):
                     M[a1, a2] = float(np.abs(RHO[m]).mean())
         rec["map_dpx_dpy"] = [[None if np.isnan(x) else float(x) for x in row]
                               for row in M]
+        # -- time-resolved coupling ---------------------------------------
+        # The pixel-distance profile marginalises Delta t away, so the
+        # same-pixel column is one number covering every time separation at
+        # once.  Re-bin the SAME rho by the separation between the two rows'
+        # latch instants.  A re-binning, not a new measurement of the
+        # operator: ports channel_coupling_dt/dt_coupling.py, whose bin k
+        # covers |Delta t| / B in [k-1, k) and is labelled by its upper edge.
+        if rt is not None and coarse_bin:
+            B = float(coarse_bin)
+            one_tick_us = float(self.props.get("tick_us", 0.05))
+            nbin = int(self.props.get("dt_bins", 24))
+            DT = np.abs(rt[:, None] - rt[None, :]) / B
+            # a pair is UNORDERED and is not a row with itself: the Gram is
+            # symmetric, so counting the full matrix double-counts every pair
+            # and adds n diagonal entries of rho = 1.
+            iu = np.triu(np.ones_like(RHO, dtype=bool), k=1)
+            # bin by the NEAREST whole bin: the latch grid is quantised, so
+            # a pseudo/remainder pair sits at exactly 1 bin and belongs in
+            # bin 1, not in a [0,1) bucket.
+            dtb = np.rint(DT).astype(int)
+            exact = np.abs(DT - dtb) < 1e-6
+            fin = np.isfinite(RHO) & iu
+            # "near" is a whole number of bins, applied to the SAME nearest-bin
+            # index the steps use, so a pair cannot be near by one definition
+            # and far by the other
+            near_us = float(self.props.get("near_us", 3.0))
+            near_bins = int(round(near_us / (B * one_tick_us)))
+            near = DT <= near_bins        # raw ratio, inclusive
+
+            def st(mask, extra=None):
+                m = mask & fin
+                if m.sum() < 1:
+                    return None
+                a = np.abs(RHO[m])
+                out = {"n": int(m.sum()), "mean": float(a.mean()),
+                       "median": float(np.median(a)),
+                       "p90": float(np.percentile(a, 90)),
+                       "max": float(a.max()),
+                       "frac_gt_0.1": float((a > 0.1).mean()),
+                       "frac_gt_0.5": float((a > 0.5).mean())}
+                if extra:
+                    out.update(extra)
+                return out
+
+            sp = dpix == 0
+            steps = []
+            for k in range(1, nbin + 2):
+                m = sp & (dtb == k)
+                r = st(m, {"n_exact": int((m & exact & fin).sum())})
+                if r:
+                    r["dt_bins"] = k
+                    r["dt_us"] = k * B * one_tick_us
+                    steps.append(r)
+            rec["same_pixel_dt_steps"] = steps
+            if kind is not None:
+                nops = kind != "pseudo"
+                np_mask = sp & nops[:, None] & nops[None, :]
+                steps2 = []
+                for k in range(1, nbin + 2):
+                    r = st(np_mask & (dtb == k))
+                    if r:
+                        r["dt_bins"] = k
+                        r["dt_us"] = k * B * one_tick_us
+                        steps2.append(r)
+                rec["same_pixel_dt_steps_no_pseudo"] = steps2
+            khalf = int(self.props.get("kernel_half_width", 12))
+            rec["same_pixel_within"] = st(sp & near)
+            rec["same_pixel_beyond"] = st(sp & ~near)
+            rec["d1_within"] = st((dpix == 1) & near)
+            rec["d1_beyond"] = st((dpix == 1) & ~near)
+            rec["beyond_kernel_within"] = st((dpix > khalf) & near)
+            rec["beyond_kernel_beyond"] = st((dpix > khalf) & ~near)
+            rec["dt_definition"] = {
+                "delta_t": "|t_hi_i - t_hi_j|, the two rows' latch instants",
+                "bin_k_covers": "|dt|/B in [k-1, k), labelled by the upper edge",
+                "near_split_us": near_us,
+                "near_split_bins": near_bins,
+                "coarse_bin_ticks": coarse_bin,
+                "tick_us": one_tick_us}
         # mean |rho| between rows of each pair of kinds: are two windows of the
         # same kind more alike than two of different kinds?
         if kind is not None:
