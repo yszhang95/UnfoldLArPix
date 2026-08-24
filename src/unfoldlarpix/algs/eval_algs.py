@@ -238,3 +238,121 @@ class LumpedAllocation(Algorithm):
                          "n/a" if v["median_high"] is None
                          else "%.3f" % v["median_high"]))
         self.put(store, "lumped.summary", summary)
+
+
+@algorithm("PooledCorrelation")
+class PooledCorrelation(Algorithm):
+    """Fit-grid correlation against the truth, at several pooling scales.
+
+    Ports the ``fit_pooling`` family (one copy per truth convention).  The
+    question it answers is whether a low bin-level correlation is mostly
+    plus-or-minus-one-bin misplacement: if it is, pooling in time must raise
+    it sharply, and pooling in pixels must not.
+
+    Everything is on the FIT grid with no post-processing -- ``solve.q``
+    against ``truth.q`` -- so this is deliberately not the universal-grid
+    evaluation of :class:`Evaluate` and the two are not comparable.
+
+    Two selections per pooling, both reported because they answer different
+    questions: ``cut`` keeps pooled voxels the reconstruction put charge in
+    (``R > cut``), ``nc`` keeps the union of either side above ``eps``.
+
+    Props: ``pools`` (list of ``[name, group_pixels, group_time]``; default
+    the five of the archived study), ``cut`` (0.5 ke), ``eps`` (0.01 ke),
+    ``truth_prefix``.
+    """
+
+    reads = ("solve.q",)
+    writes = ("pooled.summary",)
+
+    _POOLS = (("1x1x1", 1, 1), ("1x1x2", 1, 2), ("1x1x4", 1, 4),
+              ("2x2x2", 2, 2), ("3x3x3", 3, 3))
+
+    def __init__(self, **props):
+        super().__init__(**props)
+        self.prefix = str(props.get("truth_prefix", "truth"))
+        self.reads = tuple(self.reads) + (f"{self.prefix}.q",)
+
+    @staticmethod
+    def _rs(x, y, m):
+        x, y = x[m], y[m]
+        if x.size < 3 or np.std(x) == 0 or np.std(y) == 0:
+            return float("nan"), float("nan"), int(m.sum())
+        return (float(np.corrcoef(x, y)[0, 1]),
+                float(np.polyfit(x, y, 1)[0]), int(m.sum()))
+
+    def execute(self, store):
+        from ..eval.universal import pool_block
+        q = np.asarray(store.get("solve.q"), dtype=np.float64)
+        t = np.asarray(store.get(f"{self.prefix}.q"), dtype=np.float64)
+        if q.shape != t.shape:
+            raise ValueError(f"solve.q {q.shape} and {self.prefix}.q "
+                             f"{t.shape} are on different grids")
+        cut = float(self.props.get("cut", 0.5))
+        eps = float(self.props.get("eps", 0.01))
+        pools = [tuple(p) for p in self.props.get("pools", self._POOLS)]
+
+        rec = {"cut_ke": cut, "eps_ke": eps, "grid": "fit",
+               "truth_convention": store.get(f"{self.prefix}.meta")["convention"]
+               if f"{self.prefix}.meta" in store else None,
+               "pools": {}}
+        for name, gp, gt in pools:
+            T = pool_block(t, int(gp), int(gt)).ravel()
+            R = pool_block(q, int(gp), int(gt)).ravel()
+            r_c, s_c, n_c = self._rs(T, R, R > cut)
+            r_n, s_n, n_n = self._rs(T, R, (R > eps) | (T > eps))
+            rec["pools"][name] = {"r_cut": r_c, "sl_cut": s_c, "n": n_c,
+                                  "r_nc": r_n, "sl_nc": s_n, "n_nc": n_n}
+        print("[PooledCorrelation] r_cut " + " ".join(
+            "%s=%.3f" % (k, v["r_cut"]) for k, v in rec["pools"].items()))
+        self.put(store, "pooled.summary", rec)
+
+
+@algorithm("ResidualTimeCorrelation")
+class ResidualTimeCorrelation(Algorithm):
+    """Is the fit-grid residual anti-correlated along time?
+
+    Ports the ``fitgrid_resid_corr`` family.  An alternating (zero-sum) error
+    -- charge taken from one bin and put in its neighbour -- shows up as a
+    negative lag-1 correlation of ``q_hat - q_truth`` along the time axis
+    within a pixel, which is what the charge-space weak modes are made of.
+
+    Props: ``eps`` (0.01 ke; a voxel enters if either side is above it),
+    ``max_lag`` (default 3), ``truth_prefix``.
+    """
+
+    reads = ("solve.q",)
+    writes = ("residcorr.summary",)
+
+    def __init__(self, **props):
+        super().__init__(**props)
+        self.prefix = str(props.get("truth_prefix", "truth"))
+        self.reads = tuple(self.reads) + (f"{self.prefix}.q",)
+
+    def execute(self, store):
+        q = np.asarray(store.get("solve.q"), dtype=np.float64)
+        t = np.asarray(store.get(f"{self.prefix}.q"), dtype=np.float64)
+        eps = float(self.props.get("eps", 0.01))
+        max_lag = int(self.props.get("max_lag", 3))
+        e = q - t
+        live = (np.abs(q) > eps) | (np.abs(t) > eps)
+        rec = {"eps_ke": eps, "grid": "fit",
+               "n_live_voxels": int(live.sum()), "lags": {}}
+        for lag in range(1, max_lag + 1):
+            a = e[:, :, :-lag].ravel()
+            b = e[:, :, lag:].ravel()
+            m = (live[:, :, :-lag] & live[:, :, lag:]).ravel()
+            x, y = a[m], b[m]
+            if x.size < 3 or np.std(x) == 0 or np.std(y) == 0:
+                rec["lags"][lag] = None
+                continue
+            rec["lags"][lag] = {"n": int(m.sum()),
+                                "corr": float(np.corrcoef(x, y)[0, 1])}
+        s = e[live]
+        rec["residual"] = {"sum_ke": float(e.sum()), "mean_ke": float(s.mean()),
+                           "rms_ke": float(np.sqrt((s ** 2).mean()))}
+        print("[ResidualTimeCorrelation] " + " ".join(
+            "lag%d=%s" % (k, "n/a" if v is None else "%+.3f" % v["corr"])
+            for k, v in rec["lags"].items())
+            + "  sum %+.1f ke" % rec["residual"]["sum_ke"])
+        self.put(store, "residcorr.summary", rec)
