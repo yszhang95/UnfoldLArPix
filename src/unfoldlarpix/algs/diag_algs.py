@@ -707,3 +707,74 @@ class GeometryOverestimate(_FitGridAlg):
               % (rec["n_voxels"],
                  _f(rec.get("corr_delta_dist")), _f(rec.get("corr_delta_absdist"))))
         self.put(store, "geomover.summary", rec)
+
+
+@algorithm("CentroidError")
+class CentroidError(_FitGridAlg):
+    """Per-pixel time-centroid error, and whether neighbours share it.
+
+    Ports the centroid half of ``noiseless_closure/precensor_eval.py`` and
+    supplies the two arrival-time rows of `tab:isores-isoline`.
+
+    For each pixel holding enough truth, the charge-weighted time centroid is
+    formed on the fit grid for the reconstruction and for the truth, and
+
+        dt(pixel) = centroid(reco) - centroid(truth)          [bins]
+
+    Its spread says how far the solve moves charge in time. The **neighbour
+    correlation** of ``dt`` is the entanglement test: near zero means each
+    pixel is misplaced independently, and a large positive value means
+    neighbouring pixels are misplaced *together*, which is the signature of a
+    shared charge lump moved coherently through the response.
+
+    Props: ``pixel_floor`` (truth charge a pixel needs to be scored, 1.0 ke),
+    ``neighbours`` (``4`` or ``8``; default 4), ``truth_prefix``.
+    """
+
+    reads = ("op", "solve.q")
+    writes = ("centroiderr.summary",)
+
+    def execute(self, store):
+        op, q, t, _ = self._grids(store)
+        floor = float(self.props.get("pixel_floor", 1.0))
+        nb = int(self.props.get("neighbours", 4))
+        if nb not in (4, 8):
+            raise ValueError("neighbours must be 4 or 8")
+        k = np.arange(t.shape[2], dtype=np.float64)
+        tw = t.sum(axis=2)
+        qw = q.sum(axis=2)
+        live = (tw > floor) & (qw > 0)
+        ct = np.where(tw > 0, (t * k).sum(axis=2) / np.where(tw > 0, tw, 1), np.nan)
+        cq = np.where(qw > 0, (q * k).sum(axis=2) / np.where(qw > 0, qw, 1), np.nan)
+        dt = np.where(live, cq - ct, np.nan)
+        v = dt[np.isfinite(dt)]
+        rec = {"pixel_floor_ke": floor, "neighbours": nb,
+               "n_pixels": int(v.size)}
+        if v.size:
+            rec["dt_bins"] = {"mean": float(v.mean()), "sd": float(v.std()),
+                              "median": float(np.median(v)),
+                              "abs_mean": float(np.abs(v).mean()),
+                              "p90_abs": float(np.percentile(np.abs(v), 90))}
+        # neighbour pairs, each counted once
+        offs = [(1, 0), (0, 1)] + ([(1, 1), (1, -1)] if nb == 8 else [])
+        a, b = [], []
+        for dx, dy in offs:
+            s1 = dt[max(0, -dx):dt.shape[0] - max(0, dx),
+                    max(0, -dy):dt.shape[1] - max(0, dy)]
+            s2 = dt[max(0, dx):dt.shape[0] - max(0, -dx),
+                    max(0, dy):dt.shape[1] - max(0, -dy)]
+            m = np.isfinite(s1) & np.isfinite(s2)
+            a.append(s1[m]); b.append(s2[m])
+        a = np.concatenate(a) if a else np.array([])
+        b = np.concatenate(b) if b else np.array([])
+        if a.size >= 3 and a.std() > 0 and b.std() > 0:
+            rec["neighbour"] = {"n_pairs": int(a.size),
+                                "corr": float(np.corrcoef(a, b)[0, 1])}
+        else:
+            rec["neighbour"] = {"n_pairs": int(a.size), "corr": None}
+        print("[CentroidError] %d pixels  sd(dt) %s bins  neighbour corr %s "
+              "(%d pairs)"
+              % (rec["n_pixels"],
+                 "n/a" if "dt_bins" not in rec else "%.4f" % rec["dt_bins"]["sd"],
+                 _f(rec["neighbour"]["corr"]), rec["neighbour"]["n_pairs"]))
+        self.put(store, "centroiderr.summary", rec)
