@@ -32,7 +32,8 @@ def universal_rebin(npz_path: Path, truth_npz: Path | None = None,
                     sigma_time: float = 0.005,
                     sigma_pxl: float = 0.2,
                     time_offsets: np.ndarray | None = None,
-                    edge_anchor: str = "universal"):
+                    edge_anchor: str = "universal",
+                    return_origin: bool = False):
     """Rebin truth and reco INDEPENDENTLY onto the universal grid.
 
     Universal time bins have edges at global multiples of adc_hold_delay
@@ -173,6 +174,13 @@ def universal_rebin(npz_path: Path, truth_npz: Path | None = None,
     tx, ty = tr_p0[0] - p_min[0], tr_p0[1] - p_min[1]
     truth[tx:tx + tr_u.shape[0], ty:ty + tr_u.shape[1],
           tr_t0 - u_min: tr_t0 - u_min + tr_u.shape[2]] = tr_u
+    if return_origin:
+        # the universal grid's own origin, so a caller can map a physical
+        # (pixel, latch instant) onto these blocks instead of recomputing the
+        # alignment -- which is how two callers came to use two formulas
+        return truth, reco, {"u_min": int(u_min), "p_min": [int(p_min[0]),
+                                                           int(p_min[1])],
+                             "bin_ticks": int(B), "phi": float(phi)}
     return truth, reco
 
 
