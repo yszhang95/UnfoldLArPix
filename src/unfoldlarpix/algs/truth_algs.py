@@ -362,9 +362,23 @@ class OperatorError(Algorithm):
     MEASURED, so that these are not re-derived (6 samples with waveforms,
     setup B, ``round`` truth):
 
-    * ``|e|`` exceeds ``|n|`` in 5 of 6 -- the operator error dominates the
-      readout error, by 2.7x on ``pos_a50_nb4``.  This is the reason a
-      residual target set by the noise model does not help.
+    * The AGGREGATE ``|e|/|n|`` is a trap and must not be quoted alone.  It is
+      not an average of the per-kind ratios: identically
+
+          r_all^2 = sum_k r_k^2 |n|_k^2 / sum_k |n|_k^2 ,
+
+      so it is weighted by where the READOUT error sits.  Readout variance is
+      roughly per-row, while the operator error concentrates on a minority of
+      rows, and the two weightings disagree badly: on the nb1 samples the
+      trigger-split rows carry 62-75% of |n|^2 but only 28-33% of |e|^2, which
+      is what drags ``mu_a50_nb1`` down to 1.02 while its ``lumped`` rows read
+      1.36.  Read ``by_kind[...]["e_over_n"]`` instead.
+    * Per kind, the split is clean.  On the rows that integrate across fit-bin
+      boundaries (``diff``, ``lumped`` -- 79-96% of |e|^2) the operator error
+      is the larger term in 9 of 10 sample-kind pairs, ratios 0.77-4.74.  On
+      the trigger-split pair (``pseudo``, ``remainder``) the readout error is
+      larger in 10 of 12, ratios 0.45-1.68.  The operator error dominates
+      exactly where its within-bin model is exercised.
     * ``dt`` is CONFOUNDED with the row kind: ``remainder`` and ``diff``
       windows are one bin long by construction (30 ticks), ``lumped`` runs
       190-470 and ``pseudo`` 800-1860.  A correlation of error against ``dt``
