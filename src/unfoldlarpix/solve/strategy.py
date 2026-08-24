@@ -16,17 +16,27 @@ import numpy as np
 import torch
 
 from ..constrained_solver import exponential_alpha_field
-from ..terms.base import CoordProx
+from ..terms.base import CoordProx, IterCtx
 from ..terms.data import DataFidelity
 from .engine import Fista
 
 
 @dataclass
 class StageRecord:
+    """One stage's endpoint: the solution summary AND the objective there.
+
+    The objective components are recorded because the alternative is
+    re-solving to get them, which is what the archived tab:ladder driver had
+    to do.  Cost is one value() per term per stage -- negligible against the
+    stage itself.
+    """
     label: str
     alpha: Any
     q_sum: float
     nnz: int
+    terms: dict[str, float] | None = None
+    l1: float | None = None
+    objective: float | None = None
 
 
 @dataclass
@@ -63,6 +73,17 @@ def make_tracer(terms, prox, stage: str, every: int, out: list):
         row["nnz"] = int((ctx.q > 0.01).sum())
         out.append(row)
     return cb
+
+
+def _record(label, alpha_cfg, q, terms, op, alpha_field) -> StageRecord:
+    """Stage endpoint with its objective, evaluated at the returned q."""
+    ctx = IterCtx(q, op)
+    tv = {type(t).__name__: float(t.value(ctx)) for t in terms}
+    l1 = (float((alpha_field * q).sum()) if torch.is_tensor(alpha_field)
+          else float(alpha_field) * float(q.sum()))
+    return StageRecord(label=label, alpha=alpha_cfg, q_sum=float(q.sum()),
+                       nnz=int((q > 0.01).sum()), terms=tv, l1=l1,
+                       objective=sum(tv.values()) + l1)
 
 
 class Ladder:
@@ -128,10 +149,8 @@ class Ladder:
             state.q = stage_engine.minimize(op, smooth_terms, prox,
                                             q0=state.q, callback=cb)
             state.skeleton = state.q > self.seed_cut
-            state.history.append(StageRecord(
-                label=f"ladder[{k}]", alpha=a,
-                q_sum=float(state.q.sum()),
-                nnz=int((state.q > 0.01).sum())))
+            state.history.append(_record(f"ladder[{k}]", a, state.q,
+                                         smooth_terms, op, alpha))
         return state
 
 
@@ -169,7 +188,6 @@ class FinalRefit:
                                             torch.zeros_like(state.q)),
             callback=cb)
         state.q = q_strong + q_faint
-        state.history.append(StageRecord(
-            label="refit", alpha=self.alpha,
-            q_sum=float(state.q.sum()), nnz=int((state.q > 0.01).sum())))
+        state.history.append(_record("refit", self.alpha, state.q, terms, op,
+                                     prox.alpha))
         return state

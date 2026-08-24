@@ -257,7 +257,8 @@ class Solve(Algorithm):
 
     reads = ("op", "support", "warm.deconv_q", "event", "hits_view",
              "block_offset", "readout_config", "time_subbin", "row_var")
-    writes = ("solve.q", "solve.state", "solve.loss", "solve.trace")
+    writes = ("solve.q", "solve.state", "solve.loss", "solve.trace",
+              "solve.stages")
 
     def execute(self, store):
         op = store.get("op")
@@ -372,9 +373,16 @@ class Solve(Algorithm):
                                n_iter=engine.n_iter,
                                trace_every=tr).run(
                 engine, op, terms, support, state)
+        stages = []
         for rec in state.history:
             print(f"[Solve] {rec.label}: alpha={rec.alpha} "
-                  f"q_sum={rec.q_sum:.1f} nnz={rec.nnz}")
+                  f"q_sum={rec.q_sum:.1f} nnz={rec.nnz}"
+                  + (f" obj={rec.objective:.1f}"
+                     if rec.objective is not None else ""))
+            stages.append({"label": rec.label, "alpha": rec.alpha,
+                           "q_sum": rec.q_sum, "nnz": rec.nnz,
+                           "terms": rec.terms, "l1": rec.l1,
+                           "objective": rec.objective})
         # loss ledger: every objective component evaluated at the final
         # solution, with the weights actually used (censor includes beta).
         # The l1 LOSS at the solution is alpha-field dependent; what is
@@ -388,6 +396,9 @@ class Solve(Algorithm):
                 self.props["refit"].get("alpha", 0.0))
         self.put(store, "solve.loss", loss)
         self.put(store, "solve.trace", state.trace)
+        # per-stage objective ledger: the alternative to this is re-solving,
+        # which is what the archived tab:ladder driver had to do
+        self.put(store, "solve.stages", stages)
         q = state.q.cpu().numpy().astype(np.float64)
         if S > 1:                       # fit at B/S, report at B (sum sub-bins)
             nx, ny, qt = q.shape

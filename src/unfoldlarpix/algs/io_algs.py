@@ -43,6 +43,50 @@ class LoadEvent(Algorithm):
             self.rc.adc_hold_delay))
 
 
+@algorithm("LoadSolution")
+class LoadSolution(Algorithm):
+    """Publish a SHIPPED solution as ``solve.q``, without re-solving.
+
+    Every post-hoc study of a delivered solve needs this, and until now each
+    one loaded the NPZ itself and the provenance of ``solve.q`` was whatever
+    the driver chose.  Here it is a store product with its source recorded, so
+    a consumer cannot confuse a re-solve with an archived one.
+
+    Props: ``path`` (the NPZ), ``field`` (default ``deconv_q_sharp``;
+    ``deconv_q`` is the pre-threshold field).  Validates the shape against the
+    operator when one is present.
+    """
+
+    reads = ()
+    writes = ("solve.q", "solve.provenance")
+
+    def execute(self, store):
+        path = Path(str(self.props["path"]))
+        field = str(self.props.get("field", "deconv_q_sharp"))
+        z = np.load(path, allow_pickle=True)
+        if field not in z.files:
+            raise KeyError(f"{path.name} has no field {field!r}; "
+                           f"available: {sorted(z.files)}")
+        q = np.asarray(z[field], dtype=np.float64)
+        prov = {"path": str(path), "field": field, "sum_ke": float(q.sum()),
+                "shape": list(q.shape)}
+        if "provenance" in z.files:
+            try:
+                prov["npz_provenance"] = z["provenance"].item()
+            except Exception:
+                pass
+        if "op" in store:
+            want = tuple(store.get("op").q_shape)
+            if tuple(q.shape) != want:
+                raise ValueError(
+                    f"{path.name}:{field} has shape {q.shape} against the "
+                    f"operator's q_shape {want} -- different block or grid")
+        print(f"[LoadSolution] {path.name}:{field} sum {q.sum():.1f} ke, "
+              f"nnz(>0.01) {(q > 0.01).sum()}")
+        self.put(store, "solve.q", q)
+        self.put(store, "solve.provenance", prov)
+
+
 @algorithm("WriteCharges")
 class WriteCharges(Algorithm):
     """Write the solver-schema NPZ (self-describing: config + provenance)."""

@@ -295,3 +295,73 @@ class GradientProfile(Algorithm):
         if bool(self.props.get("store_fields", False)):
             summary["_fields"] = fields
         self.put(store, "grad.summary", summary)
+
+
+@algorithm("FitVsTruth")
+class FitVsTruth(Algorithm):
+    """Does the reconstruction fit the data BETTER than the truth does?
+
+    Ports ``operator_studies/fit_vs_truth.py``.  Three numbers, all already in
+    the store, plus the ratios that make them readable:
+
+        L_reco  = 1/2 ||A q_hat  - d||^2      (resid.solution_summary)
+        L_truth = 1/2 ||A q_true - d||^2      (resid.summary)
+        L_n     = 1/2 sum_r var_r             (row_var)
+
+    ``L_reco < L_truth`` means the solver is exploiting freedoms the truth does
+    not use.  ``L_reco < L_n`` on top of that is over-fitting in the strict
+    sense: it is fitting noise and operator error.  ``L_truth`` is the honest
+    reference because it contains the readout noise AND the operator error,
+    which is why it is not a bound.
+
+    Nothing is recomputed here -- if the numbers disagree with the residual
+    algorithms, they disagree for a reason worth finding.
+    """
+
+    reads = ("resid.summary", "resid.solution_summary", "solve.q")
+    writes = ("fitvstruth.summary",)
+
+    def __init__(self, **props):
+        super().__init__(**props)
+        self.prefix = str(props.get("truth_prefix", "truth"))
+        self.reads = tuple(self.reads) + (f"{self.prefix}.q",
+                                          f"{self.prefix}.meta")
+
+    def execute(self, store):
+        rt = store.get("resid.summary")
+        rs = store.get("resid.solution_summary")
+        tm = store.get(f"{self.prefix}.meta")
+        L_truth = float(rt["half_sq_norm"])
+        L_reco = float(rs["half_sq_norm"])
+        rv = store.get("row_var") if "row_var" in store else None
+        L_n = (0.5 * float(np.sum(np.asarray(rv, dtype=np.float64)))
+               if rv is not None else None)
+
+        q_hat = np.asarray(store.get("solve.q"), dtype=np.float64)
+        q_true = np.asarray(store.get(f"{self.prefix}.q"), dtype=np.float64)
+        summary = {
+            "n_rows": int(rt["n_rows"]),
+            "truth_convention": tm["convention"],
+            "L_reco": L_reco,
+            "L_truth": L_truth,
+            "noise_floor": L_n,
+            "sum_q_reco_ke": float(q_hat.sum()),
+            "sum_q_truth_ke": float(q_true.sum()),
+            "truth_in_grid": (1.0 - float(tm.get("off_grid_frac", 0.0))),
+            "ratio_reco_truth": (L_reco / L_truth) if L_truth else None,
+            "reco_over_floor": (L_reco / L_n) if L_n else None,
+            "truth_over_floor": (L_truth / L_n) if L_n else None,
+            "reco_fits_better_than_truth": L_reco < L_truth,
+            "over_fitting_strict": (bool(L_reco < L_n) if L_n else None),
+            "noise_floor_available": L_n is not None,
+        }
+        print("[FitVsTruth] L_reco %.1f  L_truth %.1f  floor %s  "
+              "ratio %.4f  reco/floor %s  -> %s"
+              % (L_reco, L_truth,
+                 "n/a" if L_n is None else "%.1f" % L_n,
+                 summary["ratio_reco_truth"] or float("nan"),
+                 "n/a" if L_n is None else "%.3f" % summary["reco_over_floor"],
+                 "OVER-FITS" if summary["over_fitting_strict"]
+                 else "fits better than truth" if summary[
+                     "reco_fits_better_than_truth"] else "does not"))
+        self.put(store, "fitvstruth.summary", summary)
