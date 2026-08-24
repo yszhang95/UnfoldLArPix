@@ -16,19 +16,24 @@ from .truth_algs import _resid_conventions
 LATCH_KINDS = ("lumped", "remainder", "diff")
 
 
-def _pkq_scan(store, op, rm, t, lo, hi, boff, B):
+def _pkq_scan(store, op, rm, t, lo, hi, boff, B, kinds=LATCH_KINDS):
     """The kernel-peak offset, chosen not assumed.
 
     A latch instant maps to a q bin through the response peak; the offset is a
     property of the kernel, but which integer it is was settled separately
     (``pkq_check/``) and the archived scripts each carried their own literal.
     Scanning it here and reporting the winner makes the choice visible.
+
+    ``kinds`` MUST be the same row set the caller then analyses.  Scanning over
+    a wider set picks a different winner -- measured: over all latch kinds the
+    winner is 125 where over ``lumped`` alone it is 126, and that one bin moves
+    the usable window count from 170 to 177.
     """
     best, best_s = None, -1.0
     nt = t.shape[2]
     spans = []
     for r in range(op.n_data):
-        if rm["kind"][r] not in LATCH_KINDS:
+        if rm["kind"][r] not in kinds:
             continue
         spans.append((int(rm["px"][r]), int(rm["py"][r]),
                       int(np.floor(max(float(rm["t_lo"][r]), 0.0) / B)),
@@ -103,7 +108,7 @@ class WindowAllocation(_FitGridAlg):
         if pkq_cfg == "scan":
             lo, hi = self.props.get("pkq_range", (118, 135))
             pkq, pkq_score = _pkq_scan(store, op, rm, t, int(lo), int(hi),
-                                       boff, B)
+                                       boff, B, kinds)
         else:
             pkq, pkq_score = int(pkq_cfg), None
 
