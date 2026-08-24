@@ -32,12 +32,14 @@ def _pkq_scan(store, op, rm, t, lo, hi, boff, B):
             continue
         spans.append((int(rm["px"][r]), int(rm["py"][r]),
                       int(np.floor(max(float(rm["t_lo"][r]), 0.0) / B)),
-                      int(np.floor(float(rm["t_hi"][r]) / B))))
+                      int(np.floor((float(rm["t_hi"][r]) - 1) / B))))
     for pkq in range(lo, hi + 1):
         s = 0.0
         for X, Y, j0, j1 in spans:
-            a, b = max(j0 - pkq, 0), min(j1 - pkq, nt - 1)
-            if b >= a:
+            a, b = j0 - pkq, j1 - pkq
+            # SKIP a window whose span leaves the grid; clipping it instead
+            # scores a partial span and biases the winner
+            if a >= 0 and b < nt and b >= a:
                 s += float(t[X, Y, a:b + 1].sum())
         if s > best_s:
             best, best_s = pkq, s
@@ -105,58 +107,82 @@ class WindowAllocation(_FitGridAlg):
         else:
             pkq, pkq_score = int(pkq_cfg), None
 
-        spans, ratios = [], []
+        nt = t.shape[2]
+        spans, ratios, cshift = [], [], []
+        lags = {m: ([], []) for m in range(-3, 4)}
         pair_d, pair_p, pair_te = [], [], []
+        n_kind = 0
         for r in range(op.n_data):
             if rm["kind"][r] not in kinds:
                 continue
+            n_kind += 1
             X, Y = int(rm["px"][r]), int(rm["py"][r])
             j0 = int(np.floor(max(float(rm["t_lo"][r]), 0.0) / B)) - pkq
-            j1 = int(np.floor(float(rm["t_hi"][r]) / B)) - pkq
-            if j1 < j0:
+            # the upper edge is EXCLUSIVE: floor((t_hi - 1)/B), so a window
+            # ending exactly on a boundary does not claim the next bin
+            j1 = int(np.floor((float(rm["t_hi"][r]) - 1) / B)) - pkq
+            if j0 < 0 or j1 >= nt or j1 < j0:
                 continue
-            a, b = max(j0, 0), min(j1, t.shape[2] - 1)
-            if b < a:
+            tr = t[X, Y, j0:j1 + 1]
+            re = q[X, Y, j0:j1 + 1]
+            if tr.sum() + re.sum() < 1.0:
                 continue
-            tr = t[X, Y, a:b + 1].sum()
-            re = q[X, Y, a:b + 1].sum()
-            spans.append(b - a + 1)
-            if tr > floor:
-                ratios.append(re / tr)
-            # the end pair, where the within-bin model guesses
-            if 1 <= j1 < t.shape[2]:
+            spans.append(j1 - j0 + 1)
+            if tr.sum() > floor:
+                ratios.append(float(re.sum() / tr.sum()))
+            if tr.sum() > floor and re.sum() > floor and j1 > j0:
+                pos = np.arange(j1 - j0 + 1)
+                cshift.append(float((re * pos).sum() / re.sum()
+                                    - (tr * pos).sum() / tr.sum()))
+            for m in range(-3, 4):
+                jm = j0 + m
+                if 0 <= jm < nt:
+                    lags[m][0].append(delta[X, Y, j0])
+                    lags[m][1].append(delta[X, Y, jm])
+            if 1 <= j1 < nt:
                 pair_d.append(delta[X, Y, j1])
                 pair_p.append(delta[X, Y, j1 - 1])
                 pair_te.append(t[X, Y, j1])
-        rec = {"pkq": pkq, "pkq_chosen_by": ("scan" if pkq_cfg == "scan"
-                                             else "prop"),
+        rec = {"pkq": pkq, "PKQ": pkq,
+               "pkq_chosen_by": ("scan" if pkq_cfg == "scan" else "prop"),
                "pkq_truth_on_spans_ke": pkq_score,
                "kinds": list(kinds), "truth_floor_ke": floor,
-               "n_windows": len(spans)}
+               "n_kind": n_kind, "n_lumped": n_kind, "n_used": len(spans),
+               "n_windows": len(spans),
+               "span_bins_mean": float(np.mean(spans)) if spans else None,
+               "sum_ratio_median": float(np.median(ratios)) if ratios else None,
+               "sum_ratio_mean": float(np.mean(ratios)) if ratios else None,
+               "centroid_shift_mean_bins": (float(np.mean(cshift))
+                                            if cshift else None),
+               "lag_corr": {}}
+        for m, (a_, b_) in lags.items():
+            a_, b_ = np.asarray(a_), np.asarray(b_)
+            rec["lag_corr"][str(m)] = (
+                float(np.corrcoef(a_, b_)[0, 1])
+                if a_.size > 5 and a_.std() > 0 and b_.std() > 0
+                else None)
         if spans:
-            rec["span_bins"] = {"median": float(np.median(spans)),
-                                "min": int(min(spans)), "max": int(max(spans))}
-        if ratios:
-            a = np.asarray(ratios)
             rec["span_conservation"] = {
-                "n": a.size, "median": float(np.median(a)),
-                "mean": float(a.mean()), "frac_gt_1.05": float((a > 1.05).mean()),
-                "frac_lt_0.95": float((a < 0.95).mean())}
+                "n": len(ratios),
+                "median": rec["sum_ratio_median"], "mean": rec["sum_ratio_mean"],
+                "frac_gt_1.05": float(np.mean(np.asarray(ratios) > 1.05))
+                if ratios else None}
         if len(pair_d) >= 3:
-            de = np.asarray(pair_d); dp = np.asarray(pair_p)
+            de, dp = np.asarray(pair_d), np.asarray(pair_p)
             rec["end_pair"] = {
-                "n": de.size,
-                "sum_end_ke": float(de.sum()), "sum_prev_ke": float(dp.sum()),
+                "n": de.size, "sum_end_ke": float(de.sum()),
+                "sum_prev_ke": float(dp.sum()),
                 "sum_pair_ke": float((de + dp).sum()),
                 "corr_end_prev": (float(np.corrcoef(de, dp)[0, 1])
                                   if de.std() and dp.std() else None),
                 "median_truth_end_ke": float(np.median(pair_te))}
         sc = rec.get("span_conservation")
         ep = rec.get("end_pair")
-        print("[WindowAllocation] PKQ=%s  %d windows  span ratio med %s  "
-              "end pair corr %s  pair sum %s ke"
-              % (pkq, len(spans),
+        print("[WindowAllocation] PKQ=%s  %d/%d used  span ratio med %s  "
+              "centroid shift %s  end pair corr %s  pair sum %s ke"
+              % (pkq, rec["n_used"], n_kind,
                  "n/a" if not sc else "%.4f" % sc["median"],
+                 _f(rec["centroid_shift_mean_bins"]),
                  "n/a" if not ep else "%+.3f" % (ep["corr_end_prev"] or 0),
                  "n/a" if not ep else "%+.2f" % ep["sum_pair_ke"]))
         self.put(store, "windowalloc.summary", rec)
@@ -359,13 +385,28 @@ class ResidualSpectrum(_FitGridAlg):
         wpos = np.clip(w, 0.0, None)
         cw = np.cumsum(wpos) / max(wpos.sum(), 1e-300)
         ce = np.cumsum(p2) / max(tot, 1e-300)
+        A1 = np.asarray(op.forward(op.to_tensor(np.ones(op.q_shape)))
+                        .detach().cpu().numpy(), np.float64).ravel()
+        a1u = V.T @ A1
         qs = [float(x) for x in self.props.get("quantiles", (0.5, 0.9, 0.99))]
         rec = {"restrict": restrict, "n_rows": n,
                "lambda_max": float(w[0]), "lambda_min": float(w[-1]),
                "trace": float(wpos.sum()),
                "R_res_ke": float(e.sum()), "e_norm_sq": tot,
-               "modes_for_trace_frac": {}, "modes_for_error_frac": {},
-               "error_share_at_trace_frac": {}}
+               "norm_e": float(np.linalg.norm(e)),
+               "R_res": float(e.sum()), "lam_max": float(w[0]),
+               "check_sum_proj2_over_norme2": float(tot / max(
+                   float(e @ e), 1e-300)),
+               "tol_scan": {}, "modes_for_trace_frac": {},
+               "modes_for_error_frac": {}, "error_share_at_trace_frac": {}}
+        for tol in [float(x) for x in self.props.get(
+                "tolerances", (1e-6, 1e-8, 1e-10))]:
+            keep = w > tol * w[0]
+            rec["tol_scan"]["%g" % tol] = {
+                "n_modes_kept": int(keep.sum()),
+                "n_null": int((~keep).sum()),
+                "frac_e2_in_null": float(p2[~keep].sum() / max(tot, 1e-300)),
+                "T_ke": float((proj[keep] * a1u[keep] / w[keep]).sum())}
         for f in qs:
             rec["modes_for_trace_frac"][str(f)] = int(np.searchsorted(cw, f) + 1)
             rec["modes_for_error_frac"][str(f)] = int(np.searchsorted(ce, f) + 1)
