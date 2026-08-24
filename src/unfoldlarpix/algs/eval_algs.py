@@ -356,3 +356,52 @@ class ResidualTimeCorrelation(Algorithm):
             for k, v in rec["lags"].items())
             + "  sum %+.1f ke" % rec["residual"]["sum_ke"])
         self.put(store, "residcorr.summary", rec)
+
+
+@algorithm("ChargeProfile")
+class ChargeProfile(Algorithm):
+    """Charge-weighted reco/truth ratio in bins of TRUTH charge.
+
+    Ports ``eval_centers/highq_profile_centers.py`` and the ``highq_all.py``
+    family.  On the universal grid, voxels are binned by how much truth charge
+    they hold and the ratio ``sum(reco)/sum(truth)`` is formed per bin.  This
+    is the quantity that showed a high-q over-book at the retired offsets
+    deposit and none at bin centres, so the deposit protocol is part of the
+    answer and :class:`Evaluate` records which one produced these blocks.
+
+    Consumes ``eval.truth``/``eval.reco`` -- it does not rebin -- so a profile
+    and the scalar metrics beside it are provably of the same evaluation.
+
+    Props: ``edges`` (truth-charge bin edges in ke; default the archived
+    ``[0.5, 1, 2, 3, 4, 5, 7, 10, 100]``), ``min_voxels`` (5).
+    """
+
+    reads = ("eval.truth", "eval.reco", "eval.protocol")
+    writes = ("chargeprofile.summary",)
+
+    def execute(self, store):
+        t = np.asarray(store.get("eval.truth"), dtype=np.float64).ravel()
+        r = np.asarray(store.get("eval.reco"), dtype=np.float64).ravel()
+        edges = [float(x) for x in self.props.get(
+            "edges", [0.5, 1, 2, 3, 4, 5, 7, 10, 100])]
+        floor = edges[0]
+        nmin = int(self.props.get("min_voxels", 5))
+        m = t > floor
+        rows = []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            sel = m & (t >= lo) & (t < hi)
+            n = int(sel.sum())
+            if n < nmin:
+                continue
+            ts = float(t[sel].sum())
+            rows.append({"lo_ke": lo, "hi_ke": hi, "n": n,
+                         "sum_truth_ke": ts,
+                         "sum_reco_ke": float(r[sel].sum()),
+                         "ratio": float(r[sel].sum() / ts) if ts else None})
+        rec = {"edges_ke": edges, "truth_floor_ke": floor,
+               "protocol": store.get("eval.protocol"),
+               "n_voxels_above_floor": int(m.sum()), "bins": rows}
+        print("[ChargeProfile] " + "  ".join(
+            "[%g,%g) %.3f" % (b["lo_ke"], b["hi_ke"], b["ratio"])
+            for b in rows))
+        self.put(store, "chargeprofile.summary", rec)
