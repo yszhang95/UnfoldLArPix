@@ -38,6 +38,8 @@ class Evaluate(Algorithm):
                      10x on ``true_killed``.  ``recompute`` is what the
                      centre-scored evaluation of record does.
       ``truth_npz``  explicit truth file; overrides ``truth``.
+      ``out_prefix``  default ``eval``; set it to run two protocols in one
+                     sequence, which is what a deposit A/B needs.
       ``deposit``    ``gaussian`` (default) | ``linear``.
       ``sigma_time``, ``sigma_pixel``  the analysis widths; the adopted pair is
                      0.005 and 0.5 (sec:eval:grid).
@@ -56,6 +58,11 @@ class Evaluate(Algorithm):
 
     def __init__(self, **props):
         super().__init__(**props)
+        # instance-level writes: the store is write-once, so two protocols in
+        # one sequence need two prefixes.  Same pattern as BuildTruth.
+        self.prefix = str(props.get("out_prefix", "eval"))
+        self.writes = tuple(f"{self.prefix}.{k}" for k in
+                            ("truth", "reco", "origin", "metrics", "protocol"))
         self.truth_mode = str(props.get("truth", "recompute"))
         if self.truth_mode not in ("recompute", "embedded"):
             raise ValueError("truth must be recompute|embedded")
@@ -97,6 +104,10 @@ class Evaluate(Algorithm):
             to = np.asarray(z["deconv_q_offsets"], dtype=np.float64)
 
         tmp = None
+        tnpz_declared = tnpz          # what the CALLER asked for; a temp file
+                                      # made here is an implementation detail
+                                      # and must not enter the protocol record,
+                                      # or two identical runs look different
         try:
             if tnpz is None and self.truth_mode == "recompute":
                 # the embedded smeared_true is at the WARM START's width, not
@@ -122,17 +133,18 @@ class Evaluate(Algorithm):
                     "corr_threshold": thr, "edge_anchor": anchor,
                     "time_offsets": which,
                     "truth": self.truth_mode,
-                    "truth_npz": (str(tnpz) if tnpz else None)}
+                    "truth_npz": (str(tnpz_declared) if tnpz_declared
+                                  else None)}
         print("[Evaluate] %s deposit, sigma=(%.3f, %.2f), offsets=%s -> "
               "integral %+.2f%%  r %.4f  slope %.3f  ghost %.2f%%  killed %.1f"
               % (dep, st, sp, which, metrics["integral_pct"],
                  metrics["pearson_r"], metrics["slope"],
                  100 * metrics["ghost_frac"], metrics["true_killed"]))
-        self.put(store, "eval.truth", truth)
-        self.put(store, "eval.reco", reco)
-        self.put(store, "eval.origin", origin)
-        self.put(store, "eval.metrics", metrics)
-        self.put(store, "eval.protocol", protocol)
+        self.put(store, f"{self.prefix}.truth", truth)
+        self.put(store, f"{self.prefix}.reco", reco)
+        self.put(store, f"{self.prefix}.origin", origin)
+        self.put(store, f"{self.prefix}.metrics", metrics)
+        self.put(store, f"{self.prefix}.protocol", protocol)
 
 
 @algorithm("LumpedAllocation")
@@ -212,7 +224,7 @@ class LumpedAllocation(Algorithm):
         summary = {"pkq": pkq, "truth_floor_ke": floor,
                    "high_floor_ke": hi_floor, "edges_bins": edges,
                    "n_latch_bins": len(best), "n_outside_grid": n_out,
-                   "protocol": store.get("eval.protocol"), "strata": {}}
+                   "protocol": store.get(f"{self.src}.protocol"), "strata": {}}
         for nm in names:
             v = acc[nm]
             if not v:
@@ -379,9 +391,17 @@ class ChargeProfile(Algorithm):
     reads = ("eval.truth", "eval.reco", "eval.protocol")
     writes = ("chargeprofile.summary",)
 
+    def __init__(self, **props):
+        super().__init__(**props)
+        self.src = str(props.get("eval_prefix", "eval"))
+        self.reads = tuple(f"{self.src}.{k}" for k in
+                           ("truth", "reco", "protocol"))
+        self.writes = (f"{str(props.get('out_prefix', 'chargeprofile'))}"
+                       ".summary",)
+
     def execute(self, store):
-        t = np.asarray(store.get("eval.truth"), dtype=np.float64).ravel()
-        r = np.asarray(store.get("eval.reco"), dtype=np.float64).ravel()
+        t = np.asarray(store.get(f"{self.src}.truth"), dtype=np.float64).ravel()
+        r = np.asarray(store.get(f"{self.src}.reco"), dtype=np.float64).ravel()
         edges = [float(x) for x in self.props.get(
             "edges", [0.5, 1, 2, 3, 4, 5, 7, 10, 100])]
         floor = edges[0]
@@ -404,4 +424,55 @@ class ChargeProfile(Algorithm):
         print("[ChargeProfile] " + "  ".join(
             "[%g,%g) %.3f" % (b["lo_ke"], b["hi_ke"], b["ratio"])
             for b in rows))
-        self.put(store, "chargeprofile.summary", rec)
+        self.put(store, self.writes[0], rec)
+
+
+@algorithm("ProtocolAB")
+class ProtocolAB(Algorithm):
+    """Compare two evaluations of the same solve, metric by metric.
+
+    Ports `offsets_ab{,_noisy}.py`, `uni_centers{,_round}.py` and
+    `uniform_ab.py`, which all do one thing: score a solve twice and look at
+    what moved.  The two evaluations must differ in exactly one declared
+    setting -- that is checked here, so an A/B cannot silently compare two
+    things that differ in two ways.
+
+    Props: ``a``, ``b`` (the two `Evaluate` prefixes), ``keys`` (metrics to
+    compare; default all shared numeric ones).
+    """
+
+    writes = ("protocolab.summary",)
+
+    def __init__(self, **props):
+        super().__init__(**props)
+        self.a = str(props.get("a", "eval_a"))
+        self.b = str(props.get("b", "eval_b"))
+        self.reads = (f"{self.a}.metrics", f"{self.a}.protocol",
+                      f"{self.b}.metrics", f"{self.b}.protocol")
+
+    def execute(self, store):
+        pa = store.get(f"{self.a}.protocol")
+        pb = store.get(f"{self.b}.protocol")
+        diff = {k: (pa.get(k), pb.get(k)) for k in set(pa) | set(pb)
+                if pa.get(k) != pb.get(k)}
+        if len(diff) != 1:
+            raise ValueError(
+                f"an A/B must differ in exactly one setting; these differ in "
+                f"{len(diff)}: {diff}")
+        (knob, (va, vb)), = diff.items()
+        ma, mb = store.get(f"{self.a}.metrics"), store.get(f"{self.b}.metrics")
+        keys = self.props.get("keys") or sorted(
+            k for k in set(ma) & set(mb)
+            if isinstance(ma[k], (int, float)) and not isinstance(ma[k], bool))
+        rows = {}
+        for k in keys:
+            x, y = float(ma[k]), float(mb[k])
+            rows[k] = {"a": x, "b": y, "delta": y - x,
+                       "rel": ((y - x) / x) if x else None}
+        rec = {"knob": knob, "a_value": va, "b_value": vb,
+               "a_prefix": self.a, "b_prefix": self.b, "metrics": rows}
+        print("[ProtocolAB] %s: %s -> %s  " % (knob, va, vb) + "  ".join(
+            "%s %+.4g" % (k, rows[k]["delta"]) for k in
+            ("integral_pct", "pearson_r", "slope", "true_killed")
+            if k in rows))
+        self.put(store, "protocolab.summary", rec)
