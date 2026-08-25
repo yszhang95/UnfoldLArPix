@@ -347,6 +347,13 @@ class ResidualSpectrum(_FitGridAlg):
     ``tr G``: if the error concentrates where the spectrum is weak, the first
     runs ahead of the second.
 
+    It also carries the RANGE TEST of ``operator_studies/range_test.py``: the
+    best residual any ``q`` on this restriction can leave,
+    ``min_q ||A P q - d||^2 = ||(I - Pi) d||^2``, per tolerance. A small value
+    means the system can reproduce almost any ``d`` -- model error included --
+    which is UNDER-DETERMINATION, a different pathology from redundancy, and
+    the note conflated the two before.
+
     Props: ``restrict`` (``free``|``support``), ``max_dim`` (4000),
     ``quantiles``, ``truth_prefix``.
     """
@@ -393,6 +400,13 @@ class ResidualSpectrum(_FitGridAlg):
         A1 = np.asarray(op.forward(op.to_tensor(np.ones(op.q_shape)))
                         .detach().cpu().numpy(), np.float64).ravel()
         a1u = V.T @ A1
+        # RANGE TEST (ports operator_studies/range_test.py).  The best residual
+        # any q on this restriction can leave is ||(I - Pi) d||^2 with Pi the
+        # projector onto range(A P) -- i.e. the part of d in the NULL modes.
+        # Small means the system can absorb any d, model error included, which
+        # is under-determination and NOT the same pathology as redundancy.
+        dproj = V.T @ d
+        d2 = float(d @ d)
         qs = [float(x) for x in self.props.get("quantiles", (0.5, 0.9, 0.99))]
         rec = {"restrict": restrict, "n_rows": n,
                "lambda_max": float(w[0]), "lambda_min": float(w[-1]),
@@ -407,11 +421,16 @@ class ResidualSpectrum(_FitGridAlg):
         for tol in [float(x) for x in self.props.get(
                 "tolerances", (1e-6, 1e-8, 1e-10))]:
             keep = w > tol * w[0]
+            resid_min = float((dproj[~keep] ** 2).sum())
             rec["tol_scan"]["%g" % tol] = {
                 "n_modes_kept": int(keep.sum()),
                 "n_null": int((~keep).sum()),
                 "frac_e2_in_null": float(p2[~keep].sum() / max(tot, 1e-300)),
-                "T_ke": float((proj[keep] * a1u[keep] / w[keep]).sum())}
+                "T_ke": float((proj[keep] * a1u[keep] / w[keep]).sum()),
+                # the range test at this tolerance
+                "min_residual_sq": resid_min,
+                "min_residual_frac_of_d2": (resid_min / d2) if d2 else None,
+                "half_min_residual": 0.5 * resid_min}
         for f in qs:
             rec["modes_for_trace_frac"][str(f)] = int(np.searchsorted(cw, f) + 1)
             rec["modes_for_error_frac"][str(f)] = int(np.searchsorted(ce, f) + 1)
@@ -997,3 +1016,73 @@ class OperatorNoiseAB(Algorithm):
                  "n/a" if not f else "%.0f%%" % (100 * f["frac_nonzero"]),
                  len(matched), len(common)))
         self.put(store, "noiseab.summary", rec)
+
+
+@algorithm("TimeProfile")
+class TimeProfile(_FitGridAlg):
+    """Per-pixel time spread: how many bins the charge occupies, truth vs reco.
+
+    Ports the time-profile half of ``operator_studies/slope_a75.py`` and
+    supplies `tab:slopea75`'s ``bins/px`` column.
+
+    A steep track gives one pixel charge over many fit bins while a single
+    trigger gives it three measurement rows, so the within-pixel time profile
+    is nearly unconstrained and the sparsity prior concentrates the charge.
+    Against a truth that is spread, the voxel-wise regression then reads
+    slope > 1 with a negative integral -- so the occupied-bin count is the
+    quantity that decides whether that story is right.
+
+    Props: ``eps`` (a bin counts as occupied above this; default **0.5 ke**,
+    the note's standard charge cut -- at 0.01 the count is 6.55 against the
+    published 6.35, so the threshold is part of the definition and not a
+    detail), ``pixel_floor`` (1.0 ke), ``truth_prefix``.
+    """
+
+    reads = ("op", "solve.q")
+    writes = ("timeprofile.summary",)
+
+    def execute(self, store):
+        op, q, t, _ = self._grids(store)
+        eps = float(self.props.get("eps", 0.5))
+        floor = float(self.props.get("pixel_floor", 1.0))
+        k = np.arange(t.shape[2], dtype=np.float64)
+
+        def per_pixel(x, live):
+            occ, rms = [], []
+            for i, j in zip(*np.nonzero(live)):
+                col = x[i, j]
+                on = col > eps
+                occ.append(int(on.sum()))
+                w = col[on]
+                if w.sum() > 0 and on.sum() > 1:
+                    kk = k[on]
+                    m = float((w * kk).sum() / w.sum())
+                    rms.append(float(np.sqrt((w * (kk - m) ** 2).sum() / w.sum())))
+                else:
+                    rms.append(0.0)
+            return np.asarray(occ, float), np.asarray(rms, float)
+
+        # a pixel is scored if the RECONSTRUCTION put charge above the cut
+        # there: bins/px is a property of the solution's time profile
+        live = (q > eps).any(axis=2)
+        occ_t, rms_t = per_pixel(t, live)
+        occ_r, rms_r = per_pixel(q, live)
+        rec = {"eps_ke": eps, "pixel_floor_ke": floor,
+               "n_pixels": int(live.sum())}
+        if live.any():
+            rec["truth"] = {"bins_per_pixel": float(occ_t.mean()),
+                            "rms_bins": float(rms_t.mean())}
+            rec["reco"] = {"bins_per_pixel": float(occ_r.mean()),
+                           "rms_bins": float(rms_r.mean())}
+            rec["bins_per_pixel"] = float(occ_r.mean())     # the note's column
+            rec["reco_over_truth_bins"] = (float(occ_r.mean() / occ_t.mean())
+                                           if occ_t.mean() else None)
+        print("[TimeProfile] %d pixels  bins/px reco %s truth %s (ratio %s)  "
+              "rms bins reco %s truth %s"
+              % (rec["n_pixels"],
+                 _f(rec.get("reco", {}).get("bins_per_pixel")),
+                 _f(rec.get("truth", {}).get("bins_per_pixel")),
+                 _f(rec.get("reco_over_truth_bins")),
+                 _f(rec.get("reco", {}).get("rms_bins")),
+                 _f(rec.get("truth", {}).get("rms_bins"))))
+        self.put(store, "timeprofile.summary", rec)
