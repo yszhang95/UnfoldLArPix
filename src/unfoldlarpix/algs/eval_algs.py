@@ -384,8 +384,18 @@ class ChargeProfile(Algorithm):
     Consumes ``eval.truth``/``eval.reco`` -- it does not rebin -- so a profile
     and the scalar metrics beside it are provably of the same evaluation.
 
-    Props: ``edges`` (truth-charge bin edges in ke; default the archived
-    ``[0.5, 1, 2, 3, 4, 5, 7, 10, 100]``), ``min_voxels`` (5).
+    Props: ``edges`` (bin edges in ke; default the archived
+    ``[0.5, 1, 2, 3, 4, 5, 7, 10, 100]``), ``min_voxels`` (5), ``grid``
+    (``universal`` by default, or ``fit`` to profile ``solve.q`` against
+    ``truth.q`` with no post-processing -- that is
+    ``noiseless_closure_round/highq_fitgrid.py``), ``select_by`` (``truth``
+    by default, or ``reco``).
+
+    ``select_by`` matters and the archived script says why: binning by RECO
+    regresses to the mean and MANUFACTURES an overestimate in the top bin,
+    because a voxel lands there partly by having been over-booked. Binning by
+    truth is the honest choice; both are offered so the artefact stays
+    visible rather than being an unstated convention.
     """
 
     reads = ("eval.truth", "eval.reco", "eval.protocol")
@@ -393,23 +403,37 @@ class ChargeProfile(Algorithm):
 
     def __init__(self, **props):
         super().__init__(**props)
+        self.grid = str(props.get("grid", "universal"))
+        if self.grid not in ("universal", "fit"):
+            raise ValueError("grid must be universal|fit")
+        self.select_by = str(props.get("select_by", "truth"))
+        if self.select_by not in ("truth", "reco"):
+            raise ValueError("select_by must be truth|reco")
         self.src = str(props.get("eval_prefix", "eval"))
-        self.reads = tuple(f"{self.src}.{k}" for k in
-                           ("truth", "reco", "protocol"))
+        self.tp = str(props.get("truth_prefix", "truth"))
+        self.reads = (tuple(f"{self.src}.{k}" for k in
+                            ("truth", "reco", "protocol"))
+                      if self.grid == "universal"
+                      else ("solve.q", f"{self.tp}.q"))
         self.writes = (f"{str(props.get('out_prefix', 'chargeprofile'))}"
                        ".summary",)
 
     def execute(self, store):
-        t = np.asarray(store.get(f"{self.src}.truth"), dtype=np.float64).ravel()
-        r = np.asarray(store.get(f"{self.src}.reco"), dtype=np.float64).ravel()
+        if self.grid == "universal":
+            t = np.asarray(store.get(f"{self.src}.truth"), np.float64).ravel()
+            r = np.asarray(store.get(f"{self.src}.reco"), np.float64).ravel()
+        else:
+            t = np.asarray(store.get(f"{self.tp}.q"), np.float64).ravel()
+            r = np.asarray(store.get("solve.q"), np.float64).ravel()
         edges = [float(x) for x in self.props.get(
             "edges", [0.5, 1, 2, 3, 4, 5, 7, 10, 100])]
         floor = edges[0]
         nmin = int(self.props.get("min_voxels", 5))
-        m = t > floor
+        key = t if self.select_by == "truth" else r
+        m = key > floor
         rows = []
         for lo, hi in zip(edges[:-1], edges[1:]):
-            sel = m & (t >= lo) & (t < hi)
+            sel = m & (key >= lo) & (key < hi)
             n = int(sel.sum())
             if n < nmin:
                 continue
@@ -419,7 +443,8 @@ class ChargeProfile(Algorithm):
                          "sum_reco_ke": float(r[sel].sum()),
                          "ratio": float(r[sel].sum() / ts) if ts else None})
         rec = {"edges_ke": edges, "truth_floor_ke": floor,
-               "protocol": store.get("eval.protocol"),
+               "protocol": (store.get(f"{self.src}.protocol")
+                            if self.grid == "universal" else None),
                "n_voxels_above_floor": int(m.sum()), "bins": rows}
         print("[ChargeProfile] " + "  ".join(
             "[%g,%g) %.3f" % (b["lo_ke"], b["hi_ke"], b["ratio"])

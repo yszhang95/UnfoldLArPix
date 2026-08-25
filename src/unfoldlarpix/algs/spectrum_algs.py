@@ -707,7 +707,22 @@ class OperatorSpectrum(_SpectrumAlgorithm):
             B = float(coarse_bin)
             one_tick_us = float(self.props.get("tick_us", 0.05))
             nbin = int(self.props.get("dt_bins", 24))
-            DT = np.abs(rt[:, None] - rt[None, :]) / B
+            # four defensible definitions of "how far apart" two windows are;
+            # dt_coupling.py used the first and dt_definition.py asked whether
+            # that choice matters, so all four are reported rather than one
+            # being picked silently
+            lo_e = np.asarray(meta["t_lo"], dtype=float)[live]
+            lo_e = np.maximum(lo_e, 0.0)
+            mid = 0.5 * (lo_e + rt)
+            DEFS = {
+                "latch": np.abs(rt[:, None] - rt[None, :]) / B,
+                "mid": np.abs(mid[:, None] - mid[None, :]) / B,
+                "gap": np.maximum(
+                    np.maximum(lo_e[:, None], lo_e[None, :])
+                    - np.minimum(rt[:, None], rt[None, :]), 0.0) / B,
+            }
+            which = str(self.props.get("dt_definition_used", "latch"))
+            DT = DEFS[which]
             # a pair is UNORDERED and is not a row with itself: the Gram is
             # symmetric, so counting the full matrix double-counts every pair
             # and adds n diagonal entries of rho = 1.
@@ -768,7 +783,15 @@ class OperatorSpectrum(_SpectrumAlgorithm):
             rec["d1_beyond"] = st((dpix == 1) & ~near)
             rec["beyond_kernel_within"] = st((dpix > khalf) & near)
             rec["beyond_kernel_beyond"] = st((dpix > khalf) & ~near)
+            sp0 = (dpix == 0) & fin
+            rec["dt_definition_sensitivity"] = {
+                k: {"mean_abs_rho_within": (
+                        float(np.abs(RHO[sp0 & (v <= near_bins)]).mean())
+                        if (sp0 & (v <= near_bins)).any() else None),
+                    "n_within": int((sp0 & (v <= near_bins)).sum())}
+                for k, v in DEFS.items()}
             rec["dt_definition"] = {
+                "used": which,
                 "delta_t": "|t_hi_i - t_hi_j|, the two rows' latch instants",
                 "bin_k_covers": "|dt|/B in [k-1, k), labelled by the upper edge",
                 "near_split_us": near_us,
