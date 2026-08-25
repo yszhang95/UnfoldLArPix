@@ -778,3 +778,222 @@ class CentroidError(_FitGridAlg):
                  "n/a" if "dt_bins" not in rec else "%.4f" % rec["dt_bins"]["sd"],
                  _f(rec["neighbour"]["corr"]), rec["neighbour"]["n_pairs"]))
         self.put(store, "centroiderr.summary", rec)
+
+
+@algorithm("ObjectiveDecomposition")
+class ObjectiveDecomposition(_FitGridAlg):
+    """The objective at the solution and at truth, against d AND against d_exact.
+
+    Ports ``operator_mechanism/objective_decomp.py``.  Four data terms:
+
+        L(q_hat; d)        what the solver minimised
+        L(q_hat; d_exact)  the same solution against the noiseless window
+                           integrals -- removes the readout noise and every
+                           data-side bookkeeping error at once
+        L(truth; d)        the honest reference: noise AND operator error
+        L(truth; d_exact)  what is left at truth once the data side is exact,
+                           which is the operator's charge-model error alone
+
+    That last one is the number the whole operator-error argument turns on, and
+    it is only reachable with a waveform sample, so this needs
+    :class:`OperatorError` to have run.
+
+    Props: ``alpha`` (flat l1 weight for the reported penalty, default 0.3),
+    ``truth_prefix``.
+    """
+
+    reads = ("op", "solve.q", "error.rows")
+    writes = ("objdecomp.summary",)
+
+    def execute(self, store):
+        op, q, t, _ = self._grids(store)
+        alpha = float(self.props.get("alpha", 0.3))
+        d_ex = np.asarray(store.get("error.rows")["d_exact"], np.float64)
+        sw, weighted = _resid_conventions(op)
+        d = np.asarray(op.d.detach().cpu().numpy(), np.float64).ravel()
+        if weighted:
+            d = d / sw
+
+        def fwd(x):
+            v = op.forward(op.to_tensor(x)).detach().cpu().numpy()
+            v = np.asarray(v, np.float64).ravel()
+            return v / sw if weighted else v
+
+        Aq, At = fwd(q), fwd(t)
+        rec = {"alpha": alpha,
+               "L_qhat_d": 0.5 * float(((Aq - d) ** 2).sum()),
+               "L_qhat_dexact": 0.5 * float(((Aq - d_ex) ** 2).sum()),
+               "L_truth_d": 0.5 * float(((At - d) ** 2).sum()),
+               "L_truth_dexact": 0.5 * float(((At - d_ex) ** 2).sum()),
+               "l1_qhat": alpha * float(q.sum()),
+               "l1_truth": alpha * float(t.sum())}
+        rec["truth_operator_only"] = rec["L_truth_dexact"]
+        rec["data_side_share_at_truth"] = (
+            1.0 - rec["L_truth_dexact"] / rec["L_truth_d"]
+            if rec["L_truth_d"] else None)
+        print("[ObjectiveDecomposition] L(qhat;d) %.1f  L(qhat;dex) %.1f  "
+              "L(truth;d) %.1f  L(truth;dex) %.1f  (data side %s of truth's)"
+              % (rec["L_qhat_d"], rec["L_qhat_dexact"], rec["L_truth_d"],
+                 rec["L_truth_dexact"],
+                 "n/a" if rec["data_side_share_at_truth"] is None
+                 else "%.1f%%" % (100 * rec["data_side_share_at_truth"])))
+        self.put(store, "objdecomp.summary", rec)
+
+
+@algorithm("ArrivalPhase")
+class ArrivalPhase(Algorithm):
+    """Arrival phase inside the readout bin, and the diffusion width.
+
+    Ports ``iso_residual``'s ``phase_diffusion{,_round}.py``.  From the event's
+    effective charge alone -- no reconstruction:
+
+        u        charge-weighted mean arrival time modulo the readout bin
+                 [fine ticks]: where an isochronous arrival falls inside its
+                 own 1.5 us bin.  Depth moves it with period v*B.
+        sigma_L  per-pixel charge-weighted RMS of the arrival times.  For a
+                 uniform line the undiffused truth is a delta, so this IS the
+                 diffusion width.
+
+    Props: ``pixel_floor`` (1.0 ke), ``truth_prefix`` (only for the grid).
+    """
+
+    reads = ("event", "readout_config", "op", "block_offset")
+    writes = ("arrival.summary",)
+
+    def execute(self, store):
+        ev = store.get("event")
+        rc = store.get("readout_config")
+        op = store.get("op")
+        boff = np.asarray(store.get("block_offset"), dtype=float)
+        S = int(store.get("time_subbin")) if "time_subbin" in store else 1
+        B = float(int(rc.adc_hold_delay) // S)
+        floor = float(self.props.get("pixel_floor", 1.0))
+
+        el = np.asarray(ev.effq.location)
+        eq = np.asarray(ev.effq.data, dtype=np.float64)[:, -1]
+        # ABSOLUTE tick: u is a phase on the common clock, so the block offset
+        # must not be subtracted -- doing so makes u a per-block quantity and
+        # the depth periodicity disappears
+        t = el[:, 2].astype(np.float64)
+        px = el[:, 0].astype(np.int64) - int(boff[0])
+        py = el[:, 1].astype(np.int64) - int(boff[1])
+        nx, ny, _ = op.q_shape
+        # u is a property of the EVENT, not of the block: restricting to the
+        # operator's pixel range would make it depend on where the block was
+        # cut.  sigma_L is per pixel and unaffected either way.
+        in_grid = (px >= 0) & (px < nx) & (py >= 0) & (py < ny)
+        pos = eq > 0
+        px, py, t, eq = px[pos], py[pos], t[pos], eq[pos]
+        in_grid = in_grid[pos]
+        tot = float(eq.sum())
+        u = (float((eq * t).sum() / tot) % B) if tot else None
+
+        by: dict[tuple[int, int], list[int]] = {}
+        for i in range(px.size):
+            if in_grid[i]:
+                by.setdefault((int(px[i]), int(py[i])), []).append(i)
+        sig = []
+        for k, idx in by.items():
+            i = np.asarray(idx)
+            w = eq[i]
+            if w.sum() < floor:
+                continue
+            m = float((w * t[i]).sum() / w.sum())
+            sig.append(float(np.sqrt((w * (t[i] - m) ** 2).sum() / w.sum())))
+        rec = {"bin_ticks": B, "pixel_floor_ke": floor,
+               "n_charges": int(px.size), "n_charges_in_grid": int(in_grid.sum()),
+               "n_pixels": len(sig), "charge_ke": tot,
+               "u_ticks": u, "u_frac_of_bin": (u / B) if u is not None else None}
+        if sig:
+            a = np.asarray(sig)
+            rec["sigma_L_ticks"] = {"mean": float(a.mean()),
+                                    "median": float(np.median(a)),
+                                    "sd": float(a.std()),
+                                    "min": float(a.min()), "max": float(a.max())}
+        print("[ArrivalPhase] u = %s ticks (%s of a bin), sigma_L median %s "
+              "ticks over %d pixels"
+              % (_f(u), _f(rec["u_frac_of_bin"]),
+                 "n/a" if "sigma_L_ticks" not in rec
+                 else "%.3f" % rec["sigma_L_ticks"]["median"], len(sig)))
+        self.put(store, "arrival.summary", rec)
+
+
+@algorithm("OperatorNoiseAB")
+class OperatorNoiseAB(Algorithm):
+    """How much of the operator is set by the noise realisation?
+
+    Ports ``charge_space_modes/operator_vs_noise.py`` and
+    ``trigger_bias.py``.  The operator's rows are latch windows whose edges are
+    trigger / first-latch / re-arm instants produced by a threshold crossing on
+    the **noisy** accumulator, so ``A = A(n)``: the row set, the window edges
+    and the split points are all functions of the noise. The size of that
+    dependence is measured by simulating the same event twice.
+
+    Reads the two hit tables directly -- no reconstruction, no operator build --
+    and reports:
+
+    * row and pixel counts on each side, and the pixels unique to one;
+    * the first-trigger shift on the pixels both contain;
+    * the shift **per sequence index**, restricted to pixels with the same hit
+      count on both sides. That restriction is the point: comparing "first
+      trigger" to "first trigger" on a pixel that gained an extra early trigger
+      invents a shift that is an artefact of the pairing.
+
+    Props: ``noisy``, ``clean`` (paths to the two datasets), ``max_index`` (5).
+    """
+
+    reads = ()
+    writes = ("noiseab.summary",)
+
+    def execute(self, store):
+        from collections import defaultdict
+        maxi = int(self.props.get("max_index", 5))
+
+        def by_pixel(fn):
+            z = np.load(fn, allow_pickle=True)
+            key = [k for k in z.files if k.endswith("_location") and "hits" in k][0]
+            loc = np.asarray(z[key])
+            m = defaultdict(list)
+            for r in loc:
+                m[(int(r[0]), int(r[1]))].append((int(r[2]), int(r[3])))
+            return {k: sorted(v) for k, v in m.items()}, int(loc.shape[0])
+
+        A, na = by_pixel(str(self.props["noisy"]))
+        Bc, nb = by_pixel(str(self.props["clean"]))
+        pa, pb = set(A), set(Bc)
+        common = sorted(pa & pb)
+        rec = {"n_rows_noisy": na, "n_rows_clean": nb,
+               "row_excess_frac": (na - nb) / nb if nb else None,
+               "n_pixels_noisy": len(pa), "n_pixels_clean": len(pb),
+               "n_common": len(common),
+               "n_only_noisy": len(pa - pb), "n_only_clean": len(pb - pa)}
+        if common:
+            dt = np.array([A[k][0][0] - Bc[k][0][0] for k in common], float)
+            rec["first_trigger_shift_ticks"] = {
+                "mean": float(dt.mean()), "median": float(np.median(dt)),
+                "rms": float(np.sqrt((dt ** 2).mean())),
+                "frac_nonzero": float((dt != 0).mean()),
+                "max_abs": float(np.abs(dt).max())}
+        matched = [k for k in common if len(A[k]) == len(Bc[k])]
+        rec["n_same_hit_count"] = len(matched)
+        rec["same_hit_count_frac"] = (len(matched) / len(common)
+                                      if common else None)
+        per = defaultdict(list)
+        for k in matched:
+            for i, (x, y) in enumerate(zip(A[k], Bc[k])):
+                per[i].append(x[0] - y[0])
+        rec["shift_by_sequence_index"] = [
+            {"index": i, "n": len(per[i]),
+             "mean": float(np.mean(per[i])),
+             "median": float(np.median(per[i])),
+             "rms": float(np.sqrt(np.mean(np.square(per[i]))))}
+            for i in sorted(per) if i < maxi]
+        f = rec.get("first_trigger_shift_ticks", {})
+        print("[OperatorNoiseAB] rows %d vs %d (%+.1f%%), pixels %d/%d common "
+              "%d; first-trigger shift mean %s ticks, %s nonzero; same hit "
+              "count on %d/%d"
+              % (na, nb, 100 * (rec["row_excess_frac"] or 0), len(pa), len(pb),
+                 len(common), _f(f.get("mean")),
+                 "n/a" if not f else "%.0f%%" % (100 * f["frac_nonzero"]),
+                 len(matched), len(common)))
+        self.put(store, "noiseab.summary", rec)
