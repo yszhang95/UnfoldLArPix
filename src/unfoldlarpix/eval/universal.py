@@ -180,7 +180,12 @@ def universal_rebin(npz_path: Path, truth_npz: Path | None = None,
         # alignment -- which is how two callers came to use two formulas
         return truth, reco, {"u_min": int(u_min), "p_min": [int(p_min[0]),
                                                            int(p_min[1])],
-                             "bin_ticks": int(B), "phi": float(phi)}
+                             "bin_ticks": int(B), "phi": float(phi),
+                             # the offset THIS grid was built with.  It is the
+                             # charge-centre one, half a bin from the fit
+                             # grid's raw corner, and mixing the two shifts
+                             # every latch bin by B/2.
+                             "b_off": [float(x) for x in b_off]}
     return truth, reco
 
 

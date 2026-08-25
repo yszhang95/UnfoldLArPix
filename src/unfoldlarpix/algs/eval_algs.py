@@ -169,15 +169,28 @@ class LumpedAllocation(Algorithm):
     """
 
     reads = ("eval.truth", "eval.reco", "eval.origin", "row_meta",
-             "readout_config", "block_offset")
+             "readout_config")
     writes = ("lumped.summary",)
 
+    def __init__(self, **props):
+        super().__init__(**props)
+        # follow whichever Evaluate produced the blocks, so an A/B can score
+        # both protocols in one sequence
+        self.src = str(props.get("eval_prefix", "eval"))
+        self.reads = ((f"{self.src}.truth", f"{self.src}.reco",
+                       f"{self.src}.origin", f"{self.src}.protocol")
+                      + ("row_meta", "readout_config"))
+        self.writes = (f"{str(props.get('out_prefix', 'lumped'))}.summary",)
+
     def execute(self, store):
-        truth = np.asarray(store.get("eval.truth"), dtype=np.float64)
-        reco = np.asarray(store.get("eval.reco"), dtype=np.float64)
-        org = store.get("eval.origin")
+        truth = np.asarray(store.get(f"{self.src}.truth"), dtype=np.float64)
+        reco = np.asarray(store.get(f"{self.src}.reco"), dtype=np.float64)
+        org = store.get(f"{self.src}.origin")
         rm = store.get("row_meta")
-        boff = np.asarray(store.get("block_offset"), dtype=float)
+        # the UNIVERSAL grid's own offset, not the fit grid's: the NPZ carries
+        # boffset (charge centre) and boffset_raw (corner) and they differ by
+        # B/2, so taking block_offset here shifts every latch bin by half a bin
+        boff = np.asarray(org["b_off"], dtype=float)
         B = float(org["bin_ticks"])
         pkq = int(self.props.get("pkq", 127))
         floor = float(self.props.get("truth_floor", 2.0))
