@@ -40,11 +40,13 @@ import json
 import numpy as np
 import torch
 
+from ..eval.universal import metrics_from_blocks, universal_rebin
 from ..fwk.component import Algorithm, algorithm
 from ..model.warm_start import deconv_fft_torch, gaussian_filter_3d_torch
 from ..solve.engine import Fista
 from ..solve.strategy import Ladder, SolveState
 from ..terms.base import CoordProx
+from ..smear_truth import gaus_smear_true_3d
 from ..terms.data import DataFidelity
 
 
@@ -58,8 +60,25 @@ def fit_bin_ticks(store) -> float:
     return float(int(rc.adc_hold_delay)) / S
 
 
-def grid_truth(store, op) -> np.ndarray:
-    """effq summed onto the operator's own charge grid (same frame as ``d``)."""
+def grid_truth(store, op, mode: str = "round") -> np.ndarray:
+    """effq summed onto the operator's own charge grid (same frame as ``d``).
+
+    FOR OPERATOR INPUT ONLY -- this is the true charge to push through ``A``
+    (``A q_truth`` vs ``d``), where an unsmeared truth is exactly right.
+    NEVER use it to score a reconstruction: the analysis filter smears the
+    reco, and comparing a smeared reco against an unsmeared truth is the
+    one-sided smearing that fakes the slope.  Use :func:`score_universal`.
+
+    ``mode="round"`` is the BIN-CENTRE deposit, the adopted eval protocol
+    (decided 2026-08-16 on the criterion that slope must be unbiased); the
+    charge goes to the bin whose centre is nearest.  ``mode="floor"`` is the
+    older nearest-lower-edge assignment kept only to reproduce archived
+    numbers -- it moves a deposit sitting late in a bin a whole bin early,
+    which on a 2-bin-wide isochronous feature shows up as an apparent
+    reco-late offset (measured: L(q_truth) 1.16e4 with floor vs 1243 with
+    round on isoline d16p5, i.e. a 9.3x difference in what looks like
+    "operator error").
+    """
     ev = store.get("event")
     boff = np.asarray(store.get("block_offset"), dtype=float)
     B = fit_bin_ticks(store)
@@ -68,31 +87,110 @@ def grid_truth(store, op) -> np.ndarray:
     nx, ny, nt = op.q_shape
     ix = el[:, 0].astype(int) - int(boff[0])
     iy = el[:, 1].astype(int) - int(boff[1])
-    it = np.floor((el[:, 2] - boff[2]) / B).astype(int)
+    f = (el[:, 2] - boff[2]) / B
+    it = (np.rint(f) if mode == "round" else np.floor(f)).astype(int)
     ok = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny) & (it >= 0) & (it < nt)
     qg = np.zeros(op.q_shape)
     np.add.at(qg, (ix[ok], iy[ok], it[ok]), eq[ok])
     return qg
 
 
-def best_shift_r(qg: np.ndarray, q: np.ndarray, span: int = 3):
-    """(r, shift) maximising the correlation over a rigid time shift.
+def smeared_truth(store, sigma_pixel: float = 0.5,
+                  sigma_time: float = 0.005):
+    """The event's truth smeared with the analysis filter (cached per event).
 
-    The fit grid sits about half a bin later than the deposit convention
-    (:func:`~unfoldlarpix.model.conventions.solver_time_shift`), so on a grid
-    whose phase differs from the ZS arm's the peak tips into the next index.
-    Reporting the best shift keeps a declaration offset from being read as an
-    anticorrelation.
+    Widths are the ADOPTED protocol (sigma_pxl 0.5, sigma_time 0.005), not
+    the 0.2 that older production NPZs embed -- reusing the embedded 0.2
+    truth against a 0.5 reco inflates the slope to 1.7-2.6.
     """
-    out = (float("-inf"), 0)
-    for s in range(-span, span + 1):
-        t = np.roll(qg, s, axis=2)
-        m = t > 0.01
-        if m.sum() < 3 or np.std(q[m]) == 0:
-            continue
-        r = float(np.corrcoef(t[m], q[m])[0, 1])
-        if r > out[0]:
-            out = (r, s)
+    key = ("_smeared", sigma_pixel, sigma_time)
+    cache = getattr(store, "_fixedgrid_cache", None)
+    if cache is None:
+        cache = {}
+        try:
+            store._fixedgrid_cache = cache
+        except Exception:
+            pass
+    if key in cache:
+        return cache[key]
+    ev = store.get("event")
+    off, sm = gaus_smear_true_3d(np.asarray(ev.effq.location),
+                                 np.asarray(ev.effq.data, dtype=float),
+                                 width=np.array([sigma_pixel, sigma_pixel,
+                                                 sigma_time]))
+    cache[key] = (np.asarray(off), np.asarray(sm))
+    return cache[key]
+
+
+def score_universal(store, op, q: np.ndarray, sigma_pixel: float = 0.5,
+                    sigma_time: float = 0.005,
+                    corr_threshold: float = 0.5) -> dict:
+    """Score a reconstruction against truth with BOTH SIDES SMEARED.
+
+    The adopted eval protocol: universal grid (edges at global multiples of
+    B), gaussian deposit of the sharp charge, no fitted sub-bin offsets,
+    sigma_pxl 0.5 / sigma_time 0.005, corr_threshold 0.5.  Delegates the
+    binning to :func:`~unfoldlarpix.eval.universal.universal_rebin` and the
+    scalars to :func:`~unfoldlarpix.eval.universal.metrics_from_blocks`, so
+    this cannot drift from the production numbers.
+
+    Adds ``transport``: where the charge sits relative to the truth's own
+    voxels on that same grid -- the test for a prior that concentrates a
+    diffuse halo onto a few voxels rather than reconstructing it.
+    """
+    import tempfile
+    from pathlib import Path
+    boff = np.asarray(store.get("block_offset"), dtype=float)
+    rc = store.get("readout_config")
+    S = int(store.get("time_subbin")) if "time_subbin" in store else 1
+    off, sm = smeared_truth(store, sigma_pixel, sigma_time)
+    qf = np.asarray(q, dtype=np.float32)
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "arm.npz"
+        np.savez(f, deconv_q=qf, deconv_q_sharp=qf,
+                 boffset=boff, boffset_raw=boff,
+                 adc_hold_delay=np.array(int(rc.adc_hold_delay) // S),
+                 time_convention=np.array("release_point"),
+                 smeared_true=sm, smear_offset=off)
+        tru, reco = universal_rebin(f, deposit_shape="gaussian",
+                                    sigma_time=sigma_time,
+                                    sigma_pxl=sigma_pixel)
+    out = dict(metrics_from_blocks(tru, reco, corr_threshold=corr_threshold))
+    out["transport"] = transport_profile(tru, reco, cut=corr_threshold)
+    return out
+
+
+def _grow(mask: np.ndarray) -> np.ndarray:
+    """One-voxel dilation with OPEN boundaries (np.roll would wrap)."""
+    g = mask.copy()
+    g[1:] |= mask[:-1]; g[:-1] |= mask[1:]
+    g[:, 1:] |= mask[:, :-1]; g[:, :-1] |= mask[:, 1:]
+    g[:, :, 1:] |= mask[:, :, :-1]; g[:, :, :-1] |= mask[:, :, 1:]
+    return g
+
+
+def transport_profile(tru: np.ndarray, reco: np.ndarray, cut: float = 0.5,
+                      n_rings: int = 3) -> dict:
+    """Where an estimator puts its charge relative to the TRUTH's voxels.
+
+    Both blocks must already be on the same grid and smeared the same way
+    (see :func:`score_universal`).  A sparsifying prior shows MORE charge on
+    the truth voxels and less in the surrounding shells than a filtered
+    inverse at the same total -- that is charge transported, not recovered.
+    Measures concentration, not correctness: the truth mask is truth-derived,
+    so read it beside the on-core excess, never alone.
+    """
+    core = tru > cut
+    out = {"truth_total": float(tru.sum()), "q_on_truth": float(reco[core].sum()),
+           "truth_on_core": float(tru[core].sum()), "n_core": int(core.sum())}
+    seen = core.copy()
+    for r in range(1, n_rings + 1):
+        grown = _grow(seen)
+        ring = grown & ~seen
+        out[f"q_ring{r}"] = float(reco[ring].sum())
+        seen = grown
+    out["q_outside"] = float(reco[~seen].sum())
+    out["nnz_pos"] = int((reco > cut).sum())
     return out
 
 
@@ -309,7 +407,7 @@ class EstimatorScan(_JsonRecorder):
                 q = Fista(n_iter=nit).minimize(op, [DataFidelity(op)],
                                                prox, q0.q)
             q = q.detach().cpu().numpy().astype(np.float64)
-            r, shift = best_shift_r(qg, q)
+            sc = score_universal(store, op, q); tp = sc.pop("transport")
             rec = {
                 "label": spec.get("label", f"alpha={alpha}"),
                 "alpha": alpha, "positivity": pos, "gain_cut": gcut,
@@ -324,12 +422,16 @@ class EstimatorScan(_JsonRecorder):
                 "max_abs_q": float(np.abs(q).max()),
                 "max_q": float(q.max()), "min_q": float(q.min()),
                 "n_pos": int((q > 0).sum()), "n_neg": int((q < 0).sum()),
-                "L": loss(op, q), "r_best": r, "t_shift": shift,
+                "L": loss(op, q), "universal": sc, "transport": tp,
             }
             print(f"[{self.name}] {rec['label']:28s} sum_q {rec['sum_q']:10.1f} "
                   f"({rec['ratio_q']:.4f}x)  q+ {rec['sum_q_pos']:9.1f}  "
                   f"q- {rec['sum_q_neg']:9.1f}  nnz {rec['nnz']:6d}  "
-                  f"L {rec['L']:.4g}  r {r:+.3f}@{shift:+d}")
+                  f"L {rec['L']:.4g} | U r {sc['pearson_r']:+.4f} slope "
+                  f"{sc['slope']:+.4f} int% {sc['integral_pct']:+.2f} "
+                  f"ghostQ {sc['ghost_charge']:8.1f} killed {sc['true_killed']:7.1f}"
+                  f" | core {tp['q_on_truth']:8.1f}/{tp['truth_on_core']:.1f} "
+                  f"ring1 {tp['q_ring1']:7.1f} out {tp['q_outside']:7.1f}")
             arms.append(rec)
             del q
             torch.cuda.empty_cache()
@@ -382,7 +484,7 @@ class FFTInverseScan(_JsonRecorder):
                     device=op.device, dtype=op.dtype)
             q = deconv_fft_torch(blk, kern, filt).detach().cpu().numpy()
             q = q.astype(np.float64)[:, :, :nt]
-            r, shift = best_shift_r(qg, q)
+            sc = score_universal(store, op, q); tp = sc.pop("transport")
             pos, neg = float(q[q > 0].sum()), float(q[q < 0].sum())
             rec = {
                 "sigma_time": st_,
@@ -396,7 +498,7 @@ class FFTInverseScan(_JsonRecorder):
                 "max_abs_q": float(np.abs(q).max()),
                 "max_q": float(q.max()), "min_q": float(q.min()),
                 "n_pos": int((q > 0).sum()), "n_neg": int((q < 0).sum()),
-                "L": loss(op, q), "r_best": r, "t_shift": shift,
+                "L": loss(op, q), "universal": sc, "transport": tp,
             }
             lab = "none" if st_ is None else f"{st_:g}"
             print(f"[{self.name}] sigma_t {lab:>7s} sum_q {rec['sum_q']:9.1f} "
@@ -404,7 +506,10 @@ class FFTInverseScan(_JsonRecorder):
                   f"|q-|/q+ {rec['neg_over_pos']:.3f}  q+/truth "
                   f"{rec['pos_over_truth']:.3f}  max q {rec['max_q']:.2f}  "
                   f"min q {rec['min_q']:.2f}  L {rec['L']:.3g}  "
-                  f"r {r:+.3f}@{shift:+d}")
+                  f"U r {sc['pearson_r']:+.4f} slope {sc['slope']:+.4f} "
+                  f"int% {sc['integral_pct']:+.2f} | nnz+ {tp['nnz_pos']:6d} "
+                  f"core {tp['q_on_truth']:8.1f}/{tp['truth_on_core']:.1f} "
+                  f"ring1 {tp['q_ring1']:7.1f} out {tp['q_outside']:7.1f}")
             out.append(rec)
         self._emit(store, {"truth_on_grid": T, "sum_d": float(op.d.sum()),
                            "kernel_dc_gain": float(kern.sum()),

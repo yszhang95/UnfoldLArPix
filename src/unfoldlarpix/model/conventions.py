@@ -48,6 +48,28 @@ def solver_time_shift(adc_hold_delay: int) -> int:
     return -adc_hold_delay + adc_hold_delay // 2
 
 
+def reco_bin_centers(b_offset_t: float, n_bins: int, adc_hold_delay: int,
+                     convention: str | None = None):
+    """Absolute fine-tick instant of each written charge bin.
+
+    The ONE place this formula lives.  ``eval/universal.py`` computes the same
+    thing inline (``centers = b_off[2] + (arange + half) * B``); anything else
+    that needs a reco bin's physical time must call this rather than re-derive
+    it -- comparing ``deconv_q`` by ARRAY INDEX against a separately gridded
+    truth drops the declaration entirely and produces a spurious one-bin
+    offset, which is then easily mistaken for an anticorrelation.
+
+    ``convention`` defaults to :data:`TIME_CONVENTION`; pass the file's own
+    ``time_convention`` marker when reading an archived result (absent marker
+    = the legacy half-bin declaration).
+    """
+    import numpy as _np
+    conv = TIME_CONVENTION if convention is None else str(convention)
+    half = 0.0 if conv == "release_point" else 0.5
+    B = float(int(adc_hold_delay))
+    return float(b_offset_t) + (_np.arange(int(n_bins)) + half) * B
+
+
 def burst_tau_min(readout_config) -> int:
     """Physical floor [ticks] for the burst-merge gap ``tau``.
 
