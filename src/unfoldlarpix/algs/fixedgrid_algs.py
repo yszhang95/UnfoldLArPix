@@ -169,6 +169,43 @@ def _grow(mask: np.ndarray) -> np.ndarray:
     return g
 
 
+def voxel_stats(q: np.ndarray, cut: float = 0.5,
+                tops=(100, 1000, 10000)) -> dict:
+    """Per-voxel structure of a reconstruction.  All charges in ke.
+
+    A big ``sum q-`` is not the same thing as a big negative VOXEL: at the
+    1.6 us / 0.318 px filter the isoline inverse sums to -591 ke over 1.86M
+    voxels averaging -0.32 electrons each, and not one voxel is below
+    -0.5 ke -- the adopted eval (cut 0.5 ke) never sees any of it.  These
+    columns are what separate "diffuse dust" from "a real negative lobe".
+    """
+    q = np.asarray(q)
+    pos, neg = q[q > 0], q[q < 0]
+    out = {
+        "n_voxels": int(q.size),
+        "n_pos": int(pos.size), "n_neg": int(neg.size),
+        "max_q_per_voxel": float(q.max()), "min_q_per_voxel": float(q.min()),
+        "mean_pos_ke": float(pos.mean()) if pos.size else 0.0,
+        "mean_neg_ke": float(neg.mean()) if neg.size else 0.0,
+        "mean_pos_e": float(pos.mean() * 1e3) if pos.size else 0.0,
+        "mean_neg_e": float(neg.mean() * 1e3) if neg.size else 0.0,
+        "n_above_cut": int((q > cut).sum()),
+        "sum_above_cut": float(q[q > cut].sum()),
+        "n_below_negcut": int((q < -cut).sum()),
+        "sum_below_negcut": float(q[q < -cut].sum()),
+        "cut": cut,
+    }
+    if pos.size:
+        cp = np.cumsum(np.sort(pos)[::-1])
+        out["conc_pos"] = {str(n): float(cp[min(n, pos.size) - 1] / pos.sum())
+                           for n in tops}
+    if neg.size:
+        cn = np.cumsum(np.sort(neg))
+        out["conc_neg"] = {str(n): float(cn[min(n, neg.size) - 1] / neg.sum())
+                           for n in tops}
+    return out
+
+
 def transport_profile(tru: np.ndarray, reco: np.ndarray, cut: float = 0.5,
                       n_rings: int = 3) -> dict:
     """Where an estimator puts its charge relative to the TRUTH's voxels.
@@ -221,27 +258,41 @@ def block_from_rows(op) -> np.ndarray:
 
 
 class _JsonRecorder(Algorithm):
-    """Accumulate per-event records, dump to ``out`` at finalize."""
+    """Accumulate per-event records, dump to ``out`` at finalize.
+
+    The file carries its own recipe: ``job_config`` is the resolved YAML the
+    runner ran (including its ``_meta.git`` commit) and ``provenance`` is the
+    store's write log, so a result can always be replayed and audited without
+    the surrounding shell history.
+    """
 
     def initialize(self, services):
         super().initialize(services)
         self._records: list[dict] = []
+        self._recipe: dict = {}
         self.out_path = self.props.get("out")
 
     def _emit(self, store, rec):
         self.put(store, self.writes[0], rec)
         self._records.append(rec)
+        if not self._recipe:
+            try:
+                self._recipe = {"job_config": store.get("job.config"),
+                                "provenance": store.provenance()}
+            except Exception as exc:
+                self._recipe = {"job_config_error": str(exc)}
 
     def finalize(self):
         if not self._records:
             return {}
+        body = (self._records[0] if len(self._records) == 1
+                else {"events": self._records})
         if self.out_path:
             with open(self.out_path, "w") as fh:
-                json.dump(self._records if len(self._records) > 1
-                          else self._records[0], fh, indent=1)
+                json.dump({"algorithm": self.name, "result": body,
+                           **self._recipe}, fh, indent=1, default=str)
             print(f"[{self.name}] wrote {self.out_path}")
-        return (self._records[0] if len(self._records) == 1
-                else {"events": self._records})
+        return body
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +459,7 @@ class EstimatorScan(_JsonRecorder):
                                                prox, q0.q)
             q = q.detach().cpu().numpy().astype(np.float64)
             sc = score_universal(store, op, q); tp = sc.pop("transport")
+            vs = voxel_stats(q)
             rec = {
                 "label": spec.get("label", f"alpha={alpha}"),
                 "alpha": alpha, "positivity": pos, "gain_cut": gcut,
@@ -423,6 +475,7 @@ class EstimatorScan(_JsonRecorder):
                 "max_q": float(q.max()), "min_q": float(q.min()),
                 "n_pos": int((q > 0).sum()), "n_neg": int((q < 0).sum()),
                 "L": loss(op, q), "universal": sc, "transport": tp,
+                "voxels": vs,
             }
             print(f"[{self.name}] {rec['label']:28s} sum_q {rec['sum_q']:10.1f} "
                   f"({rec['ratio_q']:.4f}x)  q+ {rec['sum_q_pos']:9.1f}  "
@@ -431,7 +484,12 @@ class EstimatorScan(_JsonRecorder):
                   f"{sc['slope']:+.4f} int% {sc['integral_pct']:+.2f} "
                   f"ghostQ {sc['ghost_charge']:8.1f} killed {sc['true_killed']:7.1f}"
                   f" | core {tp['q_on_truth']:8.1f}/{tp['truth_on_core']:.1f} "
-                  f"ring1 {tp['q_ring1']:7.1f} out {tp['q_outside']:7.1f}")
+                  f"ring1 {tp['q_ring1']:7.1f} out {tp['q_outside']:7.1f}\n"
+                  f"{'':>20s}   per-voxel: max {vs['max_q_per_voxel']:+8.3f} "
+                  f"min {vs['min_q_per_voxel']:+8.3f} ke | mean+ {vs['mean_pos_e']:+7.2f} e "
+                  f"mean- {vs['mean_neg_e']:+7.2f} e | >0.5ke {vs['n_above_cut']:6d} vox "
+                  f"{vs['sum_above_cut']:8.1f} ke   <-0.5ke {vs['n_below_negcut']:6d} vox "
+                  f"{vs['sum_below_negcut']:7.1f} ke")
             arms.append(rec)
             del q
             torch.cuda.empty_cache()
@@ -451,11 +509,17 @@ class FFTInverseScan(_JsonRecorder):
 
     Props
     -----
-    sigmas_time : list
-        Frequency-domain widths; ``null`` entry = unfiltered.  The
-        time-domain width is ``1/(2 pi sigma_t)`` fine ticks and is reported.
-    sigma_pixel : float
-        Spatial filter width (default 0.2, the shipped value).
+    filters : list of dict, optional
+        Explicit ``{sigma_time, sigma_pixel}`` pairs; ``sigma_time: null`` =
+        unfiltered.  Falls back to ``sigmas_time`` x scalar ``sigma_pixel``.
+        Both are FREQUENCY-domain widths: the real-space width is
+        ``1/(2 pi sigma)`` -- 0.005 -> 31.8 fine ticks = 1.59 us, and
+        0.5 / 0.2 / 0.1 -> 0.318 / 0.796 / 1.592 pixels.  Reported per row.
+
+        NOTE any non-null filter DOUBLE-SMEARS against the adopted eval:
+        universal_rebin already deposits the sharp charge as a gaussian at
+        sigma_time 0.005 / sigma_pxl 0.5.  The reco-side columns (q+, q-,
+        nnz, max/min) are unaffected; the ``universal`` block is not.
     out : str, optional
     """
 
@@ -472,10 +536,16 @@ class FFTInverseScan(_JsonRecorder):
         prep = self.services["detector"].prepared(int(round(B)))
         kern = torch.as_tensor(prep.integrated_response, dtype=op.dtype,
                                device=op.device)
-        sig_p = float(self.props.get("sigma_pixel", 0.2))
         nt = op.q_shape[2]
+        specs = self.props.get("filters")
+        if specs is None:
+            sp = float(self.props.get("sigma_pixel", 0.2))
+            specs = [{"sigma_time": t, "sigma_pixel": sp}
+                     for t in self.props.get("sigmas_time", [None, 0.005])]
         out = []
-        for st_ in self.props.get("sigmas_time", [None, 0.005]):
+        for spec in specs:
+            st_ = spec.get("sigma_time")
+            sig_p = float(spec.get("sigma_pixel", 0.2))
             filt = None
             if st_ is not None:
                 filt = gaussian_filter_3d_torch(
@@ -485,12 +555,16 @@ class FFTInverseScan(_JsonRecorder):
             q = deconv_fft_torch(blk, kern, filt).detach().cpu().numpy()
             q = q.astype(np.float64)[:, :, :nt]
             sc = score_universal(store, op, q); tp = sc.pop("transport")
+            vs = voxel_stats(q)
             pos, neg = float(q[q > 0].sum()), float(q[q < 0].sum())
             rec = {
                 "sigma_time": st_,
                 "time_width_ticks": (None if st_ is None
                                      else float(1.0 / (2 * np.pi * st_))),
                 "sigma_pixel": sig_p,
+                "pixel_width_px": (None if not sig_p
+                                   else float(1.0 / (2 * np.pi * sig_p))),
+                "double_smeared": st_ is not None,
                 "sum_q": float(q.sum()), "ratio_q": float(q.sum() / T),
                 "sum_q_pos": pos, "sum_q_neg": neg,
                 "neg_over_pos": float(abs(neg) / max(pos, 1e-12)),
@@ -499,9 +573,11 @@ class FFTInverseScan(_JsonRecorder):
                 "max_q": float(q.max()), "min_q": float(q.min()),
                 "n_pos": int((q > 0).sum()), "n_neg": int((q < 0).sum()),
                 "L": loss(op, q), "universal": sc, "transport": tp,
+                "voxels": vs,
             }
-            lab = "none" if st_ is None else f"{st_:g}"
-            print(f"[{self.name}] sigma_t {lab:>7s} sum_q {rec['sum_q']:9.1f} "
+            lab = ("none" if st_ is None
+                   else f"{st_:g}/{sig_p:g}")
+            print(f"[{self.name}] sig t/px {lab:>9s} sum_q {rec['sum_q']:9.1f} "
                   f"({rec['ratio_q']:.4f}x)  q+ {pos:9.1f}  q- {neg:10.1f}  "
                   f"|q-|/q+ {rec['neg_over_pos']:.3f}  q+/truth "
                   f"{rec['pos_over_truth']:.3f}  max q {rec['max_q']:.2f}  "
@@ -509,7 +585,12 @@ class FFTInverseScan(_JsonRecorder):
                   f"U r {sc['pearson_r']:+.4f} slope {sc['slope']:+.4f} "
                   f"int% {sc['integral_pct']:+.2f} | nnz+ {tp['nnz_pos']:6d} "
                   f"core {tp['q_on_truth']:8.1f}/{tp['truth_on_core']:.1f} "
-                  f"ring1 {tp['q_ring1']:7.1f} out {tp['q_outside']:7.1f}")
+                  f"ring1 {tp['q_ring1']:7.1f} out {tp['q_outside']:7.1f}\n"
+                  f"{'':>20s}   per-voxel: max {vs['max_q_per_voxel']:+8.3f} "
+                  f"min {vs['min_q_per_voxel']:+8.3f} ke | mean+ {vs['mean_pos_e']:+7.2f} e "
+                  f"mean- {vs['mean_neg_e']:+7.2f} e | >0.5ke {vs['n_above_cut']:6d} vox "
+                  f"{vs['sum_above_cut']:8.1f} ke   <-0.5ke {vs['n_below_negcut']:6d} vox "
+                  f"{vs['sum_below_negcut']:7.1f} ke")
             out.append(rec)
         self._emit(store, {"truth_on_grid": T, "sum_d": float(op.d.sum()),
                            "kernel_dc_gain": float(kern.sum()),
