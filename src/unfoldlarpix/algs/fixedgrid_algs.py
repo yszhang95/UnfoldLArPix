@@ -845,6 +845,25 @@ class LifetimeFit(_JsonRecorder):
         l1 (1.3077 -> 1.1290): l1 bites a fraction of the amplitude, and the
         amplitude at a given depth differs between the two lifetimes, so an
         l1 bias does not transfer.  Do not cut unfolded charge before this.
+    capture_from_response : dict, optional
+        ``{path, bin_ticks, tick_us, velocity_cm_per_us}`` -- the ANALYTIC
+        acceptance, from the response file itself.  The response is tabulated
+        from a fixed drift length (30.431 cm for the 44_v2a set), so a charge
+        born at depth d traverses only the last ``d / (v * bin)`` kernel bins
+        and, by Ramo, induces only ``tail(d) / sum(K)`` of its ionisation
+        charge -- the earlier drift never happened, so the shortfall is
+        physics, not a reconstruction failure.  Measured tail fractions
+        0.8293 / 0.9141 / 0.9643 / 0.9866 / 0.9962 at d = 4.5 .. 16.5 cm
+        against a measured LS acceptance of 0.8570 / 0.9314 / 0.9718 /
+        0.9901 / 0.9970 (ratio 0.968 -> 0.999).
+
+        This is the OPERATOR's acceptance.  A linear estimator inherits it
+        exactly (``sum q = sum d / sum K``), so the analytic curve applies.  A
+        nonlinear estimator (positivity, l1) has its own amplitude-dependent
+        bias on top, which no kernel integral can predict -- use
+        ``capture_curve_from`` there, and note that a fixed l1 does not even
+        transfer between lifetimes.  Applying both is an error; the two are
+        alternatives.
     tau_true_ms : float, optional
         Simulated lifetime, for the pull.
     velocity_cm_per_us : float
@@ -890,8 +909,48 @@ class LifetimeFit(_JsonRecorder):
         if truth:
             series = {"TRUTH (control)": truth, **series}
 
+        resp_spec = self.props.get("capture_from_response")
         cap_path = self.props.get("capture_curve_from")
+        if resp_spec and cap_path:
+            raise ValueError("capture_from_response and capture_curve_from are "
+                             "alternatives -- applying both double-corrects")
         capture = {}
+        if resp_spec:
+            from ..deconv_workflow import prepare_field_response
+            B = int(resp_spec.get("bin_ticks", 30))
+            tick_us = float(resp_spec.get("tick_us", 0.05))
+            vv = float(resp_spec.get("velocity_cm_per_us", v))
+            prep = prepare_field_response(resp_spec["path"], B,
+                                          normalized=False, start_tick=0)
+            prof = np.asarray(prep.integrated_response).sum(axis=(0, 1))
+            kt = prof.size
+            tail = np.cumsum(prof[::-1])[::-1] / prof.sum()
+            # cm per kernel bin: take it from the response's OWN drift_length
+            # if the file carries one.  A nominal velocity times the bin width
+            # gives 0.2400 cm/bin here against the file's 30.431/130 =
+            # 0.2341, and that 2.5% stretch alone over-corrects lambda by
+            # +0.20 /ms -- the mapping has to be self-consistent.
+            span = resp_spec.get("drift_length_cm")
+            if span is None:
+                try:
+                    span = float(np.squeeze(
+                        np.load(resp_spec["path"])["drift_length"]))
+                except Exception:
+                    span = None
+            cm_per_bin = (float(span) / kt if span else vv * B * tick_us)
+            depths = sorted({d for pts in series.values() for d in pts})
+            # fractional bin index, linearly interpolated -- rounding to whole
+            # bins leaves a ~3% residual at the shallow end
+            idx = np.clip(kt - np.asarray(depths) / cm_per_bin, 0, kt - 1)
+            frac = np.interp(idx, np.arange(kt), tail)
+            cap = dict(zip(depths, frac / frac[-1]))
+            # NOT the truth: effq is the ionisation charge and carries no
+            # acceptance loss.  Correcting it would fake a second decay.
+            capture = {lab: cap for lab in series
+                       if lab != "TRUTH (control)"}
+            print(f"[{self.name}] analytic capture from {resp_spec['path']} "
+                  f"({kt} bins, {cm_per_bin:.4f} cm/bin): " +
+                  " ".join(f"{cap[d]:.4f}" for d in depths))
         if cap_path:
             with open(cap_path) as fh:
                 ref = json.load(fh).get("result", {}).get("fits", {})
@@ -905,13 +964,14 @@ class LifetimeFit(_JsonRecorder):
                               if d in tmap])
                 if c.size:
                     capture[lab] = dict(zip(cd, c / c[-1]))
-            for lab, pts in series.items():
-                cap = capture.get(lab)
-                if cap:
-                    series[lab] = {d: q / cap[d] for d, q in pts.items()
-                                   if d in cap}
             print(f"[{self.name}] capture curve from {cap_path} "
-                  f"divided out for {len(capture)} series")
+                  f"measured for {len(capture)} series")
+        # ONE division point, whichever branch built the curve
+        for lab, pts in series.items():
+            cap = capture.get(lab)
+            if cap:
+                series[lab] = {d: q / cap[d] for d, q in pts.items()
+                               if d in cap}
 
         def fit(pts):
             d = np.array(sorted(pts))
@@ -958,4 +1018,261 @@ class LifetimeFit(_JsonRecorder):
                   f"{f['lambda_err']:8.4f} {tau:9.3f} {f['q0_ke']:9.1f} "
                   f"{f['rms_resid_lnq']:8.5f} {f['n_depths']:3d}"
                   + (f"   pull {f['pull']:+6.2f}" if tau_true else ""))
+        self._emit(store, rec)
+
+
+# ---------------------------------------------------------------------------
+@algorithm("SegmentChargeProfile")
+class SegmentChargeProfile(_JsonRecorder):
+    """dQ/dx segment by segment along the track, per estimator.
+
+    The track axis is a pixel axis (axis 1 for the isoline, which runs along
+    z).  A segment is ``segment_pixels`` consecutive pixels on that axis; its
+    charge is the sum over the WHOLE transverse extent and the WHOLE time
+    axis, so the analysis smearing and the time-domain ringing are integrated
+    out inside the segment and no truth smearing is needed to compare.  What
+    survives is longitudinal charge movement -- charge an estimator has moved
+    from one segment to another -- which is exactly the local quantity a
+    dQ/dx or a per-segment lifetime fit is sensitive to and a total-charge
+    number cannot see.
+
+    ``dx`` is ``segment_pixels * pitch`` exactly: the isoline runs along the
+    pixel axis, so there is no track-angle correction.
+
+    Props
+    -----
+    arms : list of dict
+        Solver arms ``{label, alpha, positivity, support, iters}`` as in
+        :class:`EstimatorScan`, and/or FFT arms
+        ``{label, type: fft, sigma_time, sigma_pixel}``.
+    track_axis : int
+        Pixel axis the track runs along (default 1).
+    segment_pixels : int
+        Pixels per segment (default 5 -> 2.217 cm at a 0.4434 cm pitch).
+    trim_pixels : int
+        Pixels dropped at each end of the TRUTH's own extent.  The isoline
+        reaches the TPC border on one side (its first pixel is index 0 of
+        140), where the induced-charge response has no neighbours to spread
+        onto; those pixels are not representative.  Default 3.
+    pitch_cm : float
+        Default 0.4434.
+    out : str, optional
+    """
+
+    reads = ("op", "support", "event", "readout_config", "block_offset")
+    writes = ("fixedgrid.segments",)
+
+    def execute(self, store):
+        op = store.get("op")
+        qg = grid_truth(store, op)
+        ax = int(self.props.get("track_axis", 1))
+        npx = int(self.props.get("segment_pixels", 5))
+        trim = int(self.props.get("trim_pixels", 3))
+        pitch = float(self.props.get("pitch_cm", 0.4434))
+        boff = np.asarray(store.get("block_offset"), dtype=float)
+
+        # the truth's own extent on the track axis, trimmed
+        occ = np.nonzero(qg.sum(axis=tuple(i for i in range(3) if i != ax))
+                         > 0.01)[0]
+        lo, hi = int(occ.min()) + trim, int(occ.max()) - trim
+        edges = list(range(lo, hi + 1, npx))
+        if len(edges) > 1 and edges[-1] + npx > hi + 1:
+            edges = edges[:-1]
+
+        def seg_sums(a):
+            out = []
+            for e in edges:
+                sl = [slice(None)] * 3
+                sl[ax] = slice(e, e + npx)
+                out.append(float(a[tuple(sl)].sum()))
+            return np.asarray(out)
+
+        tq = seg_sums(qg)
+        dx = npx * pitch
+        rec = {"track_axis": ax, "segment_pixels": npx, "dx_cm": dx,
+               "trim_pixels": trim, "pitch_cm": pitch,
+               "n_segments": len(edges),
+               "segment_first_pixel_abs": [int(boff[ax]) + e for e in edges],
+               "truth_q_ke": [float(x) for x in tq],
+               "truth_dqdx_ke_per_cm": [float(x / dx) for x in tq],
+               "arms": []}
+        print(f"[{self.name}] {len(edges)} segments of {npx} px = {dx:.3f} cm "
+              f"(track pixels {lo}..{hi + 1}, trim {trim}); "
+              f"truth dQ/dx mean {tq.mean() / dx:.2f} ke/cm")
+
+        prep = None
+        for spec in self.props.get("arms", []):
+            if str(spec.get("type", "solve")) == "fft":
+                if prep is None:
+                    prep = self.services["detector"].prepared(
+                        int(round(fit_bin_ticks(store))))
+                kern = torch.as_tensor(prep.integrated_response,
+                                       dtype=op.dtype, device=op.device)
+                blk = op.to_tensor(block_from_rows(op))
+                bs = tuple(blk.shape)
+                st_ = spec.get("sigma_time")
+                sp = float(spec.get("sigma_pixel", 0.5))
+                filt = None
+                if st_ is not None:
+                    filt = gaussian_filter_3d_torch(
+                        (bs[0] + kern.shape[0] - 1, bs[1] + kern.shape[1] - 1,
+                         bs[2]), dt=(1, 1, fit_bin_ticks(store)),
+                        sigma=(sp, sp, float(st_)),
+                        device=op.device, dtype=op.dtype)
+                q = deconv_fft_torch(blk, kern, filt).detach().cpu().numpy()
+                q = q.astype(np.float64)[:, :, :op.q_shape[2]]
+            else:
+                supp = resolve_support(store, op, spec.get("support"),
+                                       spec.get("gain_cut"))
+                q = solve_arm(op, supp, spec.get("alpha", 0.0),
+                              bool(spec.get("positivity", True)),
+                              int(spec.get("iters", 3000)))
+            sq = seg_sums(q)
+            good = tq > 0.01
+            ratio = np.where(good, sq / np.where(good, tq, 1.0), np.nan)
+            a = {"label": spec.get("label", "?"),
+                 "spec": {k: v for k, v in spec.items() if k != "label"},
+                 "sum_q_all_ke": float(q.sum()),
+                 "segment_q_ke": [float(x) for x in sq],
+                 "segment_dqdx_ke_per_cm": [float(x / dx) for x in sq],
+                 "segment_ratio": [None if np.isnan(r) else float(r)
+                                   for r in ratio],
+                 "segment_q_total_ke": float(sq.sum()),
+                 "ratio_mean": float(np.nanmean(ratio)),
+                 "ratio_sd": float(np.nanstd(ratio, ddof=1)),
+                 "dqdx_mean": float(sq.mean() / dx),
+                 "dqdx_sd": float(sq.std(ddof=1) / dx),
+                 "dqdx_sem": float(sq.std(ddof=1) / dx / np.sqrt(len(sq)))}
+            rec["arms"].append(a)
+            print(f"[{self.name}]   {a['label']:24s} dQ/dx {a['dqdx_mean']:8.3f} "
+                  f"+- {a['dqdx_sd']:6.3f} (sem {a['dqdx_sem']:.3f}) ke/cm   "
+                  f"seg ratio {a['ratio_mean']:.4f} +- {a['ratio_sd']:.4f}   "
+                  f"in-seg/all {a['segment_q_total_ke'] / max(a['sum_q_all_ke'], 1e-9):.4f}")
+            del q
+            torch.cuda.empty_cache()
+        self._emit(store, rec)
+
+
+@algorithm("SegmentLifetimeFit")
+class SegmentLifetimeFit(_JsonRecorder):
+    """Decay rate from the SEGMENT-level dQ/dx across a depth ladder.
+
+    Two independent readings, both with real errors and no capture curve:
+
+    ``pooled``   per depth take the mean dQ/dx over segments, then a straight
+        line through ``ln dQ/dx`` against drift time.  The quoted error is
+        from the FIT RESIDUAL, which is the only meaningful one here: this
+        sample is fluctuation-free by construction, so the segment-to-segment
+        standard error collapses to ~1e-4 and a fit weighted by it returns an
+        absurd error with chi2/dof in the tens of thousands.  That
+        SEM-weighted variant is still reported (``sem_weighted_*``) as a
+        DIAGNOSTIC: a large chi2 there says the depth points do not lie on an
+        exponential to within the segment spread, i.e. the estimator's depth
+        dependence is not smooth.
+    ``per_segment``  fit each segment separately and report the mean and
+        spread of the resulting lambdas.  A segment-to-segment spread larger
+        than the individual errors means the estimator's bias is position
+        dependent -- local charge movement -- which the pooled fit hides.
+
+    Props: ``inputs`` (``{depth_cm, json}``), ``exclude_depths``,
+    ``tau_true_ms``, ``velocity_cm_per_us``, ``out``.
+    """
+
+    reads = ()
+    writes = ("lifetime.segments",)
+
+    def execute(self, store):
+        v = float(self.props.get("velocity_cm_per_us",
+                                 DRIFT_VELOCITY_CM_PER_US))
+        drop = {float(x) for x in self.props.get("exclude_depths", [])}
+        tau_true = self.props.get("tau_true_ms")
+        per_depth = {}
+        for item in self.props.get("inputs", []):
+            d = float(item["depth_cm"])
+            if d in drop:
+                continue
+            with open(item["json"]) as fh:
+                res = json.load(fh).get("result", {})
+            row = {"TRUTH": np.asarray(res["truth_dqdx_ke_per_cm"], float)}
+            for a in res.get("arms", []):
+                row[a["label"]] = np.asarray(a["segment_dqdx_ke_per_cm"], float)
+            per_depth[d] = row
+        depths = np.array(sorted(per_depth))
+        t = (depths / v) * 1e-3
+        labels = list(per_depth[depths[0]])
+        nseg = min(len(per_depth[d][labels[0]]) for d in depths)
+
+        def wfit(x, y, sy):
+            w = 1.0 / np.maximum(sy, 1e-12) ** 2
+            S, Sx, Sy = w.sum(), (w * x).sum(), (w * y).sum()
+            Sxx, Sxy = (w * x * x).sum(), (w * x * y).sum()
+            det = S * Sxx - Sx * Sx
+            if abs(det) < 1e-30:
+                return float("nan"), float("nan"), float("nan")
+            b = (S * Sxy - Sx * Sy) / det
+            a0 = (Sy - b * Sx) / S
+            r = y - (a0 + b * x)
+            chi2 = float((w * r * r).sum())
+            return -float(b), float(np.sqrt(S / det)), chi2 / max(len(x) - 2, 1)
+
+        rec = {"velocity_cm_per_us": v, "tau_true_ms": tau_true,
+               "depths_cm": [float(x) for x in depths],
+               "n_segments": int(nseg), "fits": {}}
+        hdr = (f"{'estimator':24s} {'pooled lambda':>16s} {'rms lnQ':>8s} "
+               f"{'semChi2':>9s} | {'per-seg mean':>13s} {'seg SD':>8s} {'n':>3s}")
+        print(f"[{self.name}] " + hdr)
+        for lab in labels:
+            M = np.array([per_depth[d][lab][:nseg] for d in depths])   # (nd, nseg)
+            if np.any(M <= 0):
+                bad = int((M <= 0).sum())
+            else:
+                bad = 0
+            mean = M.mean(axis=1)
+            sem = M.std(axis=1, ddof=1) / np.sqrt(nseg)
+            ok = mean > 0
+            lam_w, err_w, chi2_w = wfit(t[ok], np.log(mean[ok]),
+                                        sem[ok] / mean[ok])
+            # residual-based error: the meaningful one on a fluctuation-free
+            # sample.  Unweighted least squares, error from the scatter of the
+            # depth points about the line.
+            xx, yy = t[ok], np.log(mean[ok])
+            design = np.vstack([xx, np.ones_like(xx)]).T   # NOT M: M is the data
+            coef, *_ = np.linalg.lstsq(design, yy, rcond=None)
+            resid = yy - design @ coef
+            dof = max(len(yy) - 2, 1)
+            s2 = float((resid ** 2).sum() / dof)
+            cov = s2 * np.linalg.inv(design.T @ design)
+            lam, err = -float(coef[0]), float(np.sqrt(cov[0, 0]))
+            rms_resid = float(np.sqrt(s2))
+            lams = []
+            for s in range(nseg):
+                col = M[:, s]
+                if np.all(col > 0):
+                    l_, _, _ = wfit(t, np.log(col), np.full(t.shape, 1.0))
+                    lams.append(l_)
+            lams = np.asarray(lams)
+            f = {"pooled_lambda_per_ms": lam, "pooled_lambda_err": err,
+                 "pooled_rms_resid_lnq": rms_resid,
+                 "sem_weighted_lambda": lam_w, "sem_weighted_err": err_w,
+                 "sem_weighted_chi2_per_dof": chi2_w,
+                 "dqdx_mean_per_depth": [float(x) for x in mean],
+                 "dqdx_sem_per_depth": [float(x) for x in sem],
+                 "n_nonpositive_segments": bad,
+                 "per_segment_lambda_mean": float(lams.mean()) if lams.size else None,
+                 "per_segment_lambda_sd": float(lams.std(ddof=1)) if lams.size > 1 else None,
+                 "per_segment_lambda_sem": (float(lams.std(ddof=1) / np.sqrt(lams.size))
+                                            if lams.size > 1 else None),
+                 "n_segments_fitted": int(lams.size),
+                 "per_segment_lambda": [float(x) for x in lams]}
+            if tau_true:
+                f["lambda_true"] = 1.0 / float(tau_true)
+                f["pooled_pull"] = (lam - f["lambda_true"]) / max(err, 1e-12)
+            rec["fits"][lab] = f
+            print(f"[{self.name}] {lab:24s} {lam:9.4f}+-{err:<6.4f} "
+                  f"{rms_resid:8.5f} {chi2_w:9.0f} | "
+                  f"{(f['per_segment_lambda_mean'] or float('nan')):13.4f} "
+                  f"{(f['per_segment_lambda_sd'] or float('nan')):8.4f} "
+                  f"{lams.size:3d}"
+                  + (f"  pull {f['pooled_pull']:+6.2f}" if tau_true else "")
+                  + (f"  [{bad} non-positive segs]" if bad else ""))
         self._emit(store, rec)
