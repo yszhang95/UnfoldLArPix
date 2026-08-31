@@ -60,7 +60,8 @@ def fit_bin_ticks(store) -> float:
     return float(int(rc.adc_hold_delay)) / S
 
 
-def grid_truth(store, op, mode: str = "round") -> np.ndarray:
+def grid_truth(store, op, mode: str = "round",
+               shift_ticks: float = 0.0) -> np.ndarray:
     """effq summed onto the operator's own charge grid (same frame as ``d``).
 
     FOR OPERATOR INPUT ONLY -- this is the true charge to push through ``A``
@@ -68,6 +69,25 @@ def grid_truth(store, op, mode: str = "round") -> np.ndarray:
     NEVER use it to score a reconstruction: the analysis filter smears the
     reco, and comparing a smeared reco against an unsmeared truth is the
     one-sided smearing that fakes the slope.  Use :func:`score_universal`.
+
+    ``shift_ticks`` shifts the effq arrival before binning.  It exists
+    because the FIELD-RESPONSE-to-TRUTH alignment is an ASSUMPTION, not a
+    measurement.  What this campaign aligned exactly is the readout windows
+    to the fit-bin EDGES (the sampling matrix becomes a selection).  Where
+    the response places a charge in time relative to where effq says it was
+    is a separate question with nothing in the setup to settle it.
+
+    Measured sensitivity on isoline (dense, 30-tick fit bin, row scale
+    0.192 ke): the truth's row residual is 25.5% of scale at ``round`` with
+    zero shift, has a BROAD minimum of 23.2% at -4 ticks, and stays under
+    27% out to +8.  ``floor`` with zero shift gives 73.3% but reaches 24.1%
+    at +12 -- the two conventions differ by exactly the half bin and reach
+    the SAME achievable residual at their own optimum.  So the convention is
+    worth up to a factor three in the quoted number while the achievable
+    residual is ~23% either way, and the data pins the alignment only to
+    about +-6 ticks, a fifth of a bin.  At a 10-tick bin the achievable
+    residual is ~6% and the alignment tightens to +-2..4 ticks.  Quote the
+    residual as a floor, never as a calibrated number.
 
     ``mode="round"`` is the BIN-CENTRE deposit, the adopted eval protocol
     (decided 2026-08-16 on the criterion that slope must be unbiased); the
@@ -87,7 +107,7 @@ def grid_truth(store, op, mode: str = "round") -> np.ndarray:
     nx, ny, nt = op.q_shape
     ix = el[:, 0].astype(int) - int(boff[0])
     iy = el[:, 1].astype(int) - int(boff[1])
-    f = (el[:, 2] - boff[2]) / B
+    f = (el[:, 2] + float(shift_ticks) - boff[2]) / B
     it = (np.rint(f) if mode == "round" else np.floor(f)).astype(int)
     ok = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny) & (it >= 0) & (it < nt)
     qg = np.zeros(op.q_shape)
@@ -383,6 +403,15 @@ class FixedGridAudit(_JsonRecorder):
         JSON path for the record.
     gain_stride : int
         Stride for the printed per-time-bin gain profile (default 10).
+    truth_deposit : str
+        ``round`` (bin centre, adopted) or ``floor``.  Part of the FR-to-truth
+        ALIGNMENT ASSUMPTION -- see :func:`grid_truth`.
+    truth_shift_ticks : float
+        Shift applied to the effq arrival before binning (default 0).
+    align_scan : list, optional
+        Shifts to scan.  Each is refitted under BOTH deposit modes and the
+        row residual recorded, so the JSON carries how much of the quoted
+        residual is the assumption rather than the operator.
     """
 
     reads = ("event", "readout_config", "op", "block_offset")
@@ -398,7 +427,9 @@ class FixedGridAudit(_JsonRecorder):
         w = op._weights.cpu().numpy()
         per_row = np.bincount(rows, minlength=op.n_data)
 
-        qg = grid_truth(store, op)
+        mode = str(self.props.get("truth_deposit", "round"))
+        sh0 = float(self.props.get("truth_shift_ticks", 0.0))
+        qg = grid_truth(store, op, mode=mode, shift_ticks=sh0)
         Aqt = op.forward(op.to_tensor(qg)).detach()
         resid = (d - Aqt).cpu().numpy()
         row_scale = float(np.sqrt((d.cpu().numpy() ** 2).mean()))
@@ -424,8 +455,28 @@ class FixedGridAudit(_JsonRecorder):
         ct = c.max(axis=(0, 1))
         stride = int(self.props.get("gain_stride", 10))
 
+        scan = []
+        for sh in self.props.get("align_scan", []):
+            for md in ("round", "floor"):
+                g = grid_truth(store, op, mode=md, shift_ticks=float(sh))
+                rr = (d - op.forward(op.to_tensor(g)).detach()).cpu().numpy()
+                scan.append({"shift_ticks": float(sh), "deposit": md,
+                             "row_resid_rms": float(np.sqrt((rr ** 2).mean())),
+                             "row_resid_rel_pct": float(
+                                 100 * np.sqrt((rr ** 2).mean()) / row_scale),
+                             "L_qtruth": 0.5 * float((rr ** 2).sum())})
+        if scan:
+            b = min(scan, key=lambda r: r["row_resid_rms"])
+            print(f"[{self.name}] alignment scan: best "
+                  f"{b['deposit']}@{b['shift_ticks']:+.0f}tk -> "
+                  f"{b['row_resid_rel_pct']:.1f}% of scale, vs "
+                  f"{mode}@{sh0:+.0f}tk -> {100 * row_rms / row_scale:.1f}%"
+                  "   (FR-to-truth alignment is an assumption, not a fit)")
+
         rec = {
             "rows": int(op.n_data),
+            "truth_deposit": mode, "truth_shift_ticks": sh0,
+            "alignment_scan": scan,
             "block_shape": [int(s) for s in op.block_shape],
             "q_shape": [int(s) for s in op.q_shape],
             "kernel_bins": int(op.block_shape[2] - op.q_shape[2]),
