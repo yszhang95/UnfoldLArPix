@@ -206,6 +206,83 @@ def voxel_stats(q: np.ndarray, cut: float = 0.5,
     return out
 
 
+class _SupportProx:
+    """Support mask only -- no positivity, no l1."""
+
+    def __init__(self, support):
+        self.support = support
+        self.alpha = 0.0
+
+    def __call__(self, v, step):
+        return v * self.support
+
+
+def resolve_support(store, op, spec=None, gain_cut=None) -> np.ndarray:
+    """Support mask from a spec string.
+
+    ``"none"``      the FULL charge grid -- no support at all;
+    ``"hits"``      whatever BuildSupport wrote (amplitude-blind, from hits);
+    ``"gain:F"``    the hits support AND ``c_v > F * max|c_v|``.
+
+    The gain form matters only when the prior is weak: ``c_v = A^T 1`` can be
+    NEGATIVE (the kernel is bipolar across neighbour pixels), and adding
+    POSITIVE charge on such a voxel LOWERS the prediction, so a nonneg solve
+    with alpha < 0.1 grows without bound there (measured full-domain, alpha=0:
+    2291x the truth, with 97% of it on c_v <= 0, while L still FALLS).  At
+    alpha >= 0.1 the l1 removes those directions by itself and the three
+    specs give identical answers -- the support is then only a compute saving.
+    """
+    if gain_cut is not None and spec is None:
+        spec = f"gain:{float(gain_cut)}"
+    spec = "hits" if spec is None else str(spec)
+    if spec == "none":
+        return np.ones(op.q_shape, dtype=bool)
+    base = np.asarray(store.get("support"))
+    if spec == "hits":
+        return base
+    if spec.startswith("gain:"):
+        c = op.measurement_gain().cpu().numpy()
+        return base & (c > float(spec.split(":", 1)[1]) * float(np.abs(c).max()))
+    raise ValueError(f"unknown support spec {spec!r} "
+                     "(want 'none', 'hits' or 'gain:<fraction>')")
+
+
+def solve_arm(op, support, alpha, positivity: bool, iters: int,
+              seed_cut: float = 0.5, soft_len: float = 2.0) -> np.ndarray:
+    """One estimator from q0 = 0.  ``positivity=False`` swaps the shipped
+    prox (which hard-wires q >= 0 even at alpha = 0) for a support-only one --
+    the only way to read the positivity bias apart from the l1 shrinkage."""
+    st = op.to_tensor(np.asarray(support).astype(np.float64))
+    q0 = SolveState(q=op.to_tensor(np.zeros(op.q_shape)))
+    if isinstance(alpha, (list, tuple)):
+        if not positivity:
+            raise ValueError("ladder arms are positivity-only")
+        lad = Ladder(alphas=list(alpha), seed_cut=seed_cut, soft_len=soft_len,
+                     n_iter=iters)
+        q = lad.run(Fista(n_iter=iters), op, [DataFidelity(op)], st, q0).q
+    else:
+        prox = (CoordProx(float(alpha), st) if positivity
+                else _SupportProx(st))
+        q = Fista(n_iter=iters).minimize(op, [DataFidelity(op)], prox, q0.q)
+    return q.detach().cpu().numpy().astype(np.float64)
+
+
+GAIN_BINS = ((-1e9, -0.01, "c<0"), (-0.01, 0.01, "c~0"), (0.01, 0.5, "c0-0.5"),
+             (0.5, 0.9, "c0.5-0.9"), (0.9, 1e9, "c>0.9"))
+
+
+def gain_breakdown(q: np.ndarray, c: np.ndarray, mask=None) -> dict:
+    """Charge per measurement-gain band -- where an unbounded arm parks it."""
+    cmax = float(np.abs(c).max())
+    m = np.ones(q.shape, bool) if mask is None else np.asarray(mask)
+    out = {}
+    for lo, hi, lab in GAIN_BINS:
+        sel = m & (c / cmax >= lo) & (c / cmax < hi)
+        out[lab] = {"n": int(sel.sum()), "q": float(q[sel].sum()),
+                    "n_active": int((q[sel] > 0.01).sum())}
+    return out
+
+
 def transport_profile(tru: np.ndarray, reco: np.ndarray, cut: float = 0.5,
                       n_rings: int = 3) -> dict:
     """Where an estimator puts its charge relative to the TRUTH's voxels.
@@ -392,17 +469,6 @@ class FixedGridAudit(_JsonRecorder):
 
 
 # ---------------------------------------------------------------------------
-class _SupportProx:
-    """Support mask only -- no positivity, no l1."""
-
-    def __init__(self, support):
-        self.support = support
-        self.alpha = 0.0
-
-    def __call__(self, v, step):
-        return v * self.support
-
-
 @algorithm("EstimatorScan")
 class EstimatorScan(_JsonRecorder):
     """Matched regularisation path: only the prior changes between arms.
@@ -427,11 +493,9 @@ class EstimatorScan(_JsonRecorder):
 
     def execute(self, store):
         op = store.get("op")
-        base = np.asarray(store.get("support"))
         qg = grid_truth(store, op)
         T = float(qg.sum())
         c = op.measurement_gain().cpu().numpy()
-        cmax = float(np.abs(c).max())
         seed_cut = float(self.props.get("seed_cut", 0.5))
         soft_len = float(self.props.get("soft_len", 2.0))
 
@@ -441,29 +505,15 @@ class EstimatorScan(_JsonRecorder):
             pos = bool(spec.get("positivity", True))
             gcut = spec.get("gain_cut")
             nit = int(spec.get("iters", 6000))
-            supp = base if gcut is None else (base & (c > float(gcut) * cmax))
-            st = op.to_tensor(supp.astype(np.float64))
-            q0 = SolveState(q=op.to_tensor(np.zeros(op.q_shape)))
-            if isinstance(alpha, (list, tuple)):
-                if not pos:
-                    raise ValueError("ladder arms are positivity-only "
-                                     "(the ladder soft seed assumes q >= 0)")
-                lad = Ladder(alphas=list(alpha), seed_cut=seed_cut,
-                             soft_len=soft_len, n_iter=nit)
-                q = lad.run(Fista(n_iter=nit), op, [DataFidelity(op)],
-                            st, q0).q
-            else:
-                prox = (CoordProx(float(alpha), st) if pos
-                        else _SupportProx(st))
-                q = Fista(n_iter=nit).minimize(op, [DataFidelity(op)],
-                                               prox, q0.q)
-            q = q.detach().cpu().numpy().astype(np.float64)
+            supp = resolve_support(store, op, spec.get("support"), gcut)
+            q = solve_arm(op, supp, alpha, pos, nit, seed_cut, soft_len)
             sc = score_universal(store, op, q); tp = sc.pop("transport")
             vs = voxel_stats(q)
             rec = {
                 "label": spec.get("label", f"alpha={alpha}"),
                 "alpha": alpha, "positivity": pos, "gain_cut": gcut,
-                "iters": nit,
+                "support_spec": spec.get("support"), "iters": nit,
+                "gain_bands": gain_breakdown(q, c, supp),
                 "support": int(supp.sum()),
                 "rows_over_support": float(op.n_data / max(supp.sum(), 1)),
                 "sum_q": float(q.sum()), "ratio_q": float(q.sum() / T),
@@ -595,3 +645,153 @@ class FFTInverseScan(_JsonRecorder):
         self._emit(store, {"truth_on_grid": T, "sum_d": float(op.d.sum()),
                            "kernel_dc_gain": float(kern.sum()),
                            "filters": out})
+
+
+# ---------------------------------------------------------------------------
+@algorithm("PriorAnatomy")
+class PriorAnatomy(_JsonRecorder):
+    """WHERE a prior moves charge, against a reference estimator.
+
+    Solves a reference arm (normally the unconstrained least squares) and one
+    or more probe arms on the same operator, then decomposes
+    ``D = q_probe - q_reference`` four ways.  Measured on the isoline dense
+    block for ``positivity`` against ``LS``:
+
+    ``by_ls_sign``   D lands on the voxels where the reference went NEGATIVE:
+        108.3% of the pull-up there, ``corr(D, -q_ref) = +0.993``.  Positivity
+        is not adding charge to the signal, it is filling in the ringing
+        troughs it is no longer allowed to represent.
+    ``by_truth``     104.1% of the pull-up is on voxels whose TRUTH is zero;
+        the 135 voxels holding the real charge each LOSE about 1 ke.
+    ``by_ring``      45.4% at Manhattan distance 1 from the truth, with a
+        second bump at d = 3 -- the ring profile alternates.
+    ``by_gain``      inside a gain-restricted support it is flat in ``c_v``
+        (100% in the 0.9-1.0 band).  Without that support the same
+        decomposition shows 97% on ``c_v <= 0``: a different mechanism, and
+        the reason a weak-prior nonneg solve needs a support at all.
+    ``profiles``     the time profile through the truth centroid ALTERNATES
+        sign bin to bin (-840, +246, -73, +23 ke for the reference; D is its
+        mirror image), while the transverse profile does NOT: positivity lays
+        a smooth skirt of 2526 ke -- 60% of the truth -- out to +-10 pixels
+        on a truth that is one pixel wide, because a positive charge on a
+        neighbour is the only positive-only surrogate for the negative charge
+        it was denied (the kernel's neighbour lobe is bipolar).  l1 removes
+        the skirt monotonically: 60% -> 21% -> 11% -> 0.8% at
+        alpha 0 / 0.1 / 0.3 / ladder.
+
+    Props: ``reference`` (an arm dict, default unconstrained LS on the given
+    support), ``arms`` (list, same schema as :class:`EstimatorScan`),
+    ``rings`` (default 4), ``profile_half`` (default 10 bins/pixels),
+    ``out``.
+    """
+
+    reads = ("op", "support", "event", "readout_config", "block_offset")
+    writes = ("fixedgrid.anatomy",)
+
+    def execute(self, store):
+        op = store.get("op")
+        qg = grid_truth(store, op)
+        c = op.measurement_gain().cpu().numpy()
+        n_rings = int(self.props.get("rings", 4))
+        half = int(self.props.get("profile_half", 10))
+        ref_spec = dict(self.props.get(
+            "reference", {"label": "LS (no positivity)", "alpha": 0.0,
+                          "positivity": False, "support": "gain:0.5",
+                          "iters": 3000}))
+        supp_ref = resolve_support(store, op, ref_spec.get("support"),
+                                   ref_spec.get("gain_cut"))
+        qref = solve_arm(op, supp_ref, ref_spec.get("alpha", 0.0),
+                         bool(ref_spec.get("positivity", False)),
+                         int(ref_spec.get("iters", 3000)))
+
+        # profile axes: the truth's own centroid voxel
+        ix, iy, it = np.nonzero(qg > 0.01)
+        w = qg[qg > 0.01]
+        px0, ysel = int(np.median(ix)), slice(int(iy.min()), int(iy.max()) + 1)
+        t0 = int(np.round(np.average(it, weights=w)))
+
+        def profiles(q):
+            tt = [{"d": d, "q": float(q[px0, ysel, t0 + d].sum())}
+                  for d in range(-half, half + 1)
+                  if 0 <= t0 + d < op.q_shape[2]]
+            tx = [{"d": d, "q": float(q[px0 + d, ysel,
+                                       max(t0 - 3, 0):t0 + 4].sum())}
+                  for d in range(-half, half + 1)
+                  if 0 <= px0 + d < op.q_shape[0]]
+            return {"time": tt, "pixel": tx}
+
+        core = qg > 0.01
+        rings = [core]
+        seen = core.copy()
+        for _ in range(n_rings):
+            g = _grow(seen)
+            rings.append(g & ~seen)
+            seen = g
+        outer = ~seen
+
+        rec = {"reference": {**ref_spec, "sum_q": float(qref.sum()),
+                             "support": int(supp_ref.sum()),
+                             "L": loss(op, qref),
+                             "profiles": profiles(qref),
+                             "gain_bands": gain_breakdown(qref, c, supp_ref)},
+               "truth_total": float(qg.sum()),
+               "centroid_voxel": [px0, int(np.median(iy)), t0],
+               "arms": []}
+        print(f"[{self.name}] reference {ref_spec.get('label')}: "
+              f"sum_q {qref.sum():.1f} ke, L {rec['reference']['L']:.4g}")
+
+        for spec in self.props.get("arms", []):
+            supp = resolve_support(store, op, spec.get("support"),
+                                   spec.get("gain_cut"))
+            q = solve_arm(op, supp, spec.get("alpha", 0.0),
+                          bool(spec.get("positivity", True)),
+                          int(spec.get("iters", 3000)))
+            D = q - qref
+            m = supp
+            tot = float(D[m].sum())
+            neg = (qref < 0) & m
+            a = {"label": spec.get("label", str(spec.get("alpha"))),
+                 "alpha": spec.get("alpha"),
+                 "positivity": bool(spec.get("positivity", True)),
+                 "support_spec": spec.get("support"),
+                 "support": int(supp.sum()),
+                 "sum_q": float(q.sum()), "ratio_q": float(q.sum() / qg.sum()),
+                 "L": loss(op, q), "pull_up": tot,
+                 "by_ls_sign": {
+                     "ref_neg": {"n": int(neg.sum()), "D": float(D[neg].sum()),
+                                 "sum_minus_ref": float(-qref[neg].sum()),
+                                 "corr_D_vs_minus_ref": (
+                                     float(np.corrcoef(-qref[neg], D[neg])[0, 1])
+                                     if neg.sum() > 2 and np.std(D[neg]) > 0
+                                     else float("nan"))},
+                     "ref_pos": {"n": int(((qref > 0) & m).sum()),
+                                 "D": float(D[(qref > 0) & m].sum())}},
+                 "by_truth": [
+                     {"lo": lo, "hi": hi, "n": int(((qg > lo) & (qg <= hi) & m).sum()),
+                      "D": float(D[(qg > lo) & (qg <= hi) & m].sum())}
+                     for lo, hi in ((-1.0, 0.01), (0.01, 0.5), (0.5, 5.0),
+                                    (5.0, 20.0), (20.0, 1e9))],
+                 "by_ring": ([{"d": i, "n": int((r & m).sum()),
+                               "D": float(D[r & m].sum()),
+                               "q_ref": float(qref[r & m].sum())}
+                              for i, r in enumerate(rings)]
+                             + [{"d": f">{n_rings}", "n": int((outer & m).sum()),
+                                 "D": float(D[outer & m].sum()),
+                                 "q_ref": float(qref[outer & m].sum())}]),
+                 "by_gain": gain_breakdown(D, c, m),
+                 "gain_bands": gain_breakdown(q, c, m),
+                 "profiles": profiles(q),
+                 "voxels": voxel_stats(q)}
+            prof = a["profiles"]["pixel"]
+            skirt = sum(p["q"] for p in prof if p["d"] != 0)
+            a["transverse_skirt"] = skirt
+            a["transverse_skirt_over_truth"] = skirt / float(qg.sum())
+            rec["arms"].append(a)
+            print(f"[{self.name}] {a['label']:22s} sum_q {a['sum_q']:10.1f} "
+                  f"({a['ratio_q']:8.4f}x)  pull-up {tot:+9.1f} ke  "
+                  f"on ref<0 {a['by_ls_sign']['ref_neg']['D']:+9.1f} "
+                  f"(corr {a['by_ls_sign']['ref_neg']['corr_D_vs_minus_ref']:+.4f})  "
+                  f"skirt {skirt:8.1f} ke = {a['transverse_skirt_over_truth']:.3f} x truth")
+            del q, D
+            torch.cuda.empty_cache()
+        self._emit(store, rec)
