@@ -795,3 +795,167 @@ class PriorAnatomy(_JsonRecorder):
             del q, D
             torch.cuda.empty_cache()
         self._emit(store, rec)
+
+
+# ---------------------------------------------------------------------------
+# drift velocity, cm/us.  1.6 mm/us -- see the u-period note in the iso50
+# study; the depth ladder is 3 cm apart, i.e. 18.75 us of drift per step.
+DRIFT_VELOCITY_CM_PER_US = 0.16
+
+
+@algorithm("LifetimeFit")
+class LifetimeFit(_JsonRecorder):
+    """Electron-lifetime decay rate per estimator, from a depth ladder.
+
+    A source algorithm: it reads no store keys, only the per-depth JSONs that
+    earlier jobs already wrote, so a lifetime number is a pure function of
+    archived results and never re-runs a solve.
+
+    For an isochronous line the whole track shares one drift time, so
+    ``Q(d) = Q0 exp(-t_drift / tau)`` exactly, and a straight line through
+    ``ln Q`` vs ``t_drift`` gives the DECAY RATE ``lambda = 1 / tau``.
+    Report lambda, never tau: lambda is the fitted Gaussian quantity, while
+    tau is right-skewed with a Jensen bias and a ``tau^2`` error blow-up
+    (``sigma_tau = tau^2 sigma_lambda``).
+
+    The gridded TRUTH of each depth is fitted the same way as a control: it
+    must return the simulated lambda, and any estimator's departure from the
+    control is that estimator's bias, not the sample's.
+
+    Props
+    -----
+    inputs : list of {depth_cm, json}
+        Per-depth result files.  ``EstimatorScan`` (``result.arms``) and
+        ``FFTInverseScan`` (``result.filters``) are both understood; several
+        files per depth may be given and their series are merged by label.
+    exclude_depths : list, optional
+        Depths dropped from the fit.  d = 1.5 cm is excluded by default in
+        the ladder generator: Ramo/acquisition-edge kernel truncation puts
+        every reco estimator off-trend there.
+    capture_curve_from : str, optional
+        A LifetimeFit JSON from a NULL-lifetime ladder (long tau, negligible
+        attenuation).  Per estimator it defines the depth acceptance
+        ``cap(d) = q_arm(d) / q_truth(d)``, normalised to the deepest point,
+        which is then divided out here.  Measured on the isoline ladder: the
+        curve is IDENTICAL at 1 ms and 20 ms to four decimals (0.8570 at
+        4.5 cm rising to 0.9998 at 28.5 cm), so it is a property of the
+        geometry and the operator, not of the lifetime -- which is what makes
+        it transferable.  It repairs LS / FFT / pure-positivity exactly
+        (lambda 0.2142 -> 1.0095 against a control of 1.0094) but NOT a fixed
+        l1 (1.3077 -> 1.1290): l1 bites a fraction of the amplitude, and the
+        amplitude at a given depth differs between the two lifetimes, so an
+        l1 bias does not transfer.  Do not cut unfolded charge before this.
+    tau_true_ms : float, optional
+        Simulated lifetime, for the pull.
+    velocity_cm_per_us : float
+        Default 0.16.
+    out : str, optional
+    """
+
+    reads = ()
+    writes = ("lifetime.fit",)
+
+    @staticmethod
+    def _series(doc):
+        """(label -> sum_q) plus the truth total, from one result document."""
+        res = doc.get("result", doc)
+        out = {}
+        for a in res.get("arms", []):
+            out[a["label"]] = float(a["sum_q"])
+        for f in res.get("filters", []):
+            st, sp = f.get("sigma_time"), f.get("sigma_pixel")
+            lab = ("FFT unfiltered" if st is None
+                   else f"FFT sig_t={st:g}/px={sp:g}")
+            out[lab] = float(f["sum_q"])
+        return out, float(res.get("truth_on_grid", float("nan")))
+
+    def execute(self, store):
+        v = float(self.props.get("velocity_cm_per_us",
+                                 DRIFT_VELOCITY_CM_PER_US))
+        drop = {float(d) for d in self.props.get("exclude_depths", [])}
+        tau_true = self.props.get("tau_true_ms")
+        series: dict[str, dict[float, float]] = {}
+        truth: dict[float, float] = {}
+        for item in self.props.get("inputs", []):
+            d = float(item["depth_cm"])
+            if d in drop:
+                continue
+            with open(item["json"]) as fh:
+                doc = json.load(fh)
+            vals, tr = self._series(doc)
+            if not np.isnan(tr):
+                truth[d] = tr
+            for lab, q in vals.items():
+                series.setdefault(lab, {})[d] = q
+        if truth:
+            series = {"TRUTH (control)": truth, **series}
+
+        cap_path = self.props.get("capture_curve_from")
+        capture = {}
+        if cap_path:
+            with open(cap_path) as fh:
+                ref = json.load(fh).get("result", {}).get("fits", {})
+            rt = ref.get("TRUTH (control)")
+            if rt is None:
+                raise ValueError(f"{cap_path} has no TRUTH (control) series")
+            tmap = dict(zip(rt["depths_cm"], rt["sum_q_ke"]))
+            for lab, f in ref.items():
+                cd, cq = f["depths_cm"], f["sum_q_ke"]
+                c = np.array([q / tmap[d] for d, q in zip(cd, cq)
+                              if d in tmap])
+                if c.size:
+                    capture[lab] = dict(zip(cd, c / c[-1]))
+            for lab, pts in series.items():
+                cap = capture.get(lab)
+                if cap:
+                    series[lab] = {d: q / cap[d] for d, q in pts.items()
+                                   if d in cap}
+            print(f"[{self.name}] capture curve from {cap_path} "
+                  f"divided out for {len(capture)} series")
+
+        def fit(pts):
+            d = np.array(sorted(pts))
+            q = np.array([pts[x] for x in d])
+            ok = q > 0
+            if ok.sum() < 3:
+                return None
+            t_ms = (d[ok] / v) * 1e-3          # us -> ms
+            y = np.log(q[ok])
+            A = np.vstack([t_ms, np.ones_like(t_ms)]).T
+            coef, res_, *_ = np.linalg.lstsq(A, y, rcond=None)
+            lam = -float(coef[0])
+            yhat = A @ coef
+            dof = max(len(y) - 2, 1)
+            s2 = float(((y - yhat) ** 2).sum() / dof)
+            cov = s2 * np.linalg.inv(A.T @ A)
+            return {"lambda_per_ms": lam,
+                    "lambda_err": float(np.sqrt(cov[0, 0])),
+                    "q0_ke": float(np.exp(coef[1])),
+                    "n_depths": int(ok.sum()),
+                    "rms_resid_lnq": float(np.sqrt(s2)),
+                    "depths_cm": [float(x) for x in d[ok]],
+                    "sum_q_ke": [float(x) for x in q[ok]]}
+
+        rec = {"velocity_cm_per_us": v, "tau_true_ms": tau_true,
+               "capture_curve_from": cap_path,
+               "capture_curve": {k: {str(d): float(x) for d, x in c.items()}
+                                 for k, c in capture.items()},
+               "fits": {}}
+        hdr = (f"{'estimator':28s} {'lambda [1/ms]':>14s} {'+/-':>8s} "
+               f"{'tau [ms]':>9s} {'q0 [ke]':>9s} {'rms lnQ':>8s} {'nd':>3s}")
+        print(f"[{self.name}] " + hdr)
+        for lab, pts in series.items():
+            f = fit(pts)
+            if f is None:
+                continue
+            if tau_true:
+                f["lambda_true"] = 1.0 / float(tau_true)
+                f["pull"] = ((f["lambda_per_ms"] - f["lambda_true"])
+                             / max(f["lambda_err"], 1e-12))
+            rec["fits"][lab] = f
+            tau = 1.0 / f["lambda_per_ms"] if f["lambda_per_ms"] > 0 else float("inf")
+            print(f"[{self.name}] {lab:28s} {f['lambda_per_ms']:14.4f} "
+                  f"{f['lambda_err']:8.4f} {tau:9.3f} {f['q0_ke']:9.1f} "
+                  f"{f['rms_resid_lnq']:8.5f} {f['n_depths']:3d}"
+                  + (f"   pull {f['pull']:+6.2f}" if tau_true else ""))
+        self._emit(store, rec)
