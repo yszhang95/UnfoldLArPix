@@ -207,3 +207,51 @@ def test_upsample_support_maps_every_fine_tick_to_its_cell():
     assert list(np.nonzero(out[0, 0])[0]) == [3, 4, 5]
     assert list(np.nonzero(out[1, 0])[0]) == [9, 10, 11]
     assert not out[:, :, 12:].any()           # beyond the last cell
+
+
+# ---------------------------------------------------------------------------
+# the intermediate (cell) time basis
+# ---------------------------------------------------------------------------
+def test_cell_registration():
+    assert "CellNonlinearArms" in ALGORITHMS
+    assert "CellBasisInverse" in ALGORITHMS
+
+
+def test_wrapper_agrees_with_the_cell_operator():
+    """The ``ZSOperator`` wrapper decimates by ``D``, not by ``B``.
+
+    ``zop.forward`` must be ``F.forward`` of the embedded unknown and
+    ``zop.adjoint`` its crop, at every cell width -- the wrapper carries its
+    own copy of the transform, so this is a test and not a restatement.
+    """
+    from test_finebasis import BC, MC, toy_response_c
+    for c in (1, 2, 3, 6):
+        F = FineOperator(toy_response_c(), (NX, NY, MC), BC, device="cpu",
+                         dtype=torch.float64, cell_ticks=c)
+        zop = FineZSOperator(F, torch.zeros((F.nxp, F.nyp, F.M),
+                                            dtype=torch.float64), NX, NY)
+        assert zop.q_shape == (NX, NY, F.N)
+        g = torch.Generator().manual_seed(61 + c)
+        q = torch.randn((NX, NY, F.N), generator=g, dtype=torch.float64)
+        r = torch.randn((F.nxp, F.nyp, F.M), generator=g, dtype=torch.float64)
+        x = torch.zeros((F.nxp, F.nyp, F.N), dtype=torch.float64)
+        x[:NX, :NY] = q
+        assert float(torch.abs(zop.forward(q) - F.forward(x)).max()) < 1e-12
+        assert float(torch.abs(zop.adjoint(r)
+                               - F.adjoint(r)[:NX, :NY]).max()) < 1e-12
+        a = float((zop.forward(q) * r).sum())
+        bb = float((q * zop.adjoint(r)).sum())
+        assert abs(a - bb) <= 1e-10 * max(abs(a), 1.0)
+
+
+def test_upsample_support_on_the_cell_basis():
+    """``base_cell[p, m] = base[p, k(cc_m)]``: the cell's own centre decides."""
+    c = np.array([1.5, 4.5, 7.5, 10.5])        # production centres, B = 3
+    base = np.zeros((2, 1, 4), dtype=bool)
+    base[0, 0, 1] = True                       # production cell 1: ticks 3,4,5
+    out1 = upsample_support(base, c, 3.0, 0, 12, 1)
+    assert list(np.nonzero(out1[0, 0])[0]) == [3, 4, 5]
+    # cell_ticks = 3: cell m covers ticks 3m..3m+2, centre 3m+1, so exactly
+    # cell m = 1 falls inside production cell 1
+    out3 = upsample_support(base, c, 3.0, 0, 4, 3)
+    assert list(np.nonzero(out3[0, 0])[0]) == [1]

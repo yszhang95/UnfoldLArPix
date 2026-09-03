@@ -151,8 +151,9 @@ from .evalharness_algs import (EvalHarness, TICK_US, coarse_centers,
                                time_kernel)
 from .exactrows_algs import _Recorder, load_impact_response
 from .finebasis_algs import (C_COARSE, C_FINE, C_HTRUTH, C_TRUTH, KRAD, OI,
-                             FineOperator, coarse_xhat, embed_pads, fine_xhat,
-                             ieee_style, probe_metrics, save, score_rows)
+                             CellGrid, FineOperator, cell_xhat, coarse_xhat,
+                             embed_pads, fine_xhat, ieee_style, probe_metrics,
+                             save, score_rows)
 from .fixedgrid_algs import block_from_rows, fit_bin_ticks, resolve_support
 
 # two more fixed colours for the positivity arms, Okabe-Ito, so that they are
@@ -242,7 +243,7 @@ class FineZSOperator:
         Xf *= F.Hr
         z = torch.fft.irfftn(Xf, s=(F.nxp, F.nyp, F.N), dim=(0, 1, 2))
         del Xf
-        zd = z[:, :, ::F.B].contiguous()
+        zd = z[:, :, ::F.D].contiguous()
         del z
         return torch.roll(zd, (-F.krad, -F.krad, -1), dims=(0, 1, 2))
 
@@ -250,7 +251,7 @@ class FineZSOperator:
         """``(nxp, nyp, M) -> (nx, ny, N)``: upsample, correlate, crop."""
         F = self.F
         u = torch.zeros((F.nxp, F.nyp, F.N), dtype=F.dtype, device=F.device)
-        u[:, :, ::F.B] = torch.roll(r, (F.krad, F.krad, 1), dims=(0, 1, 2))
+        u[:, :, ::F.D] = torch.roll(r, (F.krad, F.krad, 1), dims=(0, 1, 2))
         Uf = torch.fft.rfftn(u, dim=(0, 1, 2))
         del u
         Uf *= torch.conj(F.Hr)
@@ -307,10 +308,16 @@ def solve_fine_arm(zop: FineZSOperator, support: torch.Tensor, alpha: float,
 
 
 def upsample_support(base: np.ndarray, c: np.ndarray, B: float, b: int,
-                     N: int) -> np.ndarray:
-    """``base_fine[p, j] = base[p, k(b + j)]``; ``False`` outside every cell."""
-    j = np.arange(N, dtype=np.int64)
-    k = coarse_index(b + j, c[0], B)
+                     N: int, cell_ticks: int = 1) -> np.ndarray:
+    """``base_cell[p, m] = base[p, k(cc_m)]``; ``False`` outside every cell.
+
+    ``cc_m = b + cell_ticks m + (cell_ticks-1)/2`` is the unknown's own centre,
+    and ``k`` is the PRODUCTION coarse cell containing it.  With
+    ``cell_ticks = 1`` this is ``base[p, k(b + j)]``, the fine-grid form.
+    """
+    ct = int(cell_ticks)
+    m = np.arange(N, dtype=np.int64)
+    k = coarse_index(b + ct * m + (ct - 1) / 2.0, c[0], B)
     ok = (k >= 0) & (k < base.shape[2])
     out = np.zeros(base.shape[:2] + (N,), dtype=bool)
     out[:, :, ok] = np.asarray(base, dtype=bool)[:, :, k[ok]]
@@ -363,6 +370,22 @@ class FineNonlinearArms(_Recorder):
     margin_windows, line_pixel_y_range, segment_pixels, segment_edge_exclude
     dtype : ``"float32"`` (default here -- the fine grid does not fit in
         float64 on an 11.7 GiB card together with a FISTA iterate).
+    cell_ticks : int, default 1
+        Width of the unknown's time cell in fine ticks (``1`` = the fine
+        basis, unchanged in every respect).  See the "INTERMEDIATE (cell)
+        time basis" section of
+        :mod:`~unfoldlarpix.algs.finebasis_algs`.
+    cell_model : ``"uniform"`` (default) or ``"delta"``
+        The within-cell charge model of the OPERATOR.  Irrelevant at
+        ``cell_ticks = 1``, where both are ``h`` itself.
+    cell_prolongations : list, default ``["uniform", "corrected_hat"]``
+        The evaluation prolongations ``P_0`` and ``P_1`` used for the cell
+        arms.  At ``cell_ticks = 1`` they are ignored and ``P = I`` is used, as
+        before.
+    iteration_timing_iters : int, default 0 (off)
+    iteration_timing_cell_ticks : list of int, default ``[]``
+        If both are given, the wall time per FISTA iteration is measured at
+        each of these cell widths with the same support and data.
     out_json, out_npz
     """
 
@@ -379,7 +402,7 @@ class FineNonlinearArms(_Recorder):
 
     def execute(self, store):
         op = store.get("op")
-        arms_coarse = store.get("arms.q")
+        arms_coarse = store.get("arms.q") if "arms.q" in store else {}
         boff = np.asarray(store.get("block_offset"), dtype=float)
         b = int(boff[2])
         B = int(round(fit_bin_ticks(store)))
@@ -394,13 +417,22 @@ class FineNonlinearArms(_Recorder):
         specs = self.props.get("arms") or self.DEFAULT_ARMS
         conv_arm = str(self.props.get("convergence_arm", "fine_pos_a0"))
         conv_iters = int(self.props.get("convergence_iters", 1000))
+        lin_label = str(self.props.get("linear_label", "fine_minnorm"))
+        ct = int(self.props.get("cell_ticks", 1))
+        cmodel = str(self.props.get("cell_model", "uniform"))
+        cpnames = [str(v) for v in self.props.get(
+            "cell_prolongations", ["uniform", "corrected_hat"])]
+        time_iters = int(self.props.get("iteration_timing_iters", 0))
+        time_cells = [int(v) for v in
+                      self.props.get("iteration_timing_cell_ticks", [])]
         dev = op.device
 
         prep = self.services["detector"].prepared(B)
         fr = np.asarray(prep.full_response, dtype=np.float64)
 
         t0 = time.time()
-        F = FineOperator(fr, op.block_shape, B, device=dev, dtype=dtype)
+        F = FineOperator(fr, op.block_shape, B, device=dev, dtype=dtype,
+                         cell_ticks=ct, cell_model=cmodel)
         t_build = time.time() - t0
         H = EvalHarness(
             store, op, margin_windows=margin,
@@ -410,10 +442,12 @@ class FineNonlinearArms(_Recorder):
         pad_ext = int(np.ceil(5.0 * max(sigmas) / TICK_US)) + 2
         win_lo = int(H.fine[0]) - pad_ext
         win_hi = int(H.fine[-1]) + 1 + pad_ext
+        grid = CellGrid(b, ct, F.N)
+        m_lo, m_hi = grid.window(win_lo, win_hi)
 
-        print(f"[{self.name}] fine operator {F.nxp}x{F.nyp}x{F.N} "
-              f"({t_build:.1f} s); unknowns on the REAL pads "
-              f"{H.nx}x{H.ny}x{F.N} = {H.nx * H.ny * F.N / 1e6:.1f} M; "
+        print(f"[{self.name}] operator (cell_ticks {ct}, {cmodel}) "
+              f"{F.nxp}x{F.nyp}x{F.N} ({t_build:.1f} s); unknowns on the REAL "
+              f"pads {H.nx}x{H.ny}x{F.N} = {H.nx * H.ny * F.N / 1e6:.1f} M; "
               f"max G {F.G_max:.6g} (= the exact Lipschitz constant of A^T A)")
 
         rec: dict = {
@@ -428,6 +462,12 @@ class FineNonlinearArms(_Recorder):
                 "stored_fine_window": [win_lo, win_hi],
                 "eval_window_cells": [H.k0, H.k1],
                 "dtype": str(dtype)},
+            "basis": {"cell_ticks": ct, "cell_model": cmodel,
+                      "cells_per_record_window": B // ct,
+                      "decimation_stride_D": F.D,
+                      "n_cells_per_pad": F.N,
+                      "stored_cell_window": [m_lo, m_hi],
+                      "prolongations": (["identity"] if ct == 1 else cpnames)},
             "lipschitz": {
                 "value": float(F.G_max),
                 "source": "max_nu Ghat(nu), the closed-form symbol of A A^T",
@@ -467,15 +507,17 @@ class FineNonlinearArms(_Recorder):
         torch.cuda.empty_cache()
 
         base_c = np.asarray(resolve_support(store, op, "hits"))
-        base_f = upsample_support(base_c, H.c, H.B, b, F.N)
+        base_f = upsample_support(base_c, H.c, H.B, b, F.N, ct)
         supp_t = torch.as_tensor(base_f, device=dev) & gain_mask
         del gain_mask
         torch.cuda.empty_cache()
         supp_np_flat = None
         n_keep = int(supp_t.sum().item())
 
-        # truth charge excluded by the support
-        jj = H.truth_tick - b
+        # truth charge excluded by the support.  ``jj`` is the index of the
+        # unknown that holds each truth deposit: the fine tick on the fine
+        # basis, the cell m = floor((tick - b)/c) on the cell basis.
+        jj = grid.index(H.truth_tick)
         inside = (jj >= 0) & (jj < F.N)
         keep_t = np.zeros(len(jj), dtype=bool)
         idx = (torch.as_tensor(H.truth_ix[inside], device=dev),
@@ -517,6 +559,8 @@ class FineNonlinearArms(_Recorder):
         # non-negative and inside the support, so no non-negative estimator on
         # this support can do better than this by more than the operator's own
         # freedom; the difference from zero is tred's tick-0 truncation.
+        # on the cell basis x_truth is R_c x (box coarsening onto the cells),
+        # which is the non-negative candidate the basis can represent.
         xtru = torch.zeros((H.nx, H.ny, F.N), dtype=dtype, device=dev)
         xtru.index_put_((torch.as_tensor(H.truth_ix[inside], device=dev),
                          torch.as_tensor(H.truth_iy[inside], device=dev),
@@ -584,7 +628,7 @@ class FineNonlinearArms(_Recorder):
                    "off_line_pad_charge_ke": tot - on_line,
                    "off_line_fraction": (tot - on_line) / max(tot, 1e-30)}
             arm_rec.append(row)
-            sol[label] = xh[:, :, win_lo - b:win_hi - b].cpu().numpy()
+            sol[label] = xh[:, :, m_lo:m_hi].cpu().numpy()
             transverse = padsum.sum(axis=1).cpu().numpy()
             del padsum
             print(f"[{self.name}] {label:22s} sum {tot:10.2f} ke "
@@ -598,8 +642,8 @@ class FineNonlinearArms(_Recorder):
         t0 = time.time()
         xlin = F.solve(y_t, lam)[:H.nx, :H.ny].contiguous()
         wall = time.time() - t0
-        arrays["transverse_fine_minnorm"] = _record_solution(
-            "fine_minnorm", xlin,
+        arrays["transverse_" + lin_label] = _record_solution(
+            lin_label, xlin,
             {"kind": "fine_linear", "alpha": None, "iters": None,
              "lambda_rel": lam_rel, "lambda": lam, "wall_s": wall,
              "positivity": False})
@@ -636,7 +680,51 @@ class FineNonlinearArms(_Recorder):
                 torch.cuda.empty_cache()
         del supp_t, y_t
         zop.d = None
+        del F, zop
         torch.cuda.empty_cache()
+
+        # ---------------- wall time per FISTA iteration vs the cell width ----
+        # The cost statement of the intermediate basis.  Each entry builds the
+        # operator, the record-row mask and the SAME ``gain:0.5`` support at
+        # that cell width and runs ``iteration_timing_iters`` positivity
+        # iterations from q0 = 0; the wall time is divided by the iteration
+        # count.  Setup is outside the timed region and the final ``sum``
+        # forces the CUDA queue to drain before the clock is read.
+        if time_iters and time_cells:
+            tim = []
+            for cc in time_cells:
+                Ft = FineOperator(fr, op.block_shape, B, device=dev,
+                                  dtype=dtype, cell_ticks=cc,
+                                  cell_model=cmodel)
+                rmt = record_row_mask(op, Ft, H.nx, H.ny, dev, dtype)
+                zt = FineZSOperator(
+                    Ft, embed_pads(blk, Ft.nxp, Ft.nyp, Ft.M, dev, dtype),
+                    H.nx, H.ny)
+                cvt = zt.measurement_gain(rmt)
+                mt = cvt > gain_cut * float(cvt.max())
+                del cvt, rmt
+                st = torch.as_tensor(
+                    upsample_support(base_c, H.c, H.B, b, Ft.N, cc),
+                    device=dev) & mt
+                del mt
+                torch.cuda.empty_cache()
+                t0 = time.time()
+                xt, _h, _w = solve_fine_arm(zt, st, 0.0, time_iters,
+                                            log_every=0, tag=f"timing_c{cc}")
+                float(xt.sum())
+                wall = time.time() - t0
+                tim.append({"cell_ticks": cc, "n_iterations": time_iters,
+                            "n_unknowns_real_pads": int(H.nx * H.ny * Ft.N),
+                            "wall_s": wall,
+                            "wall_s_per_iteration": wall / time_iters,
+                            "dtype": str(dtype)})
+                print(f"[{self.name}] timing c = {cc:2d}: {wall / time_iters:.4f} "
+                      f"s per FISTA iteration ({time_iters} iterations, "
+                      f"{H.nx * H.ny * Ft.N / 1e6:.1f} M unknowns, {dtype})")
+                zt.d = None
+                del xt, st, zt, Ft
+                torch.cuda.empty_cache()
+            rec["iteration_timing"] = tim
 
         rec["arms"] = arm_rec
         rec["convergence_pair"] = {"arm": conv_arm, "iters_a": conv_iters,
@@ -666,7 +754,7 @@ class FineNonlinearArms(_Recorder):
                   f" ring1+ {r['zero_preservation']['ring1']['pos_per_pad_ke']:8.4f}"
                   f"  ring1- {r['zero_preservation']['ring1']['neg_per_pad_ke']:8.4f}")
 
-        fine_labels = ["fine_minnorm"] + [str(s["label"]) for s in specs] \
+        fine_labels = [lin_label] + [str(s["label"]) for s in specs] \
             + conv_extra
         for s in sigmas:
             for pname in pnames:
@@ -678,9 +766,18 @@ class FineNonlinearArms(_Recorder):
                         {"arm": lab, "basis": "coarse", "prolongation": pname,
                          "sigma_H_us": s})
             for lab in fine_labels:
-                _do(f"{lab}_s{s:g}", fine_xhat(H, sol[lab], win_lo, s),
-                    {"arm": lab, "basis": "fine", "prolongation": "identity",
-                     "sigma_H_us": s})
+                if ct == 1:
+                    _do(f"{lab}_s{s:g}", fine_xhat(H, sol[lab], win_lo, s),
+                        {"arm": lab, "basis": "fine",
+                         "prolongation": "identity", "sigma_H_us": s})
+                    continue
+                for pname in cpnames:
+                    _do(f"{lab}_{pname}_s{s:g}",
+                        cell_xhat(H, grid, sol[lab], pname, m_lo, m_hi, s,
+                                  x_lo=m_lo),
+                        {"arm": lab, "basis": "cell", "cell_ticks": ct,
+                         "cell_model": cmodel, "prolongation": pname,
+                         "sigma_H_us": s})
         rec["rows"] = rows
 
         # ---------------- pad-summed coarse-cell profile (N3) ----------------
@@ -690,8 +787,7 @@ class FineNonlinearArms(_Recorder):
                "truth_Rbox_ke": [float(H.Rx[:, :, k].sum()) for k in ks]}
         for lab, a in arms_coarse.items():
             osc[lab + "_ke"] = [float(a["q"][:, :, k].sum()) for k in ks]
-        jw = np.arange(win_lo, win_hi)
-        kw = coarse_index(jw, H.c[0], H.B)
+        kw = coarse_index(grid.cc[m_lo:m_hi], H.c[0], H.B)
         for lab in fine_labels:
             tot = sol[lab].sum(axis=(0, 1))
             osc[lab + "_Rxhat_ke"] = [float(tot[kw == k].sum()) for k in ks]
@@ -699,11 +795,18 @@ class FineNonlinearArms(_Recorder):
 
         # ---------------- arrays for the figures ------------------------------
         arrays["fine_ticks"] = H.fine.astype(np.int64)
-        arrays["stored_window_ticks"] = jw.astype(np.int64)
         arrays["coarse_centers"] = H.c.astype(np.float64)
-        v = np.zeros(len(jw))
-        jt = H.truth_tick - win_lo
-        ok = (jt >= 0) & (jt < len(jw))
+        arrays["cell_centers"] = grid.cc[m_lo:m_hi].astype(np.float64)
+        arrays["cell_window"] = np.array([m_lo, m_hi])
+        # the truth profile on the UNKNOWN grid: per fine tick at c = 1, per
+        # cell at c > 1.  ``stored_window_ticks`` stays the abscissa of the
+        # raw profiles, so it is the cell centres when c > 1.
+        arrays["stored_window_ticks"] = (
+            np.arange(win_lo, win_hi).astype(np.int64) if ct == 1
+            else grid.cc[m_lo:m_hi])
+        v = np.zeros(m_hi - m_lo)
+        jt = grid.index(H.truth_tick) - m_lo
+        ok = (jt >= 0) & (jt < len(v))
         np.add.at(v, jt[ok], H.truth_q[ok])
         arrays["truth_padsum_fine"] = v
         tv = np.zeros(H.nx)
@@ -724,10 +827,29 @@ class FineNonlinearArms(_Recorder):
         rec["sigma_H_us"] = sigmas
         rec["prolongations_coarse"] = pnames
         rec["coarse_arm_labels"] = sorted(arms_coarse.keys())
+        rec["linear_label"] = lin_label
         self._emit(store, rec, arrays)
-        self.put(store, "finenl.solutions",
+        self.put(store, self.writes[1],
                  {"x": sol, "win_lo": win_lo, "harness": H, "arrays": arrays,
-                  "labels": fine_labels})
+                  "labels": fine_labels, "grid": grid,
+                  "cell_window": [m_lo, m_hi]})
+
+
+@algorithm("CellNonlinearArms")
+class CellNonlinearArms(FineNonlinearArms):
+    """:class:`FineNonlinearArms` on the intermediate basis, without the
+    bin-integrated arms.
+
+    Same body, same props, same solver stack; it only declares a store
+    interface that does NOT require ``arms.q``, so a job can run the cell arms
+    without re-solving the archived bin-integrated references, and it writes to
+    its own store locations.  Set ``cell_ticks`` to the cell width; the
+    defaults are those of the parent, i.e. the fine basis.
+    """
+
+    reads = ("op", "support", "event", "readout_config", "block_offset",
+             "charge_model")
+    writes = ("cellnl.result", "cellnl.solutions")
 
 
 # ---------------------------------------------------------------------------
@@ -1000,6 +1122,10 @@ class FineNonlinearProbe(_Recorder):
     probe_pad, probe_phases, probe_impacts_at, probe_cell,
     current_zero_before_tick, sigma_H_us, margin_windows : as
         :class:`~unfoldlarpix.algs.finebasis_algs.FineBasisProbe`.
+    cell_ticks : int, default 1;  cell_model : str, default ``"uniform"``;
+    cell_prolongations : list, default ``["uniform", "corrected_hat"]``
+        The unknown's time basis, as in :class:`FineNonlinearArms`.  At
+        ``cell_ticks = 1`` the probe is the fine-basis probe, unchanged.
     charges_ke : list of float, default ``[5.0, 30.0, 150.0]``.
     arms : list of dict ``{label, alpha, iters}`` -- the nonlinear arms.
     lambda_rel : float, the linear reference.
@@ -1042,6 +1168,11 @@ class FineNonlinearProbe(_Recorder):
         homog_set = (int(hs[0]), str(hs[1]))
         conv_label = str(self.props.get("convergence_arm")
                          or (specs[0]["label"] if specs else ""))
+        ct = int(self.props.get("cell_ticks", 1))
+        cmodel = str(self.props.get("cell_model", "uniform"))
+        cpnames = [str(v) for v in self.props.get(
+            "cell_prolongations", ["uniform", "corrected_hat"])]
+        lin_label = str(self.props.get("linear_label", "fine_minnorm"))
         dtype = (torch.float64 if str(self.props.get("dtype", "float32"))
                  == "float64" else torch.float32)
         dev = op.device
@@ -1092,11 +1223,17 @@ class FineNonlinearProbe(_Recorder):
 
         prep = self.services["detector"].prepared(B)
         F = FineOperator(np.asarray(prep.full_response, dtype=np.float64),
-                         op.block_shape, B, device=dev, dtype=dtype)
+                         op.block_shape, B, device=dev, dtype=dtype,
+                         cell_ticks=ct, cell_model=cmodel)
         lam = lam_rel * F.G_max
         nx, ny = int(op.q_shape[0]), int(op.q_shape[1])
+        grid = CellGrid(b, ct, F.N)
         zop = FineZSOperator(F, torch.zeros((F.nxp, F.nyp, F.M), dtype=dtype,
                                             device=dev), nx, ny)
+        rec["basis"] = {"cell_ticks": ct, "cell_model": cmodel,
+                        "decimation_stride_D": F.D, "n_cells_per_pad": F.N,
+                        "prolongations": (["identity"] if ct == 1
+                                          else cpnames)}
         rec["fine_arms"] = {"lambda_rel": lam_rel, "lambda": lam,
                             "G_max": F.G_max, "arms": [dict(s) for s in specs],
                             "charges_ke": charges, "q_ref_ke": q_ref,
@@ -1117,7 +1254,7 @@ class FineNonlinearProbe(_Recorder):
         del cv, rowm
         torch.cuda.empty_cache()
         base_c = np.asarray(resolve_support(store, op, "hits"))
-        supp_t = torch.as_tensor(upsample_support(base_c, c, Bf, b, F.N),
+        supp_t = torch.as_tensor(upsample_support(base_c, c, Bf, b, F.N, ct),
                                  device=dev) & gmask
         del gmask
         torch.cuda.empty_cache()
@@ -1167,6 +1304,7 @@ class FineNonlinearProbe(_Recorder):
             pad_ext = int(np.ceil(5.0 * max(sigmas) / TICK_US)) + 2
             wlo = int(Hh.fine[0]) - pad_ext
             whi = int(Hh.fine[-1]) + 1 + pad_ext
+            m_lo, m_hi = grid.window(wlo, whi)
             arrays[f"fine_ticks_phi{phi}_{kn}"] = Hh.fine.astype(np.int64)
             for s in (1.5,):
                 gk = time_kernel(s / TICK_US)
@@ -1213,7 +1351,7 @@ class FineNonlinearProbe(_Recorder):
                     zop.d = None
                     torch.cuda.empty_cache()
                     continue
-                todo = [("fine_minnorm", None, None)] + todo_nl
+                todo = [(lin_label, None, None)] + todo_nl
                 for lab, alpha, iters in todo:
                     t0 = time.time()
                     if alpha is None:
@@ -1224,7 +1362,7 @@ class FineNonlinearProbe(_Recorder):
                         xh, hist, _ = solve_fine_arm(
                             zop, supp_t, alpha, iters, log_every=0, tag=lab)
                     wall = time.time() - t0
-                    xwin = xh[:, :, wlo - b:whi - b].cpu().numpy()
+                    xwin = xh[:, :, m_lo:m_hi].cpu().numpy()
                     tot = float(xh.sum())
                     nnz = int((xh > 1e-3).sum())
                     del xh
@@ -1232,13 +1370,20 @@ class FineNonlinearProbe(_Recorder):
                     r = {**base, "arm": lab, "alpha": alpha, "iters": iters,
                          "wall_s": wall, "sum_xhat_ke": tot,
                          "sum_over_Q": tot / Q, "nnz_1e-3": nnz, "sigmas": []}
-                    for s in sigmas:
-                        xhs = fine_xhat(Hh, xwin, wlo, s)
-                        r["sigmas"].append(probe_metrics(Hh, xhs, Q, t_star,
-                                                         pad_flat, s))
-                        if s in (0.0, 1.5):
-                            arrays[f"imp_phi{phi}_{kn}_Q{Q:g}_{lab}_s{s:g}"] = \
-                                (xhs[pad_flat] / Q).astype(np.float32)
+                    for pname in (["identity"] if ct == 1 else cpnames):
+                        for s in sigmas:
+                            xhs = (fine_xhat(Hh, xwin, wlo, s) if ct == 1 else
+                                   cell_xhat(Hh, grid, xwin, pname, m_lo,
+                                             m_hi, s, x_lo=m_lo))
+                            pm = probe_metrics(Hh, xhs, Q, t_star, pad_flat, s)
+                            pm["prolongation"] = pname
+                            r["sigmas"].append(pm)
+                            if s in (0.0, 1.5):
+                                tg = (f"imp_phi{phi}_{kn}_Q{Q:g}_{lab}"
+                                      + ("" if ct == 1 else f"_{pname}")
+                                      + f"_s{s:g}")
+                                arrays[tg] = (xhs[pad_flat]
+                                              / Q).astype(np.float32)
                     results.append(r)
                     m = [d for d in r["sigmas"]
                          if abs(d["sigma_H_us"] - 1.5) < 1e-9][0]
@@ -1257,7 +1402,7 @@ class FineNonlinearProbe(_Recorder):
                         for it2 in conv_iters:
                             xh2, _, w2 = solve_fine_arm(zop, supp_t, alpha, it2,
                                                         log_every=0, tag=lab)
-                            xw2 = xh2[:, :, wlo - b:whi - b].cpu().numpy()
+                            xw2 = xh2[:, :, m_lo:m_hi].cpu().numpy()
                             t2 = float(xh2.sum())
                             del xh2
                             torch.cuda.empty_cache()
@@ -1266,9 +1411,12 @@ class FineNonlinearProbe(_Recorder):
                                   "sum_xhat_ke": t2, "sum_over_Q": t2 / Q,
                                   "convergence_probe": True, "sigmas": []}
                             for s in sigmas:
+                                xh2s = (fine_xhat(Hh, xw2, wlo, s) if ct == 1
+                                        else cell_xhat(Hh, grid, xw2,
+                                                       cpnames[0], m_lo, m_hi,
+                                                       s, x_lo=m_lo))
                                 rr["sigmas"].append(probe_metrics(
-                                    Hh, fine_xhat(Hh, xw2, wlo, s), Q, t_star,
-                                    pad_flat, s))
+                                    Hh, xh2s, Q, t_star, pad_flat, s))
                             results.append(rr)
                             mm = rr["sigmas"][1]
                             print(f"[{self.name}]   convergence {lab} "
@@ -1281,6 +1429,7 @@ class FineNonlinearProbe(_Recorder):
                 torch.cuda.empty_cache()
         rec["probes"] = results
         rec["sigma_H_us"] = sigmas
+        rec["linear_label"] = lin_label
         rec["settings"] = [{"phi": p, "kernel": k} for p, k in settings]
         self._emit(store, rec, arrays)
 

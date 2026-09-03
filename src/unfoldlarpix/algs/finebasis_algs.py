@@ -169,6 +169,93 @@ is not repeated.
 ``R xhat_fine``
     the fine estimate summed into the coarse cells ``C_k``, used only to put
     the two estimators on one axis in the bin-space figure.
+
+The INTERMEDIATE (cell) time basis
+----------------------------------
+Everything above is the two extremes ``cell_ticks = 1`` (one unknown per
+50 ns tick) and the production ``1.5 us`` bin.  The intermediate basis puts one
+unknown on every block of ``c`` fine ticks, ``c`` a divisor of ``B = 30``.  It
+is reached through the props ``cell_ticks`` (default ``1``, which reproduces
+everything above bit for bit) and ``cell_model``.
+
+``cell m``, ``x_p[m]``
+    the unknown ``x_p[m]`` is the charge on pad ``p`` released in the ``c``
+    fine ticks ``[b + c m, b + c (m+1))`` of the block.  There are
+    ``N_c = (B/c) M`` cells per pad; ``D = B/c`` is the DECIMATION STRIDE of
+    the operator on the cell grid (``D = 30`` for ``c = 1``, ``D = 1`` for
+    ``c = 30``).
+
+``cc_m``, the cell centre
+    ``cc_m = b + c m + (c-1)/2``, the arithmetic mean of the ``c`` integer
+    fine ticks of the cell.  It is INTEGER for odd ``c`` (so ``c = 1`` has
+    ``cc_m = b + m``, the tick itself) and half-integer for even ``c``.  With
+    this centre the box ``[cc_m - c/2, cc_m + c/2)`` is exactly the cell, so
+    ``R_c`` and the prolongations of :mod:`~unfoldlarpix.algs.evalharness_algs`
+    apply unchanged under ``(c_k, B) -> (cc_m, c)``.
+
+``h_c(tau)`` (NEW), the cell window function
+    the two WITHIN-CELL CHARGE MODELS, prop ``cell_model``:
+
+    ``uniform`` (pairs with ``P_0``): the cell's charge is spread evenly over
+    its ``c`` fine ticks, so
+    ``h_c(tau) = (1/c) sum_{u=0}^{c-1} h(tau - u)`` -- the ``c``-tick moving
+    AVERAGE of the fine window function.
+
+    ``delta`` (pairs with ``P_delta``): the cell's charge is released as a
+    point at the cell's LOWER EDGE ``b + c m``, so ``h_c(tau) = h(tau)``.
+
+``g[s]`` (NEW), the operator kernel on the cell grid
+    ``g[s] = h_c(c s - release_shift)``, i.e. ``h_c`` sampled every ``c`` fine
+    ticks.  ``release_shift`` (constructor argument, default ``0``) moves the
+    release point inside the cell by whole fine ticks and exists for ONE
+    purpose: with ``c = 30``, ``cell_model = "delta"`` and
+    ``release_shift = 1`` the operator IS the production ``A_coarse``
+    (``A_coarse[., k] = A_fine[., c_k + 1]``, the ``phi = 1`` convention),
+    which is checked in the job output and in ``tests/test_finebasis.py``.
+
+``A_c`` (the cell operator)
+    ``y_p[w] = sum_{p'} sum_m x_{p'}[m] g_{p-p'}[(B/c)(w+1) - m]``, i.e.
+    ``A_c = D_{B/c} . conv(g)`` on the cell grid: the SAME structure as
+    ``A_fine`` with ``(h, B) -> (g, D)``, honouring the same
+    inclusive-upper-edge record convention (record ``w`` is latched at
+    absolute fine tick ``b + B(w+1)``).  Derivation: the release point of cell
+    ``m`` is ``b + c m`` and ``B(w+1) - c m = c ((B/c)(w+1) - m)`` because
+    ``c`` divides ``B``, so the fine-tick argument of ``h_c`` is always a
+    multiple of ``c`` and ``g`` carries every value the operator needs.
+
+``G_c(nu)``
+    ``G_c(nu) = (1/D) sum_{m=0}^{D-1} |ghat(nu + m M)|^2`` with ``ghat`` the
+    DFT of ``g`` on the length-``N_c`` cell grid; ``D`` aliases instead of 30.
+    The derivation of ``G`` above used only "convolution followed by
+    decimation by ``D``", so it carries over verbatim.
+
+``conservation on the cell basis``
+    ``box_B = box_c * comb`` with ``comb`` the ``D`` unit samples at
+    ``0, c, ..., (D-1)c``, so for BOTH charge models ``g`` is the ``D``-tap
+    moving SUM on the cell grid of a shorter kernel; hence
+    ``ghat(m M) = 0`` for ``m = 1..D-1``, ``G_c(0) = ghat(0)^2 / D`` exactly,
+    ``sum_s g[s] = D sum_{d,tau} Kbar_d(tau)``, and at ``lambda -> 0``
+    ``sum_m xhat[m] = D sum_w y[w] / sum_s g[s] = sum_w y[w] / sum Kbar`` --
+    the same total as on the fine basis, at every ``c`` and for both models.
+
+``R_c``
+    box coarsening of the fine truth onto the cells:
+    ``(R_c x)_p[m] = sum_{j in [b+cm, b+c(m+1))} x_p(j)``.  ``R_c`` is NOT the
+    production ``R``: the production cells are ``[c_k - 15, c_k + 15)`` about
+    the integer centre ``c_k = b + 30k``, while the ``c = 30`` cell basis here
+    is ``[b + 30m, b + 30m + 30)`` -- the same width, offset by 15 fine ticks.
+
+``P_0``, ``P_1`` on the cell basis
+    ``P_0``: ``1/c`` on each of the cell's ``c`` fine ticks.
+    ``P_1 = P_hat (R_c P_hat)^{-1}`` with ``P_hat`` the triangle of half-width
+    ``c`` centred on ``cc_m``, normalised by ``1/c``.  ``T = R_c P_hat`` is
+    tridiagonal by construction (the triangle reaches only the neighbouring
+    cells) and, because ``cc_m`` is the cell's own centre, SYMMETRIC:
+    ``(0.12, 0.76, 0.12)`` for ``c = 5``, ``(0.125, 0.75, 0.125)`` for
+    ``c = 30``, and exactly ``I`` for ``c = 1`` (the triangle collapses onto
+    the single tick, so ``P_1 = P_0 = I`` and both representation terms
+    vanish identically).  ``R_c P = I`` and ``1^T P = 1^T`` are measured, not
+    assumed.
 """
 from __future__ import annotations
 
@@ -215,34 +302,88 @@ def fine_window_kernel(full_response: np.ndarray, B: int) -> np.ndarray:
     return out - shifted
 
 
-class FineOperator:
-    """``A_fine = D_30 . conv(h)`` on the block's periodic grid, with ``A A^T``.
+def cell_window_kernel(h: np.ndarray, cell_ticks: int,
+                       cell_model: str = "uniform",
+                       release_shift: int = 0) -> np.ndarray:
+    """``g[s] = h_c(c s - release_shift)``, the operator kernel on the cell grid.
 
-    Circular in all three axes (see the module docstring).  ``forward`` maps a
-    fine array ``(nxp, nyp, N)`` to records ``(nxp, nyp, M)``; ``adjoint`` maps
-    back.  ``solve`` is the closed-form Tikhonov inverse.
+    ``h`` is the fine window function of :func:`fine_window_kernel`;
+    ``cell_model`` is ``"uniform"`` (``h_c`` = the ``c``-tick moving AVERAGE of
+    ``h``, the cell's charge spread evenly over its ``c`` fine ticks) or
+    ``"delta"`` (``h_c = h``, the cell's charge released at its lower edge).
+    With ``cell_ticks = 1`` and ``release_shift = 0`` both models return ``h``
+    itself, element for element.
+    """
+    c = int(cell_ticks)
+    if c < 1:
+        raise ValueError("cell_ticks must be >= 1")
+    hh = np.asarray(h, dtype=np.float64)
+    if cell_model == "uniform":
+        L = hh.shape[-1]
+        hc = np.zeros(hh.shape[:-1] + (L + c - 1,), dtype=np.float64)
+        for u in range(c):
+            hc[..., u:u + L] += hh
+        if c > 1:
+            hc /= float(c)
+    elif cell_model == "delta":
+        hc = hh
+    else:
+        raise ValueError(f"unknown cell_model {cell_model!r}")
+    Lc = hc.shape[-1]
+    shift = int(release_shift)
+    S = (Lc - 1 + shift) // c + 1
+    idx = c * np.arange(S) - shift
+    out = np.zeros(hc.shape[:-1] + (S,), dtype=np.float64)
+    ok = (idx >= 0) & (idx < Lc)
+    out[..., ok] = hc[..., idx[ok]]
+    return out
+
+
+class FineOperator:
+    """``A_c = D_{B/c} . conv(g)`` on the block's periodic grid, with ``A A^T``.
+
+    Circular in all three axes (see the module docstring).  ``forward`` maps an
+    unknown array ``(nxp, nyp, N)`` to records ``(nxp, nyp, M)``; ``adjoint``
+    maps back.  ``solve`` is the closed-form Tikhonov inverse.
+
+    ``cell_ticks = 1`` (the default) is the fine 50 ns basis: ``g = h``,
+    ``D = B``, ``N = B M`` fine ticks, and every array, symbol and result is
+    identical element for element to the fine operator these studies started
+    from.  ``cell_ticks = c > 1`` puts one unknown on every ``c`` fine ticks;
+    ``N`` is then the number of CELLS, ``N = (B/c) M``.
     """
 
     def __init__(self, full_response: np.ndarray, block_shape, B: int,
-                 device="cuda", dtype=torch.float64):
+                 device="cuda", dtype=torch.float64, cell_ticks: int = 1,
+                 cell_model: str = "uniform", release_shift: int = 0):
         nx, ny, M = (int(v) for v in block_shape)
         kx, ky = int(full_response.shape[0]), int(full_response.shape[1])
         self.krad = (kx - 1) // 2
         self.nx, self.ny, self.M = nx, ny, M
         self.nxp, self.nyp = nx + kx - 1, ny + ky - 1
         self.B = int(B)
-        self.N = self.B * M
+        self.cell_ticks = int(cell_ticks)
+        self.cell_model = str(cell_model)
+        self.release_shift = int(release_shift)
+        if self.B % self.cell_ticks:
+            raise ValueError(f"cell_ticks {self.cell_ticks} does not divide "
+                             f"B = {self.B}")
+        self.D = self.B // self.cell_ticks       # decimation stride, cell grid
+        self.N = self.D * M                      # unknowns per pad
         self.device = torch.device(device)
         self.dtype = dtype
         self.cdtype = torch.complex128 if dtype == torch.float64 else torch.complex64
 
         h = fine_window_kernel(full_response, self.B)      # (25,25,3930)
         self.h_np = h
-        if h.shape[-1] > self.N:
-            raise ValueError("kernel longer than the block's fine grid")
+        g = cell_window_kernel(h, self.cell_ticks, self.cell_model,
+                               self.release_shift)
+        self.g_np = g
+        if g.shape[-1] > self.N:
+            raise ValueError("kernel longer than the block's unknown grid")
         hg = torch.zeros((self.nxp, self.nyp, self.N), dtype=dtype,
                          device=self.device)
-        hg[:kx, :ky, :h.shape[-1]] = torch.as_tensor(h, dtype=dtype,
+        hg[:kx, :ky, :g.shape[-1]] = torch.as_tensor(g, dtype=dtype,
                                                      device=self.device)
         self.Hr = torch.fft.rfftn(hg, dim=(0, 1, 2))
         del hg
@@ -251,19 +392,21 @@ class FineOperator:
 
     # -- A A^T symbol --------------------------------------------------------
     def _build_G(self) -> None:
-        """``G(kx, ky, nu) = (1/30) sum_m |hhat(kx, ky, nu + m M)|^2``.
+        """``G(kx, ky, nu) = (1/D) sum_{m<D} |ghat(kx, ky, nu + m M)|^2``.
 
         ``Hr`` holds only ``f = 0 .. N//2``; the missing half is recovered from
         the Hermitian symmetry of a real kernel,
-        ``|hhat(kx, ky, N - f)|^2 = |hhat(-kx, -ky, f)|^2``.
+        ``|ghat(kx, ky, N - f)|^2 = |ghat(-kx, -ky, f)|^2``.  ``D = B/c`` is
+        the decimation stride, so this is 30 aliases on the fine basis and
+        ``30/c`` on the ``c``-tick cell basis.
         """
-        N, M, B = self.N, self.M, self.B
+        N, M, D = self.N, self.M, self.D
         P = (self.Hr.real ** 2 + self.Hr.imag ** 2)
         Pf = torch.roll(torch.flip(P, dims=(0, 1)), shifts=(1, 1), dims=(0, 1))
         nu = torch.arange(M // 2 + 1, device=self.device)
         G = torch.zeros((self.nxp, self.nyp, M // 2 + 1), dtype=self.dtype,
                         device=self.device)
-        for m in range(B):
+        for m in range(D):
             f = nu + m * M
             lo = f <= N // 2
             if bool(lo.all()):
@@ -273,7 +416,7 @@ class FineOperator:
             else:
                 G[:, :, lo] += P[:, :, f[lo]]
                 G[:, :, ~lo] += Pf[:, :, N - f[~lo]]
-        self.G = G / B
+        self.G = G / D
         del P, Pf
         torch.cuda.empty_cache()
         self.G_max = float(self.G.max())
@@ -288,7 +431,7 @@ class FineOperator:
         del Xf
         # decimate FIRST, then roll: the transverse roll on the full fine grid
         # would need a second array of 240.9 M cells for no reason.
-        zd = z[:, :, ::self.B].contiguous()
+        zd = z[:, :, ::self.D].contiguous()
         del z
         y = torch.roll(zd, (-self.krad, -self.krad, -1), dims=(0, 1, 2))
         del zd
@@ -299,7 +442,7 @@ class FineOperator:
         u = torch.zeros((self.nxp, self.nyp, self.N), dtype=self.dtype,
                         device=self.device)
         # roll the RECORD grid, then insert: same reason as in ``forward``.
-        u[:, :, ::self.B] = torch.roll(r, (self.krad, self.krad, 1),
+        u[:, :, ::self.D] = torch.roll(r, (self.krad, self.krad, 1),
                                        dims=(0, 1, 2))
         Uf = torch.fft.rfftn(u, dim=(0, 1, 2))
         del u
@@ -324,9 +467,9 @@ class FineOperator:
 
     # -- diagnostics ---------------------------------------------------------
     def hhat_own_1d(self) -> np.ndarray:
-        """``|hhat_(0,0)(f)|`` on the fine grid, time axis only, ``f = 0..N//2``."""
+        """``|ghat_(0,0)(f)|`` on the unknown grid, time axis, ``f = 0..N//2``."""
         v = np.zeros(self.N)
-        v[:self.h_np.shape[-1]] = self.h_np[self.krad, self.krad]
+        v[:self.g_np.shape[-1]] = self.g_np[self.krad, self.krad]
         return np.abs(np.fft.rfft(v))
 
 
@@ -483,6 +626,230 @@ def fine_xhat(H: EvalHarness, xwin: np.ndarray, win_lo: int,
         return np.ascontiguousarray(blk)
     sm = smooth_columns(blk.T, g).T
     return np.ascontiguousarray(sm[:, pad:pad + H.n_fine])
+
+
+# ---------------------------------------------------------------------------
+# the intermediate (cell) time basis: geometry, R_c, P_0 and P_1
+# ---------------------------------------------------------------------------
+def cell_centers(b: int, cell_ticks: int, n_cells: int) -> np.ndarray:
+    """``cc_m = b + c m + (c-1)/2``, the mean of the cell's ``c`` fine ticks."""
+    c = int(cell_ticks)
+    return float(b) + c * np.arange(int(n_cells)) + (c - 1) / 2.0
+
+
+class CellGrid:
+    """The ``c``-tick cell basis on one block: ``R_c``, ``P_0`` and ``P_1``.
+
+    Pure geometry -- no operator, no data, no estimator -- so one instance
+    serves every arm of a job.  ``c = 1`` is the fine grid and every map here
+    is the identity, which is asserted rather than assumed
+    (:meth:`report`).
+
+    Definitions are those of the module docstring, section "The INTERMEDIATE
+    (cell) time basis".  Both prolongations are stored as a list of TAPS: a
+    prolongation is ``P[b + c m + r, m] = w_r``, one weight per integer offset
+    ``r`` inside the cell (``P_0``: ``r = 0..c-1``, ``w = 1/c``) or across it
+    (``P_hat``: ``|r - (c-1)/2| < c``, ``w = (1 - |r - (c-1)/2|/c)/c``).  Both
+    tap sets sum to 1 exactly, so ``1^T P = 1^T`` on the interior.
+
+    ``T = R_c P_hat`` follows from the taps alone: the tap at offset ``r``
+    lands in cell ``m + floor(r/c)``, and ``floor(r/c)`` is only ``-1``, ``0``
+    or ``+1``, so ``T`` is tridiagonal and Toeplitz with the three band values
+    ``T_sup``, ``T_diag``, ``T_sub`` reported below.  ``P_1 = P_hat T^{-1}`` is
+    never formed as a matrix: ``T u = xbar`` is solved as a banded system and
+    the taps are then applied to ``u``.
+    """
+
+    def __init__(self, b: int, cell_ticks: int, n_cells: int):
+        self.b = int(b)
+        self.c = int(cell_ticks)
+        self.n = int(n_cells)
+        self.cc = cell_centers(self.b, self.c, self.n)
+        c = self.c
+        r = np.arange(-c, 2 * c + 1)
+        w = np.maximum(0.0, 1.0 - np.abs(r - (c - 1) / 2.0) / c) / c
+        keep = w > 0
+        self.hat_taps, self.hat_w = r[keep], w[keep]
+        off = np.floor(self.hat_taps / float(c)).astype(int)
+        if not set(np.unique(off)).issubset({-1, 0, 1}):
+            raise AssertionError("P_hat is not tridiagonal on this cell grid")
+        self.T_sub = float(self.hat_w[off == 1].sum())     # T[m+1, m]
+        self.T_diag = float(self.hat_w[off == 0].sum())    # T[m,   m]
+        self.T_sup = float(self.hat_w[off == -1].sum())    # T[m-1, m]
+        self.box_taps = np.arange(c)
+        self.box_w = np.full(c, 1.0 / c)
+
+    # -- geometry -----------------------------------------------------------
+    def index(self, tick) -> np.ndarray:
+        """Cell index of the fine tick(s): ``m = floor((tick - b)/c)``."""
+        return np.floor((np.asarray(tick, dtype=float) - self.b)
+                        / self.c).astype(np.int64)
+
+    def window(self, lo_tick: int, hi_tick: int) -> tuple[int, int]:
+        """The cell range ``[m_lo, m_hi)`` covering the fine ticks
+        ``[lo_tick, hi_tick)``, clipped to the grid."""
+        m_lo = int(np.floor((lo_tick - self.b) / self.c))
+        m_hi = int(np.ceil((hi_tick - self.b) / self.c))
+        return max(m_lo, 0), min(m_hi, self.n)
+
+    def fine_origin(self, m_lo: int) -> int:
+        return self.b + self.c * int(m_lo)
+
+    def taps(self, pname: str) -> tuple[np.ndarray, np.ndarray]:
+        if pname in ("uniform", "P0", "box"):
+            return self.box_taps, self.box_w
+        if pname in ("corrected_hat", "hat", "P1"):
+            return self.hat_taps, self.hat_w
+        raise ValueError(f"unknown cell prolongation {pname!r}")
+
+    # -- R_c ----------------------------------------------------------------
+    def restrict(self, ix, iy, tick, q, nx: int, ny: int) -> np.ndarray:
+        """``R_c x`` from the fine truth list, shape ``(nx, ny, n)``."""
+        m = self.index(tick)
+        ok = (m >= 0) & (m < self.n)
+        out = np.zeros((nx, ny, self.n))
+        np.add.at(out, (np.asarray(ix)[ok], np.asarray(iy)[ok], m[ok]),
+                  np.asarray(q, dtype=float)[ok])
+        return out
+
+    # -- T^{-1} -------------------------------------------------------------
+    def solve_T(self, x: np.ndarray) -> np.ndarray:
+        """``u = T^{-1} xbar`` for ``xbar`` of shape ``(n_rows, n_cols)``.
+
+        ``n_cols`` is the number of cells actually carried by ``x``: the whole
+        grid, or the stored window when a candidate has been cropped to it.
+        ``T`` is symmetric tridiagonal Toeplitz with band ratio
+        ``T_sub / T_diag <= 0.17``, so ``T^{-1}`` decays by at least that
+        factor per cell and a crop hundreds of cells away from the signal
+        changes ``P_1 xbar`` by nothing a float carries; the cropping distance
+        is the job's ``margin_windows``, which is reported.
+        """
+        if self.c == 1:
+            return np.asarray(x, dtype=float)
+        from scipy.linalg import solve_banded
+        xf = np.asarray(x, dtype=float)
+        n = xf.shape[-1]
+        ab = np.zeros((3, n))
+        ab[0, 1:] = self.T_sup
+        ab[1, :] = self.T_diag
+        ab[2, :-1] = self.T_sub
+        return np.ascontiguousarray(solve_banded((1, 1), ab, xf.T).T)
+
+    # -- P ------------------------------------------------------------------
+    def to_fine(self, x: np.ndarray, pname: str, m_lo: int, m_hi: int,
+                x_lo: int = 0) -> np.ndarray:
+        """``P xbar`` on the fine ticks ``[b + c m_lo, b + c m_hi)``.
+
+        ``x`` is ``(..., n_cols)`` covering cells ``[x_lo, x_lo + n_cols)``
+        (the whole grid when ``x_lo = 0`` and ``n_cols = n``); the result is
+        ``(n_rows, c (m_hi - m_lo))`` with ``n_rows`` the flattened leading
+        axes.  The fine origin is ``fine_origin(m_lo)``, which is what
+        :func:`fine_xhat` wants as ``win_lo``.
+        """
+        taps, w = self.taps(pname)
+        xf = np.asarray(x, dtype=float)
+        xf = xf.reshape(-1, xf.shape[-1])
+        u = xf if pname in ("uniform", "P0", "box") else self.solve_T(xf)
+        nf = self.c * (int(m_hi) - int(m_lo))
+        out = np.zeros((u.shape[0], nf))
+        base = self.c * (np.arange(xf.shape[-1]) + int(x_lo) - int(m_lo))
+        for r, wr in zip(taps, w):
+            idx = base + int(r)
+            ok = (idx >= 0) & (idx < nf)
+            if ok.any():
+                out[:, idx[ok]] += wr * u[:, ok]
+        return out
+
+    # -- what is measured rather than assumed -------------------------------
+    def report(self, n_probe: int = 3) -> dict:
+        """``R_c P = I``, ``1^T P = 1^T`` and ``T T^{-1} = I``, all measured.
+
+        ``R_c P = I`` is measured end to end: unit charge is put on one cell,
+        prolonged to the fine ticks by the very code the arms use, and box
+        coarsened back with :meth:`index`.
+        """
+        out = {"cell_ticks": self.c, "n_cells": self.n,
+               "cell_center_first": float(self.cc[0]),
+               "cell_center_offset_in_cell": (self.c - 1) / 2.0,
+               "T_bands_sup_diag_sub": [self.T_sup, self.T_diag, self.T_sub],
+               "T_band_sum": self.T_sup + self.T_diag + self.T_sub,
+               "hat_tap_offsets": [int(v) for v in self.hat_taps],
+               "hat_tap_weights": [float(v) for v in self.hat_w],
+               "hat_tap_weight_sum": float(self.hat_w.sum()),
+               "box_tap_weight_sum": float(self.box_w.sum())}
+        mid = self.n // 2
+        ms = [mid + 3 * i for i in range(int(n_probe))]
+        for pname in ("uniform", "corrected_hat"):
+            worst_rp, worst_col = 0.0, 0.0
+            for m in ms:
+                m_lo, m_hi = max(m - 40, 0), min(m + 41, self.n)
+                e = np.zeros((1, self.n))
+                e[0, m] = 1.0
+                pf = self.to_fine(e, pname, m_lo, m_hi)[0]
+                j = self.fine_origin(m_lo) + np.arange(len(pf))
+                kk = self.index(j)
+                rp = np.zeros(self.n)
+                np.add.at(rp, kk, pf)
+                tgt = np.zeros(self.n)
+                tgt[m] = 1.0
+                worst_rp = max(worst_rp, float(np.abs(rp - tgt).max()))
+                worst_col = max(worst_col, abs(float(pf.sum()) - 1.0))
+            out[f"{pname}_Rc_P_minus_I_max"] = worst_rp
+            out[f"{pname}_colsum_minus_1_max"] = worst_col
+            out[f"{pname}_probed_cells"] = ms
+        if self.c == 1:
+            out["c1_identity"] = {
+                "hat_taps_is_single_zero": (list(self.hat_taps) == [0]
+                                            and float(self.hat_w[0]) == 1.0),
+                "T_is_identity": (self.T_diag == 1.0 and self.T_sub == 0.0
+                                  and self.T_sup == 0.0),
+                "note": ("at c = 1 the triangle collapses onto the tick "
+                         "itself, so P_hat = T = I and P_1 = P_0 = I")}
+        return out
+
+
+def cell_xhat(H: EvalHarness, grid: CellGrid, x: np.ndarray, pname: str,
+              m_lo: int, m_hi: int, sigma_us: float,
+              x_lo: int = 0) -> np.ndarray:
+    """``H P xbar`` on ``(n_pads, n_fine)`` for a cell-basis candidate."""
+    pf = grid.to_fine(x, pname, m_lo, m_hi, x_lo)
+    return fine_xhat(H, pf, grid.fine_origin(m_lo), sigma_us)
+
+
+def cell_charge_model_taps(grid: CellGrid, cell_model: str
+                           ) -> tuple[np.ndarray, np.ndarray]:
+    """The fine-tick representative of one unit of cell charge, as taps.
+
+    ``uniform`` -> ``1/c`` on each of the cell's ``c`` ticks (``P_0``);
+    ``delta`` -> unit mass at the cell's LOWER EDGE, which is where the delta
+    operator releases it.  This is the fine signal whose exact functional the
+    cell operator must reproduce, so it is what the forward validation uses.
+    """
+    if cell_model == "uniform":
+        return grid.box_taps, grid.box_w
+    if cell_model == "delta":
+        return np.array([0]), np.array([1.0])
+    raise ValueError(f"unknown cell_model {cell_model!r}")
+
+
+def prolong_truth_to_fine(grid: CellGrid, Rx: np.ndarray, taps: np.ndarray,
+                          w: np.ndarray
+                          ) -> tuple[np.ndarray, np.ndarray, np.ndarray,
+                                     np.ndarray]:
+    """A cell-basis charge array as a sparse fine-tick list ``(ix, iy, t, q)``.
+
+    Used to feed :func:`direct_sum_records`, which evaluates the exact
+    functional term by term on a fine-tick charge list.
+    """
+    nx, ny, n = Rx.shape
+    ix, iy, mm = np.nonzero(Rx)
+    q = Rx[ix, iy, mm]
+    IX = np.repeat(ix, len(taps))
+    IY = np.repeat(iy, len(taps))
+    TT = (grid.b + grid.c * np.repeat(mm, len(taps))
+          + np.tile(taps, len(mm)))
+    QQ = np.repeat(q, len(taps)) * np.tile(w, len(mm))
+    return IX, IY, TT.astype(np.int64), QQ
 
 
 # ---------------------------------------------------------------------------
@@ -1618,3 +1985,923 @@ class FineBasisProbePlots(_Recorder):
                 json.dump({"algorithm": self.name, "result": out}, fh, indent=1,
                           default=str)
         return out
+
+
+# ---------------------------------------------------------------------------
+# the intermediate basis: closed-form filtered inverse and the ladder in c
+# ---------------------------------------------------------------------------
+@algorithm("CellBasisInverse")
+class CellBasisInverse(_Recorder):
+    """``A_c`` on the ``c``-tick cell basis: validate, invert, score, ladder.
+
+    The same closed-form filtered inverse as
+    :class:`FineBasisInverse` -- ``xhat = A^T (A A^T + lambda I)^{-1} y`` with
+    the symbol ``G_c`` of the module docstring -- on the intermediate basis.
+    It does NOT read the bin-integrated arms, so the job needs no solver and
+    the archived coarse and fine references are quoted, not recomputed.
+
+    Validations, all asserted and all in the output:
+
+    1. ``A_c`` applied to ``R_c x`` against the exact-functional DIRECT SUM of
+       the FINE formula applied to the cell truth's fine representative
+       (``P_0 R_c x`` for ``cell_model = uniform``, unit mass at the cell's
+       lower edge for ``delta``).  This is ``A_c (R_c x)`` against
+       ``A_fine (P_0 R_c x)`` evaluated without any operator, FFT or
+       periodicity.
+    2. the dot-product test ``<A x, y> = <x, A^T y>``.
+    3. ``(A A^T) y`` by the diagonal formula ``G_c`` against ``A(A^T y)``.
+    4. ``G_c(0) = ghat(0)^2 / D`` and ``sum_s g[s] = D sum Kbar``, the two
+       identities the conservation statement rests on.
+    5. ``c = 30`` with ``cell_model = delta`` against the PRODUCTION operator
+       ``op.conv``, scanning the release shift: the production column is the
+       cell column at ``release_shift = +1`` (the ``phi = 1`` convention).
+    6. ``R_c P = I`` and ``1^T P = 1^T`` for ``P_0`` and ``P_1``
+       (:meth:`CellGrid.report`).
+
+    Props
+    -----
+    cell_ticks : int, default 5.       cell_model : ``"uniform"`` or ``"delta"``.
+    lambda_rel : list of float, default ``[1e-4, 1e-6, 1e-8]``.
+    sigma_H_us : list, default ``[0.0, 1.5, 2.0]``.
+    cell_prolongations : list, default ``["uniform", "corrected_hat"]``.
+    ladder : list of int, default ``[1, 5, 10, 30]`` -- the cell widths whose
+        REPRESENTATION term is measured.
+    ladder_solve : list of int, default ``[5, 10, 30]`` -- the subset whose
+        linear inverse is also solved and scored.  ``c = 1`` is left out by
+        default because its operator needs ~11 GB and its result is archived.
+    ladder_lambda_rel : float, default 1e-6.
+    check_coarse_identity : bool, default True.
+    margin_windows, line_pixel_y_range, segment_pixels, segment_edge_exclude
+    dtype : ``"float64"`` (default) or ``"float32"``.
+    out_json, out_npz : str
+    """
+
+    reads = ("op", "event", "readout_config", "block_offset", "charge_model")
+    writes = ("cell.result", "cell.solutions")
+
+    def execute(self, store):
+        op = store.get("op")
+        boff = np.asarray(store.get("block_offset"), dtype=float)
+        b = int(boff[2])
+        B = int(round(fit_bin_ticks(store)))
+        dtype = (torch.float64 if str(self.props.get("dtype", "float64"))
+                 == "float64" else torch.float32)
+        tol_fwd = 1e-6 if dtype == torch.float64 else 1e-4
+        tol_lin = 1e-5 if dtype == torch.float64 else 1e-3
+        cell_ticks = int(self.props.get("cell_ticks", 5))
+        cell_model = str(self.props.get("cell_model", "uniform"))
+        lam_rel = [float(v) for v in self.props.get(
+            "lambda_rel", [1e-4, 1e-6, 1e-8])]
+        sigmas = [float(v) for v in self.props.get("sigma_H_us",
+                                                   [0.0, 1.5, 2.0])]
+        pnames = [str(v) for v in self.props.get(
+            "cell_prolongations", ["uniform", "corrected_hat"])]
+        ladder = [int(v) for v in self.props.get("ladder", [1, 5, 10, 30])]
+        ladder_solve = [int(v) for v in self.props.get("ladder_solve",
+                                                       [5, 10, 30])]
+        lam_ladder = float(self.props.get("ladder_lambda_rel", 1e-6))
+        margin = int(self.props.get("margin_windows", 40))
+        dev = op.device
+
+        prep = self.services["detector"].prepared(B)
+        fr = np.asarray(prep.full_response, dtype=np.float64)
+
+        H = EvalHarness(
+            store, op, margin_windows=margin,
+            line_pixel_y_range=self.props.get("line_pixel_y_range", (5, 131)),
+            segment_pixels=int(self.props.get("segment_pixels", 7)),
+            segment_edge_exclude=int(self.props.get("segment_edge_exclude", 3)))
+        pad_ext = int(np.ceil(5.0 * max(sigmas) / TICK_US)) + 2
+        win_lo = int(H.fine[0]) - pad_ext
+        win_hi = int(H.fine[-1]) + 1 + pad_ext
+        rows_r1 = np.array([r for r in range(H.n_pads)
+                            if H.pixel_x_of_pad[r] == 140
+                            and 5 <= H.pixel_y_of_pad[r] <= 131])
+
+        rec: dict = {
+            "basis": {"cell_ticks": cell_ticks, "cell_model": cell_model,
+                      "B_fine_ticks": B, "cells_per_record_window":
+                          B // cell_ticks,
+                      "dtype": str(dtype)},
+            "geometry": {
+                "block_shape": [int(v) for v in op.block_shape],
+                "q_shape_production": [int(v) for v in op.q_shape],
+                "block_offset": [float(v) for v in boff],
+                "eval_window_fine_ticks": [int(H.fine[0]), int(H.fine[-1]) + 1],
+                "eval_window_cells_production": [H.k0, H.k1],
+                "stored_fine_window": [win_lo, win_hi]},
+            "kernel": {"sum_Kbar_all_pads": float(fr.sum())},
+        }
+        arrays: dict = {}
+        rows: list = []
+
+        # ------------------------------------------------------------------
+        # the main operator
+        # ------------------------------------------------------------------
+        t0 = time.time()
+        F = FineOperator(fr, op.block_shape, B, device=dev, dtype=dtype,
+                         cell_ticks=cell_ticks, cell_model=cell_model)
+        t_build = time.time() - t0
+        grid = CellGrid(b, cell_ticks, F.N)
+        m_lo, m_hi = grid.window(win_lo, win_hi)
+        Rx_c = grid.restrict(H.truth_ix, H.truth_iy, H.truth_tick, H.truth_q,
+                             H.nx, H.ny)
+        rec["basis"].update({
+            "n_cells_per_pad": F.N, "decimation_stride_D": F.D,
+            "M_windows": F.M, "padded_pads": [F.nxp, F.nyp],
+            "n_unknowns_total": int(F.nxp * F.nyp * F.N),
+            "n_unknowns_real_pads": int(H.nx * H.ny * F.N),
+            "kernel_g_support_cells": int(F.g_np.shape[-1]),
+            "build_wall_s": t_build,
+            "stored_cell_window": [m_lo, m_hi]})
+        rec["kernel"].update({
+            "sum_g_all_pads": float(F.g_np.sum()),
+            "sum_g_over_D_all_pads": float(F.g_np.sum() / F.D),
+            "sum_g_over_D_minus_sum_Kbar": float(F.g_np.sum() / F.D - fr.sum()),
+            "G_max": F.G_max, "G_dc": F.G_dc,
+            "G_dc_over_ghat0_sq_over_D": float(
+                F.G_dc / (F.g_np.sum() ** 2 / F.D)),
+            "note": ("g is the D-tap moving sum on the cell grid of a shorter "
+                     "kernel, so ghat vanishes at every non-zero multiple of "
+                     "M and G_c(0) = ghat(0)^2 / D exactly")})
+        rec["cell_grid"] = grid.report()
+        rec["cell_grid"].update({
+            "truth_total_ke": float(H.truth_total),
+            "Rc_truth_total_ke": float(Rx_c.sum()),
+            "Rc_truth_minus_truth_ke": float(Rx_c.sum() - H.truth_total),
+            "n_nonzero_cells": int((Rx_c != 0).sum())})
+        print(f"[{self.name}] cell basis c = {cell_ticks} ({cell_model}): "
+              f"{F.N} cells/pad, D = {F.D}, {F.nxp}x{F.nyp} pads, built in "
+              f"{t_build:.1f} s; max G {F.G_max:.6g}, G(0) {F.G_dc:.6g}")
+
+        # -------- validation 1: forward vs the exact-functional direct sum --
+        taps, wts = cell_charge_model_taps(grid, cell_model)
+        IX, IY, TT, QQ = prolong_truth_to_fine(grid, Rx_c, taps, wts)
+        t0 = time.time()
+        xc = embed_pads(Rx_c, F.nxp, F.nyp, F.N, dev, dtype)
+        y_fft = F.forward(xc).cpu().numpy()[:H.nx, :H.ny]
+        del xc
+        torch.cuda.empty_cache()
+        y_dir = direct_sum_records(F.h_np, IX, IY, TT, QQ, b, B, H.nx, H.ny,
+                                   F.M, dev, dtype)
+        den = float(np.abs(y_dir).sum())
+        v1 = float(np.abs(y_fft - y_dir).sum() / den)
+        rec["validation_forward_vs_direct_sum"] = {
+            "sum_abs_difference_ke": float(np.abs(y_fft - y_dir).sum()),
+            "relative_to_sum_abs": v1,
+            "max_abs_difference_ke": float(np.abs(y_fft - y_dir).max()),
+            "sum_y_cell_operator_ke": float(y_fft.sum()),
+            "sum_y_direct_fine_sum_ke": float(y_dir.sum()),
+            "sum_abs_y_direct_ke": den,
+            "n_fine_ticks_in_representative": int(len(TT)),
+            "tolerance": tol_fwd, "wall_s": time.time() - t0,
+            "note": ("A_c (R_c x) against the fine exact functional applied to "
+                     "the cell truth's fine representative; the direct sum "
+                     "uses no FFT and no periodicity")}
+        print(f"[{self.name}] forward vs direct sum: {v1:.3e} of sum|y|")
+        if not v1 < tol_fwd:
+            raise AssertionError(f"forward vs direct sum {v1:.3e} > {tol_fwd:g}")
+
+        # -------- validations 2 and 3 ---------------------------------------
+        g = torch.Generator(device="cpu").manual_seed(11)
+        dots, aat = [], []
+        for _ in range(3):
+            xr = torch.randn((F.nxp, F.nyp, F.N), generator=g,
+                             dtype=torch.float64).to(device=dev, dtype=dtype)
+            yr = torch.randn((F.nxp, F.nyp, F.M), generator=g,
+                             dtype=torch.float64).to(device=dev, dtype=dtype)
+            a = float((F.forward(xr) * yr).sum())
+            bb = float((xr * F.adjoint(yr)).sum())
+            dots.append({"Ax_y": a, "x_Aty": bb,
+                         "relative_difference": abs(a - bb) / max(abs(a), 1e-30)})
+            u = F.AAt_fft(yr)
+            v = F.forward(F.adjoint(yr))
+            aat.append({"relative_difference": float(
+                torch.abs(u - v).sum() / torch.abs(v).sum())})
+            del xr, yr, u, v
+            torch.cuda.empty_cache()
+        rec["validation_adjoint"] = {
+            "trials": dots, "tolerance": tol_lin,
+            "worst": max(d["relative_difference"] for d in dots)}
+        rec["validation_AAt"] = {
+            "trials": aat, "tolerance": tol_lin,
+            "worst": max(d["relative_difference"] for d in aat)}
+        print(f"[{self.name}] adjoint worst "
+              f"{rec['validation_adjoint']['worst']:.3e}; A A^T formula worst "
+              f"{rec['validation_AAt']['worst']:.3e}")
+        if not rec["validation_adjoint"]["worst"] < tol_lin:
+            raise AssertionError("adjoint dot-product test failed")
+        if not rec["validation_AAt"]["worst"] < tol_lin:
+            raise AssertionError("G_c diagonal-formula test failed")
+
+        # -------- the data ---------------------------------------------------
+        blk = block_from_rows(op)
+        y_t = embed_pads(blk, F.nxp, F.nyp, F.M, dev, dtype)
+        y_norm = float(torch.linalg.vector_norm(y_t))
+        rec["data"] = {"sum_records_ke": float(blk.sum()),
+                       "sum_abs_records_ke": float(np.abs(blk).sum()),
+                       "sum_y_over_sum_Kbar_ke": float(blk.sum() / fr.sum())}
+
+        # -------- lambda scan -------------------------------------------------
+        sol: dict = {}
+        scan = []
+        for lr in lam_rel:
+            lam = lr * F.G_max
+            t0 = time.time()
+            xh = F.solve(y_t, lam)
+            wall = time.time() - t0
+            r = F.forward(xh) - y_t
+            row = {"lambda_rel": lr, "lambda": lam,
+                   "sum_xhat_ke": float(xh.sum()),
+                   "sum_xhat_pos_ke": float(xh[xh > 0].sum()),
+                   "sum_xhat_neg_ke": float(xh[xh < 0].sum()),
+                   "sum_xhat_real_pads_ke": float(xh[:H.nx, :H.ny].sum()),
+                   "sum_xhat_padding_pads_ke": float(
+                       xh.sum() - xh[:H.nx, :H.ny].sum()),
+                   "residual_rel": float(torch.linalg.vector_norm(r) / y_norm),
+                   "conservation_predicted": float(F.G_dc / (F.G_dc + lam)),
+                   "sum_y_over_sum_Kbar": float(blk.sum() / fr.sum()),
+                   "wall_s": wall}
+            scan.append(row)
+            print(f"[{self.name}] lambda_rel {lr:8.1e}  sum "
+                  f"{row['sum_xhat_ke']:10.2f} ke  x+ "
+                  f"{row['sum_xhat_pos_ke']:10.2f}  x- "
+                  f"{row['sum_xhat_neg_ke']:11.2f}  |Ax-y|/|y| "
+                  f"{row['residual_rel']:.4e}  {wall:5.2f} s")
+            sol[lr] = xh[:H.nx, :H.ny].cpu().numpy()
+            del xh, r
+            torch.cuda.empty_cache()
+        rec["lambda_scan"] = scan
+        del y_t
+        torch.cuda.empty_cache()
+
+        # -------- scoring -----------------------------------------------------
+        def _score(tag, xcells, meta, keep_arrays=True):
+            for pname in pnames:
+                pf = grid.to_fine(xcells, pname, m_lo, m_hi)
+                for s in sigmas:
+                    xh = fine_xhat(H, pf, grid.fine_origin(m_lo), s)
+                    m = score_rows(H, xh, s)
+                    pr = m.pop("_profiles")
+                    rows.append({**meta, "prolongation": pname,
+                                 "sigma_H_us": s, **m})
+                    if keep_arrays:
+                        t2 = f"{tag}_{pname}_s{s:g}"
+                        for k in ("line_xhat", "line_Hx", "line_e"):
+                            arrays[f"prof_{t2}_{k}"] = pr[k].astype(np.float32)
+                        arrays[f"ring1prof_{t2}"] = \
+                            xh[rows_r1].mean(axis=0).astype(np.float32)
+                    r = rows[-1]
+                    print(f"[{self.name}] s{s:4.2f} c{meta['cell_ticks']:3d} "
+                          f"{pname:14s} {r['arm']:22s} E_rel {r['E_rel']:9.5f} "
+                          f" cons {r['conservation_rel']:+9.5f}  ring1+ "
+                          f"{r['zero_preservation']['ring1']['pos_per_pad_ke']:8.4f}")
+                del pf
+
+        meta0 = {"basis": "cell", "cell_ticks": cell_ticks,
+                 "cell_model": cell_model}
+        _score("repr", Rx_c, {**meta0, "arm": "representation_term"})
+        for lr in lam_rel:
+            _score(f"minnorm_lrel{lr:g}", sol[lr],
+                   {**meta0, "arm": f"cell{cell_ticks}_minnorm_lrel{lr:g}",
+                    "lambda_rel": lr})
+
+        # raw cell-space line profiles, for the raw panel of the profile figure
+        arrays["cell_centers"] = grid.cc[m_lo:m_hi].astype(np.float64)
+        arrays["cell_window"] = np.array([m_lo, m_hi])
+        arrays["fine_ticks"] = H.fine.astype(np.int64)
+        v = np.zeros(m_hi - m_lo)
+        kt = grid.index(H.truth_tick) - m_lo
+        ok = (kt >= 0) & (kt < m_hi - m_lo)
+        np.add.at(v, kt[ok], H.truth_q[ok])
+        arrays["truth_padsum_cells"] = v
+        arrays["truth_cell_line"] = \
+            Rx_c.reshape(H.n_pads, -1)[H.line_rows].mean(axis=0)[m_lo:m_hi]
+        for lr in lam_rel:
+            arrays[f"cell_line_minnorm_lrel{lr:g}"] = \
+                sol[lr].reshape(H.n_pads, -1)[H.line_rows].mean(
+                    axis=0)[m_lo:m_hi]
+            arrays[f"transverse_minnorm_lrel{lr:g}"] = \
+                sol[lr][:, :, m_lo:m_hi].sum(axis=(1, 2))
+        tv = np.zeros(H.nx)
+        np.add.at(tv, H.truth_ix, H.truth_q)
+        arrays["transverse_truth"] = tv
+        # the truth's fine-tick profile on the line, for the raw panel
+        jw = np.arange(win_lo, win_hi)
+        tf = np.zeros(len(jw))
+        jt = H.truth_tick - win_lo
+        ok = (jt >= 0) & (jt < len(jw))
+        np.add.at(tf, jt[ok], H.truth_q[ok])
+        arrays["stored_window_ticks"] = jw
+        arrays["truth_padsum_fine"] = tf
+
+        del sol
+        del F
+        torch.cuda.empty_cache()
+
+        # ------------------------------------------------------------------
+        # validation 5: c = 30 + delta is the production operator
+        # ------------------------------------------------------------------
+        if bool(self.props.get("check_coarse_identity", True)):
+            k_id = int(H.k_truth_hi)
+            e_c = np.zeros(op.q_shape)
+            e_c[H.nx // 2, H.ny // 2, k_id] = 1.0
+            y_c = op.conv(op.to_tensor(e_c)).cpu().numpy()
+            ident, best = {}, None
+            for shift in (0, 1, 2, -1):
+                Fc = FineOperator(fr, op.block_shape, B, device=dev,
+                                  dtype=dtype, cell_ticks=B,
+                                  cell_model="delta", release_shift=shift)
+                xd = torch.zeros((Fc.nxp, Fc.nyp, Fc.N), dtype=dtype,
+                                 device=dev)
+                xd[H.nx // 2, H.ny // 2, k_id] = 1.0
+                y_f = Fc.forward(xd).cpu().numpy()[:H.nx, :H.ny]
+                d = float(np.abs(y_f - y_c).sum())
+                ident[f"shift_{shift:+d}"] = {
+                    "sum_abs_difference": d,
+                    "relative_to_sum_abs": d / float(np.abs(y_c).sum())}
+                if best is None or d < best[1]:
+                    best = (shift, d, d / float(np.abs(y_c).sum()))
+                del xd, Fc
+                torch.cuda.empty_cache()
+            ident["best_shift_ticks"] = best[0]
+            ident["best_relative_to_sum_abs"] = best[2]
+            ident["probed_production_cell"] = k_id
+            ident["note"] = (
+                "the cell operator at c = 30, cell_model = delta and "
+                "release_shift = s releases cell m at fine tick b + 30m + s; "
+                "the production A_coarse releases cell k at c_k + 1 = "
+                "b + 30k + 1, so the best shift is +1 and the residual is the "
+                "float floor of this dtype")
+            rec["coarse_operator_identity"] = ident
+            print(f"[{self.name}] c=30 delta vs production A_coarse: best "
+                  f"shift {best[0]:+d}, {best[2]:.3e} of sum|y|")
+
+        # ------------------------------------------------------------------
+        # the ladder in c
+        # ------------------------------------------------------------------
+        lad: list = []
+        for cc in ladder:
+            gc = CellGrid(b, cc, (B // cc) * int(op.block_shape[2]))
+            ml, mh = gc.window(win_lo, win_hi)
+            Rxc = gc.restrict(H.truth_ix, H.truth_iy, H.truth_tick, H.truth_q,
+                              H.nx, H.ny)
+            ent = {"cell_ticks": cc, "n_cells_per_pad": gc.n,
+                   "decimation_stride_D": B // cc,
+                   "n_unknowns_real_pads": int(H.nx * H.ny * gc.n),
+                   "grid": gc.report(n_probe=1), "representation": {},
+                   "linear_inverse": {}}
+            for pname in pnames:
+                pf = gc.to_fine(Rxc, pname, ml, mh)
+                for s in sigmas:
+                    m = score_rows(H, fine_xhat(H, pf, gc.fine_origin(ml), s), s)
+                    m.pop("_profiles")
+                    ent["representation"][f"{pname}_s{s:g}"] = {
+                        "E_rel": m["E_rel"],
+                        "conservation_rel": m["conservation_rel"],
+                        "segments_rel_error_rms":
+                            m.get("segments", {}).get("rel_error_rms")}
+                    rows.append({"basis": "cell", "cell_ticks": cc,
+                                 "cell_model": cell_model,
+                                 "arm": "representation_term_ladder",
+                                 "prolongation": pname, "sigma_H_us": s, **m})
+                del pf
+            print(f"[{self.name}] ladder c = {cc:2d}: representation "
+                  + "  ".join(
+                      f"{k} {v['E_rel']:.5f}"
+                      for k, v in ent["representation"].items()
+                      if k.endswith("s1.5") or k.endswith("s2")))
+            if cc in ladder_solve:
+                t0 = time.time()
+                Fl = FineOperator(fr, op.block_shape, B, device=dev,
+                                  dtype=dtype, cell_ticks=cc,
+                                  cell_model=cell_model)
+                tb = time.time() - t0
+                yl = embed_pads(blk, Fl.nxp, Fl.nyp, Fl.M, dev, dtype)
+                t0 = time.time()
+                xl = Fl.solve(yl, lam_ladder * Fl.G_max)
+                tw = time.time() - t0
+                xln = xl[:H.nx, :H.ny].cpu().numpy()
+                ent["linear_inverse"] = {
+                    "lambda_rel": lam_ladder, "build_wall_s": tb,
+                    "solve_wall_s": tw, "G_max": Fl.G_max, "G_dc": Fl.G_dc,
+                    "sum_xhat_ke": float(xl.sum()),
+                    "sum_xhat_pos_ke": float(xl[xl > 0].sum()),
+                    "sum_xhat_neg_ke": float(xl[xl < 0].sum()),
+                    "scores": {}}
+                del xl, yl, Fl
+                torch.cuda.empty_cache()
+                for pname in pnames:
+                    pf = gc.to_fine(xln, pname, ml, mh)
+                    for s in sigmas:
+                        m = score_rows(H, fine_xhat(H, pf,
+                                                    gc.fine_origin(ml), s), s)
+                        m.pop("_profiles")
+                        ent["linear_inverse"]["scores"][f"{pname}_s{s:g}"] = {
+                            "E_rel": m["E_rel"],
+                            "conservation_rel": m["conservation_rel"],
+                            "ring1_pos_per_pad_ke":
+                                m["zero_preservation"]["ring1"]["pos_per_pad_ke"],
+                            "ring1_neg_per_pad_ke":
+                                m["zero_preservation"]["ring1"]["neg_per_pad_ke"],
+                            "segments_rel_error_rms":
+                                m.get("segments", {}).get("rel_error_rms")}
+                        rows.append({"basis": "cell", "cell_ticks": cc,
+                                     "cell_model": cell_model,
+                                     "arm": "minnorm_ladder",
+                                     "lambda_rel": lam_ladder,
+                                     "prolongation": pname,
+                                     "sigma_H_us": s, **m})
+                    del pf
+                print(f"[{self.name}] ladder c = {cc:2d}: linear inverse "
+                      + "  ".join(
+                          f"{k} {v['E_rel']:.5f}"
+                          for k, v in ent["linear_inverse"]["scores"].items()
+                          if k.endswith("s1.5")))
+            lad.append(ent)
+        rec["ladder"] = lad
+        rec["rows"] = rows
+        rec["lambda_rel"] = lam_rel
+        rec["sigma_H_us"] = sigmas
+        rec["cell_prolongations"] = pnames
+        self._emit(store, rec, arrays)
+        self.put(store, "cell.solutions", {"harness": H, "grid": grid,
+                                           "arrays": arrays})
+
+
+# ---------------------------------------------------------------------------
+# figures C1-C5 of the intermediate-basis campaign
+# ---------------------------------------------------------------------------
+@algorithm("CellFigures")
+class CellFigures(_Recorder):
+    """Figures C1-C5: the ``c``-tick basis beside its fine and coarse references.
+
+    Unlike :class:`FineBasisPlots`, this algorithm reads FILES, not the store:
+    the figures put three jobs of this campaign (the linear scan and ladder,
+    the nonlinear arms, the probe) beside the ARCHIVED fine and bin-integrated
+    results, which were produced by earlier jobs and are quoted rather than
+    re-run.  Every input is named in the YAML, so a reader can see exactly
+    which file each number came from, and the algorithm has no store
+    dependencies at all.
+
+    Props
+    -----
+    cell_linear_json/_npz, cell_nonlinear_json/_npz, cell_probe_json/_npz
+    ref_fine_scan_json/_npz     the archived fine linear campaign.
+    ref_fine_nl_json/_npz       the archived fine nonlinear campaign.
+    ref_fine_probe_npz/_json    the archived fine nonlinear probe.
+    cell_lambda_rel : float, default 1e-6   -- the cell min-norm arm shown.
+    fine_lambda_rel : float, default 1e-6   -- the fine min-norm arm shown.
+    cell_prolongation : str, default "uniform"  -- the cell P drawn in the
+        figures where one curve per arm is drawn (the tables carry both).
+    l1_middle : str, default "cell5_pos_l1_0.01".
+    fine_iteration_time_s : float, default 0.178 -- the archived wall time per
+        FISTA iteration on the fine basis (fine_nl_probe.json: 177.9 s for
+        1000 iterations), which this campaign does not re-measure.
+    figdir, out_json
+    """
+
+    reads = ()
+    writes = ("cell.figures",)
+
+    def execute(self, store):
+        self._store = store
+        self.put(store, "cell.figures", {"pending": True})
+
+    # -- small readers -------------------------------------------------------
+    @staticmethod
+    def _json(path):
+        with open(path) as fh:
+            return json.load(fh)["result"]
+
+    @staticmethod
+    def _npz(path):
+        return dict(np.load(path, allow_pickle=True))
+
+    @staticmethod
+    def _row(rows, **sel):
+        for r in rows:
+            if all(abs(r.get(k, None) - v) < 1e-12
+                   if isinstance(v, float) else r.get(k, None) == v
+                   for k, v in sel.items()):
+                return r
+        return None
+
+    def finalize(self):
+        from .finebasis_nonlinear_algs import C_POS, C_POSL1, L1_TINTS, tint
+        plt = ieee_style()
+        P = self.props
+        CL = self._json(P["cell_linear_json"])
+        CLA = self._npz(P["cell_linear_npz"])
+        CN = self._json(P["cell_nonlinear_json"])
+        CNA = self._npz(P["cell_nonlinear_npz"])
+        FS = self._json(P["ref_fine_scan_json"])
+        FSA = self._npz(P["ref_fine_scan_npz"])
+        FN = self._json(P["ref_fine_nl_json"])
+        FNA = self._npz(P["ref_fine_nl_npz"])
+        cprobe = self._json(P["cell_probe_json"]) if P.get("cell_probe_json") \
+            else None
+        cprobeA = self._npz(P["cell_probe_npz"]) if P.get("cell_probe_npz") \
+            else {}
+        fprobe = self._json(P["ref_fine_probe_json"]) \
+            if P.get("ref_fine_probe_json") else None
+        fprobeA = self._npz(P["ref_fine_probe_npz"]) \
+            if P.get("ref_fine_probe_npz") else {}
+        outdir = Path(P.get("figdir", "figs_cell5"))
+        made: list = []
+        lb = float(P.get("cell_lambda_rel", 1e-6))
+        fb = float(P.get("fine_lambda_rel", 1e-6))
+        pn = str(P.get("cell_prolongation", "uniform"))
+        mid = str(P.get("l1_middle", "cell5_pos_l1_0.01"))
+        t_fine_iter = float(P.get("fine_iteration_time_s", 0.178))
+        ct = int(CL["basis"]["cell_ticks"])
+        dt = TICK_US
+
+        def cellrow(arm, s, prol=None):
+            return self._row(CL["rows"], arm=arm, sigma_H_us=float(s),
+                             prolongation=prol or pn) \
+                or self._row(CN["rows"], arm=arm, sigma_H_us=float(s),
+                             prolongation=prol or pn)
+
+        def finerow(arm, s, prol=None):
+            for rows in (FN["rows"], FS["rows"]):
+                r = self._row(rows, arm=arm, sigma_H_us=float(s),
+                              **({"prolongation": prol} if prol else {}))
+                if r is not None:
+                    return r
+            return None
+
+        l1_labels = [str(a["label"]) for a in CN["arm_specs"]
+                     if float(a["alpha"]) > 0]
+        pos_label = [str(a["label"]) for a in CN["arm_specs"]
+                     if float(a["alpha"]) == 0][0]
+        lin_label = CN.get("linear_label", "cell5_minnorm")
+        l1_colors = list(L1_TINTS)
+        while len(l1_colors) < len(l1_labels):
+            l1_colors.append(tint(C_POSL1, 0.8))
+
+        # ---------------- C1: E_rel at the goal ---------------------------
+        fig, ax = plt.subplots(1, 2, figsize=(11.0, 3.2),
+                               gridspec_kw={"width_ratios": [1.0, 1.9]})
+        a = ax[0]
+        lad = CL["ladder"]
+        cs = [e["cell_ticks"] for e in lad]
+        xs = np.arange(len(cs))
+        for i, (prol, lab, cc) in enumerate(
+                (("uniform", r"$P_0$", OI["sky"]),
+                 ("corrected_hat", r"$P_1$", C_COARSE))):
+            for j, s in enumerate((1.5, 2.0)):
+                v = [e["representation"][f"{prol}_s{s:g}"]["E_rel"] for e in lad]
+                a.bar(xs + (2 * i + j - 1.5) * 0.2, np.maximum(v, 1e-6), 0.2,
+                      color=cc, alpha=1.0 if j == 0 else 0.55, edgecolor="k",
+                      linewidth=0.3,
+                      label=rf"{lab}, $\sigma_H={s:g}\,\mu$s")
+        a.set_yscale("log")
+        a.set_ylim(1e-6, 1.0)
+        a.set_xticks(xs)
+        a.set_xticklabels([f"c = {c}" for c in cs])
+        a.set_ylabel(r"representation term $E_{\rm rel}$")
+        a.set_title("(a) basis cost alone, $H(PR_c-I)x$")
+        a.legend(frameon=False, fontsize=5.5, ncol=2)
+        a.text(0.02, 0.02, "c = 1: exactly zero\n($R_1=I$, $P_0=P_1=I$)",
+               transform=a.transAxes, fontsize=5.5, va="bottom",
+               color=OI["grey"])
+
+        a = ax[1]
+        ent = [(rf"cell{ct} repr. ({'$P_0$' if pn == 'uniform' else '$P_1$'})",
+                lambda s: cellrow("representation_term", s), OI["grey"]),
+               (rf"cell{ct} min-norm", lambda s: cellrow(
+                   f"cell{ct}_minnorm_lrel{lb:g}", s), C_FINE),
+               (rf"cell{ct} pos, $\alpha=0$",
+                lambda s: cellrow(pos_label, s), C_POS)]
+        for i, l in enumerate(l1_labels):
+            ent.append((rf"cell{ct} pos+$\ell_1$ {l.split('_')[-1]}",
+                        (lambda ll: (lambda s: cellrow(ll, s)))(l),
+                        l1_colors[i]))
+        ent += [("fine min-norm",
+                 lambda s: finerow(f"fine_lrel{fb:g}", s) or
+                 finerow("fine_minnorm", s), tint(C_FINE, 0.45)),
+                (r"fine pos, $\alpha=0$",
+                 lambda s: finerow("fine_pos_a0", s), tint(C_POS, 0.45)),
+                (r"fine pos+$\ell_1$ 0.01",
+                 lambda s: finerow("fine_pos_l1_0.01", s), tint(C_POSL1, 0.45)),
+                (r"coarse LS, $P_1$",
+                 lambda s: finerow("LS_nopos", s, "corrected_hat"), C_COARSE),
+                (r"coarse pos, $\alpha=0$",
+                 lambda s: finerow("pos_a0", s, "corrected_hat"), OI["sky"])]
+        xs = np.arange(len(ent))
+        for j, s in enumerate((1.5, 2.0)):
+            v = [(f(s) or {}).get("E_rel", np.nan) for _, f, _c in ent]
+            a.bar(xs + (j - 0.5) * 0.4, v, 0.4, color=[e[2] for e in ent],
+                  alpha=1.0 if j == 0 else 0.55, edgecolor="k", linewidth=0.4,
+                  label=rf"$\sigma_H={s:g}\,\mu$s")
+            for xi, vv in zip(xs, v):
+                a.text(xi + (j - 0.5) * 0.4, vv, f"{vv:.3f}", fontsize=5.0,
+                       ha="center", va="bottom", rotation=90)
+        a.set_xticks(xs)
+        a.set_xticklabels([e[0] for e in ent], rotation=28, ha="right",
+                          fontsize=5.5)
+        a.set_ylabel(r"$E_{\rm rel}$")
+        a.set_ylim(0, 1.05 * np.nanmax(
+            [(f(1.5) or {}).get("E_rel", 0) for _, f, _c in ent]) * 1.35)
+        a.set_title(rf"(b) every arm on the $c={ct}$ basis "
+                    r"(solid) beside its archived references")
+        a.legend(frameon=False, fontsize=6)
+        fig.tight_layout()
+        save(fig, outdir, "C1_Erel_at_goal", made)
+
+        # ---------------- C2: line-averaged profiles -----------------------
+        ftk = CNA["fine_ticks"].astype(float)
+        wc = CNA["stored_window_ticks"].astype(float)      # cell centres
+        tp = CNA["truth_padsum_fine"]                      # per cell
+        cen = float((tp * wc).sum() / max(tp.sum(), 1e-30))
+        n_line = int(self._row(CN["rows"], arm=pos_label,
+                               sigma_H_us=1.5)["n_line_pads"])
+        fig, ax = plt.subplots(1, 2, figsize=(8.6, 2.9))
+        a = ax[0]
+        ftk_f = FNA["stored_window_ticks"].astype(float)
+        a.plot((ftk_f - cen) * dt,
+               FNA["truth_padsum_fine"] / max(n_line, 1),
+               color=C_TRUTH, lw=1.1, label=r"$x$ (fine truth, 50 ns)")
+        a.plot((ftk_f - cen) * dt, FSA[f"fine_line_lrel{fb:g}"],
+               color=tint(C_FINE, 0.5), lw=0.9,
+               label="fine min-norm (50 ns)")
+        edges = np.concatenate([wc - ct / 2.0, [wc[-1] + ct / 2.0]])
+        for lab, key, cc, ls in (
+                (rf"cell{ct} min-norm", lin_label, C_FINE, "-"),
+                (rf"cell{ct} pos, $\alpha=0$", pos_label, C_POS, "-"),
+                (rf"cell{ct} pos+$\ell_1$ {mid.split('_')[-1]}", mid,
+                 C_POSL1, "--")):
+            a.stairs(CNA["fine_line_raw_" + key] / ct, (edges - cen) * dt,
+                     color=cc, ls=ls, lw=1.0, label=lab)
+        a.axhline(0, color="k", lw=0.4)
+        a.set_xlim(-9, 9)
+        a.set_xlabel(r"time from the truth centroid [$\mu$s]")
+        a.set_ylabel("mean over interior line pads [ke / fine tick]")
+        a.set_title(r"(a) $\sigma_H = 0$ (raw)")
+        a.legend(frameon=False, fontsize=5.5)
+
+        a = ax[1]
+        tus = (ftk - cen) * dt
+        a.plot(tus, CNA[f"prof_{pos_label}_{pn}_s1.5_line_Hx"], color=C_HTRUTH,
+               lw=1.3, label=r"$Hx$")
+        a.plot(tus, FSA[f"prof_fine_lrel{fb:g}_s1.5_line_xhat"],
+               color=tint(C_FINE, 0.5), lw=0.9, label="fine min-norm")
+        for lab, key, cc, ls in (
+                (rf"cell{ct} min-norm", lin_label, C_FINE, "-"),
+                (rf"cell{ct} pos, $\alpha=0$", pos_label, C_POS, "-"),
+                (rf"cell{ct} pos+$\ell_1$ {mid.split('_')[-1]}", mid,
+                 C_POSL1, "--")):
+            a.plot(tus, CNA[f"prof_{key}_{pn}_s1.5_line_xhat"], color=cc,
+                   ls=ls, lw=1.0, label=lab)
+        a.set_xlim(-9, 9)
+        a.set_xlabel(r"time from the truth centroid [$\mu$s]")
+        a.set_title(r"(b) $\sigma_H = 1.5\,\mu$s")
+        a.legend(frameon=False, fontsize=5.5)
+        fig.tight_layout()
+        save(fig, outdir, "C2_line_profiles", made)
+
+        # ---------------- C3: ring ledger ---------------------------------
+        led = [(rf"cell{ct} min-norm", lambda s: cellrow(lin_label, s), C_FINE),
+               (rf"cell{ct} pos $\alpha=0$",
+                lambda s: cellrow(pos_label, s), C_POS)]
+        for i, l in enumerate(l1_labels):
+            led.append((rf"cell{ct} $\ell_1$ {l.split('_')[-1]}",
+                        (lambda ll: (lambda s: cellrow(ll, s)))(l),
+                        l1_colors[i]))
+        led += [("fine min-norm", lambda s: finerow("fine_minnorm", s),
+                 tint(C_FINE, 0.45)),
+                (r"fine pos $\alpha=0$", lambda s: finerow("fine_pos_a0", s),
+                 tint(C_POS, 0.45)),
+                (r"coarse LS $P_1$",
+                 lambda s: finerow("LS_nopos", s, "corrected_hat"), C_COARSE),
+                (r"coarse pos $\alpha=0$",
+                 lambda s: finerow("pos_a0", s, "corrected_hat"), OI["sky"])]
+        rings = [("ring1", "ring 1"), ("ring2", "ring 2"),
+                 ("ring_ge3", r"ring $\geq$3")]
+        fig, ax = plt.subplots(1, 2, figsize=(9.4, 3.0))
+        for si, s in enumerate((0.0, 1.5)):
+            a = ax[si]
+            xs = np.arange(len(rings))
+            w = 0.8 / len(led)
+            for i, (lab, f, cc) in enumerate(led):
+                r = f(s)
+                if r is None:
+                    continue
+                z = r["zero_preservation"]
+                p = [z[k]["pos_per_pad_ke"] for k, _ in rings]
+                n = [z[k]["neg_per_pad_ke"] for k, _ in rings]
+                off = (i - (len(led) - 1) / 2) * w
+                a.bar(xs + off, p, w, color=cc, edgecolor="k", linewidth=0.3,
+                      label=lab if si == 0 else None)
+                a.bar(xs + off, n, w, color=cc, alpha=0.45, edgecolor="k",
+                      linewidth=0.3)
+            a.axhline(0, color="k", lw=0.5)
+            a.set_xticks(xs)
+            a.set_xticklabels([t for _, t in rings])
+            a.set_ylabel("charge per pad [ke]")
+            a.set_title(rf"$\sigma_H = {s:g}\,\mu$s "
+                        r"(solid $\Sigma^+$, pale $\Sigma^-$)")
+        ax[0].legend(frameon=False, fontsize=5.0, ncol=2)
+        fig.tight_layout()
+        save(fig, outdir, "C3_ring_ledger", made)
+
+        # ---------------- C4: the resolution probe -------------------------
+        if cprobe is not None:
+            self._c4(plt, cprobe, cprobeA, fprobe, fprobeA, outdir, made, ct,
+                     pn)
+
+        # ---------------- C5: the ladder in c ------------------------------
+        fig, ax = plt.subplots(1, 2, figsize=(8.4, 2.9))
+        a = ax[0]
+        floor = 3e-7
+        for prol, lab, cc, mk in (("uniform", r"$P_0$", OI["green"], "o"),
+                                  ("corrected_hat", r"$P_1$", OI["purple"],
+                                   "s")):
+            for s, ls in ((1.5, "-"), (2.0, "--")):
+                v = [max(e["representation"][f"{prol}_s{s:g}"]["E_rel"], floor)
+                     for e in lad]
+                a.loglog(cs, v, color=cc, ls=ls, marker=mk, ms=3.5, lw=1.0,
+                         label=rf"repr. {lab}, $\sigma_H={s:g}$")
+        for s, cc, ls in ((1.5, C_FINE, "-"), (2.0, tint(C_FINE, 0.5), "--")):
+            xx = [e["cell_ticks"] for e in lad if e["linear_inverse"]]
+            vv = [e["linear_inverse"]["scores"][f"uniform_s{s:g}"]["E_rel"]
+                  for e in lad if e["linear_inverse"]]
+            r = self._row(FS["rows"], arm=f"fine_lrel{fb:g}",
+                          sigma_H_us=float(s))
+            if r is not None:
+                xx = [1] + list(xx)
+                vv = [r["E_rel"]] + list(vv)
+            a.loglog(xx, vv, color=cc, ls=ls, marker="^", ms=4.5, lw=1.2,
+                     label=rf"min-norm $P_0$, $\sigma_H={s:g}$")
+        a.text(0.30, 0.80, "the c = 1 min-norm point is the archived fine\n"
+               "result; c = 1 representation is exactly zero",
+               transform=a.transAxes, fontsize=5.0, va="top",
+               color=OI["grey"])
+        a.set_xlabel("cell width $c$ [fine ticks]")
+        a.set_ylabel(r"$E_{\rm rel}$")
+        a.set_xticks(cs)
+        a.set_xticklabels([str(c) for c in cs])
+        a.set_title("(a) representation term and linear inverse")
+        a.legend(frameon=False, fontsize=5.0, ncol=2, loc="lower right")
+
+        a = ax[1]
+        tim = CN.get("iteration_timing", [])
+        xx = [1] + [t["cell_ticks"] for t in tim]
+        yy = [t_fine_iter] + [t["wall_s_per_iteration"] for t in tim]
+        a.loglog(xx, yy, color=C_POS, marker="o", ms=4, lw=1.2,
+                 label="measured")
+        a.loglog(xx, [t_fine_iter / (x / xx[0]) for x in xx], color=OI["grey"],
+                 ls=":", lw=0.9, label=r"$\propto 1/c$")
+        a.plot([xx[0]], [yy[0]], marker="s", ms=6, mfc="none", color=C_FINE,
+               ls="none", label="fine basis (archived)")
+        a.set_xlabel("cell width $c$ [fine ticks]")
+        a.set_ylabel("wall time per FISTA iteration [s]")
+        a.set_xticks(xx)
+        a.set_xticklabels([str(x) for x in xx])
+        a.set_title("(b) cost per iteration, float32, RTX 4070 Ti")
+        a.legend(frameon=False, fontsize=6)
+        fig.tight_layout()
+        save(fig, outdir, "C5_ladder_in_c", made)
+
+        out = {"figures": made, "cell_lambda_rel": lb,
+               "fine_lambda_rel": fb, "cell_prolongation": pn,
+               "inputs": {k: str(v) for k, v in P.items()
+                          if str(k).endswith(("_json", "_npz"))}}
+        if self.out_json:
+            Path(self.out_json).parent.mkdir(parents=True, exist_ok=True)
+            with open(self.out_json, "w") as fh:
+                json.dump({"algorithm": self.name, "result": out}, fh, indent=1,
+                          default=str)
+            print(f"[{self.name}] wrote {self.out_json}")
+        return out
+
+    # -- C4 ------------------------------------------------------------------
+    def _c4(self, plt, cp, cA, fp, fA, outdir, made, ct, pn):
+        """Probe figure: impulse responses, first moment and width vs phase,
+        and the impact panel.  Impact-resolved kernels are a STRESS TEST of
+        the estimator, never a correction: no arm here is given the impact."""
+        from .finebasis_nonlinear_algs import C_POS, C_POSL1, tint
+        lin = cp.get("linear_label", f"cell{ct}_minnorm")
+        nl = [str(a["label"]) for a in cp["fine_arms"]["arms"]]
+        Qm = float(cp["fine_arms"]["charges_ke"][0])
+        pr = [r for r in cp["probes"] if not r.get("convergence_probe")]
+        phases = sorted({r["phi"] for r in pr if r["kernel"] == "bar"})
+
+        def g(rec, arm, phi, kn, s, prol=None):
+            for r in rec["probes"]:
+                if (r["arm"] == arm and r["phi"] == phi and r["kernel"] == kn
+                        and r.get("convergence_probe") is not True):
+                    for d in r["sigmas"]:
+                        if (abs(d["sigma_H_us"] - s) < 1e-9
+                                and (prol is None
+                                     or d.get("prolongation", prol) == prol)):
+                            return d
+            return None
+
+        fig = plt.figure(figsize=(10.5, 5.4))
+        gs = fig.add_gridspec(2, 3, hspace=0.5, wspace=0.32)
+        for i, phi in enumerate(phases[:3]):
+            a = fig.add_subplot(gs[0, i])
+            t = cA.get(f"fine_ticks_phi{phi}_bar")
+            if t is None:
+                continue
+            ts = [r["t_star"] for r in pr if r["phi"] == phi][0]
+            tu = (t - ts) * TICK_US
+            a.plot(tu, cA[f"Hdelta_phi{phi}_bar_s1.5"], color=C_TRUTH, lw=1.0,
+                   label=r"$H\delta$")
+            k = f"imp_phi{phi}_bar_Q{Qm:g}_{lin}_{pn}_s1.5"
+            if k in cA:
+                a.plot(tu, cA[k], color=C_FINE, lw=1.0,
+                       label=rf"cell{ct} min-norm")
+            for j, arm in enumerate(nl):
+                k = f"imp_phi{phi}_bar_Q{Qm:g}_{arm}_{pn}_s1.5"
+                if k in cA:
+                    a.plot(tu, cA[k], color=C_POS if j == 0 else C_POSL1,
+                           lw=1.0, label=rf"cell{ct} {arm.split('_', 1)[1]}")
+            if fA:
+                k = f"imp_phi{phi}_bar_Q{Qm:g}_fine_minnorm_s1.5"
+                tf = fA.get(f"fine_ticks_phi{phi}_bar")
+                if k in fA and tf is not None:
+                    a.plot((tf - ts) * TICK_US, fA[k], color=tint(C_FINE, 0.5),
+                           lw=0.8, ls=":", label="fine min-norm")
+            a.set_xlim(-6, 6)
+            a.set_xlabel(r"$t-t^*$ [$\mu$s]")
+            if i == 0:
+                a.set_ylabel(r"$\hat{x}/Q$ on the probed pad [1/tick]")
+            a.legend(frameon=False, fontsize=5.0)
+            a.set_title(rf"(a{i + 1}) $\varphi={phi}$, $Q={Qm:g}$ ke, "
+                        r"$\sigma_H=1.5\,\mu$s")
+
+        a = fig.add_subplot(gs[1, 0])
+        for arm, cc, lab in ([(lin, C_FINE, f"cell{ct} min-norm")]
+                             + [(nl[0], C_POS, f"cell{ct} pos $\\alpha=0$")]):
+            v = [g(cp, arm, p, "bar", 0.0, pn) for p in phases]
+            a.plot(phases, [x["shift_ticks"] if x else np.nan for x in v],
+                   color=cc, marker="o", ms=3.5, label=lab)
+        if fp is not None:
+            for arm, cc, lab in (("fine_minnorm", tint(C_FINE, 0.5),
+                                  "fine min-norm"),
+                                 ("fine_pos_a0", tint(C_POS, 0.5),
+                                  r"fine pos $\alpha=0$")):
+                v = [g(fp, arm, p, "bar", 0.0) for p in phases]
+                a.plot(phases, [x["shift_ticks"] if x else np.nan for x in v],
+                       color=cc, marker="s", ms=3.0, ls="--", label=lab)
+        a.axhline(0, color=C_TRUTH, lw=0.7, ls=":")
+        a.set_xlabel(r"arrival phase $\varphi$ [fine ticks]")
+        a.set_ylabel("first moment [fine ticks]")
+        a.set_title(r"(b) first moment, $\sigma_H=0$")
+        a.legend(frameon=False, fontsize=5.5)
+
+        a = fig.add_subplot(gs[1, 1])
+        for arm, cc, lab in ([(lin, C_FINE, f"cell{ct} min-norm"),
+                              (nl[0], C_POS, f"cell{ct} pos $\\alpha=0$")]):
+            v = [g(cp, arm, p, "bar", 1.5, pn) for p in phases]
+            a.plot(phases, [(x["width_ticks"] if x and x["width_ticks"]
+                             else np.nan) for x in v], color=cc, marker="o",
+                   ms=3.5, label=lab)
+        if fp is not None:
+            for arm, cc, lab in (("fine_minnorm", tint(C_FINE, 0.5),
+                                  "fine min-norm"),
+                                 ("fine_pos_a0", tint(C_POS, 0.5),
+                                  r"fine pos $\alpha=0$")):
+                v = [g(fp, arm, p, "bar", 1.5) for p in phases]
+                a.plot(phases, [(x["width_ticks"] if x and x["width_ticks"]
+                                 else np.nan) for x in v], color=cc,
+                       marker="s", ms=3.0, ls="--", label=lab)
+        a.axhline(1.5 / TICK_US, color=C_HTRUTH, ls="--", lw=0.9,
+                  label=r"ideal $\sigma_H/\Delta t = 30$")
+        a.set_xlabel(r"arrival phase $\varphi$ [fine ticks]")
+        a.set_ylabel("width [fine ticks]")
+        a.set_title(r"(c) second moment, $\sigma_H=1.5\,\mu$s")
+        a.legend(frameon=False, fontsize=5.5)
+
+        a = fig.add_subplot(gs[1, 2])
+        kns = [k for k in ("bar", "4,4", "0,0")
+               if any(r["kernel"] == k and r["phi"] == 15 for r in pr)]
+        styles = {"bar": ("-", "impact-averaged"), "4,4": ("--", "impact (4,4)"),
+                  "0,0": (":", "impact (0,0)")}
+        ts = [r["t_star"] for r in pr if r["phi"] == 15]
+        if ts:
+            ts = ts[0]
+            for arm, cc in ((lin, C_FINE), (nl[0], C_POS)):
+                for kn in kns:
+                    t = cA.get(f"fine_ticks_phi15_{kn}")
+                    k = f"imp_phi15_{kn}_Q{Qm:g}_{arm}_{pn}_s1.5"
+                    if t is None or k not in cA:
+                        continue
+                    ls, lab = styles[kn]
+                    a.plot((t - ts) * TICK_US, cA[k], color=cc, ls=ls, lw=1.0,
+                           label=f"{arm.split('_', 1)[1]}, {lab}")
+            t = cA.get("fine_ticks_phi15_bar")
+            if t is not None:
+                a.plot((t - ts) * TICK_US, cA["Hdelta_phi15_bar_s1.5"],
+                       color=C_TRUTH, lw=1.0, label=r"$H\delta$")
+        a.set_xlim(-6, 6)
+        a.set_ylim(top=a.get_ylim()[1] * 1.55)
+        a.set_xlabel(r"$t-t^*$ [$\mu$s]")
+        a.set_ylabel(r"$\hat{x}/Q$ [1/tick]")
+        a.set_title(r"(d) $\varphi=15$, impact dependence "
+                    "(stress test, never a correction)", fontsize=6.5)
+        a.legend(frameon=False, fontsize=5.0, ncol=2, loc="upper left")
+        save(fig, outdir, "C4_resolution_probe", made)
