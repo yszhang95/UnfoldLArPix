@@ -727,8 +727,13 @@ class ZSFigures(_JsonAlg):
                     hs.append(e["sum_xhat_over_truth"])
                 ax.bar(xs, hs, width=w * 0.92, color=OKABE[arm],
                        label=ARM_LABEL[arm], edgecolor="none")
-            ax.axhline(1.0, color="k", lw=0.9)
-            ax.axhline(y_frac, color="0.45", lw=0.9, ls=":")
+                for xx, hh in zip(xs, hs):
+                    ax.text(xx, hh + 0.01, f"{hh:.3f}", ha="center",
+                            va="bottom", fontsize=5.5, rotation=90)
+            ax.axhline(1.0, color="k", lw=0.9,
+                       label=r"created charge, $\Sigma\hat{x}=\Sigma q_{\rm truth}$")
+            ax.axhline(y_frac, color="0.45", lw=0.9, ls=":",
+                       label=r"recorded charge, $\Sigma y/\Sigma q_{\rm truth}$")
             ax.set_xticks(range(len(cells)))
             ax.set_xticklabels([BASIS_LABEL[c] for c in cells])
             ax.set_title(CONV_SHORT[conv], fontsize=8)
@@ -736,12 +741,7 @@ class ZSFigures(_JsonAlg):
             _ieee_axes(ax)
         axes[0].set_ylabel(r"$\Sigma\hat{x}\,/\,\Sigma q_{\rm truth}$")
         axes[0].legend(fontsize=7, frameon=False)
-        axes[0].set_ylim(0.0, 1.22)
-        axes[0].text(0.02, y_frac + 0.012,
-                     r"$\Sigma y/\Sigma q_{\rm truth}$"
-                     f" = {y_frac:.3f}", fontsize=6, color="0.35",
-                     ha="left", va="bottom",
-                     transform=axes[0].get_yaxis_transform())
+        axes[0].set_ylim(0.0, 1.30)
         fig.tight_layout()
         p = figdir / "Z1_sum_ratio.png"
         fig.savefig(p, dpi=200)
