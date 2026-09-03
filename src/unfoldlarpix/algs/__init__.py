@@ -2,6 +2,7 @@
 from . import (  # noqa: F401
     budget_algs,
     channel_algs,
+    depthladder_algs,
     diag_algs,
     display_algs,
     eval_algs,

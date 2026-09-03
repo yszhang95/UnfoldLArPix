@@ -302,6 +302,34 @@ def fine_window_kernel(full_response: np.ndarray, B: int) -> np.ndarray:
     return out - shifted
 
 
+def truncated_response(full_response: np.ndarray,
+                       kernel_cut_tick: int | None) -> np.ndarray:
+    """``Kbar_d(tau) . [tau >= kernel_cut_tick]`` -- the kernel with its
+    leading part deleted.
+
+    tred zeroes every CURRENT sample before the event time reference
+    ``t_0`` (``graph_effq.py:148-159``).  The fine truth tick ``j`` of a
+    charge is the time it crosses the RESPONSE PLANE, so the absolute time of
+    response tick ``tau`` is ``j + tau`` and the deletion removes exactly the
+    kernel ticks ``tau < t_0 - j``.  For an isochronous single-depth event
+    every charge shares one ``j`` up to longitudinal diffusion, so the
+    deletion is ONE fixed kernel modification, ``kernel_cut_tick =
+    tau_cut = t_0 - j``, and the operator stays shift invariant.
+
+    ``kernel_cut_tick = None`` (or ``<= 0``) returns ``full_response``
+    itself, unmodified and not copied.
+    """
+    if kernel_cut_tick is None or int(kernel_cut_tick) <= 0:
+        return np.asarray(full_response)
+    cut = int(kernel_cut_tick)
+    fr = np.array(full_response, dtype=np.float64, copy=True)
+    if cut >= fr.shape[-1]:
+        raise ValueError(f"kernel_cut_tick {cut} deletes the whole response "
+                         f"({fr.shape[-1]} ticks)")
+    fr[..., :cut] = 0.0
+    return fr
+
+
 def cell_window_kernel(h: np.ndarray, cell_ticks: int,
                        cell_model: str = "uniform",
                        release_shift: int = 0) -> np.ndarray:
@@ -355,7 +383,8 @@ class FineOperator:
 
     def __init__(self, full_response: np.ndarray, block_shape, B: int,
                  device="cuda", dtype=torch.float64, cell_ticks: int = 1,
-                 cell_model: str = "uniform", release_shift: int = 0):
+                 cell_model: str = "uniform", release_shift: int = 0,
+                 kernel_cut_tick: int | None = None):
         nx, ny, M = (int(v) for v in block_shape)
         kx, ky = int(full_response.shape[0]), int(full_response.shape[1])
         self.krad = (kx - 1) // 2
@@ -374,7 +403,11 @@ class FineOperator:
         self.dtype = dtype
         self.cdtype = torch.complex128 if dtype == torch.float64 else torch.complex64
 
-        h = fine_window_kernel(full_response, self.B)      # (25,25,3930)
+        self.kernel_cut_tick = (None if kernel_cut_tick is None
+                                else int(kernel_cut_tick))
+        fr_used = truncated_response(full_response, self.kernel_cut_tick)
+        self.K_np = np.asarray(fr_used, dtype=np.float64)
+        h = fine_window_kernel(fr_used, self.B)            # (25,25,3930)
         self.h_np = h
         g = cell_window_kernel(h, self.cell_ticks, self.cell_model,
                                self.release_shift)
