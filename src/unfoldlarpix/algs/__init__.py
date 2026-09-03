@@ -21,4 +21,5 @@ from . import (  # noqa: F401
     subbin_algs,
     survival_algs,
     truth_algs,
+    zsbasis_algs,
 )
