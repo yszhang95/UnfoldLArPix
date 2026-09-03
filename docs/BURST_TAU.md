@@ -64,6 +64,59 @@ plane and falls to exactly zero at `nburst = 64`:
 | positron nb1 | 29.0% | 32.8% | 44.7% | 52.9% |
 | any particle nb64 | 0.0% | 0.0% | 0.0% | 0.0% |
 
+## Measuring the fraction — `ImmediateFraction`
+
+`algs/readout_algs.ImmediateFraction` computes it. It reads `hits_view` and
+`readout_config` and nothing else, so it runs on a sequence truncated at
+`LoadEvent`: no response file, no operator, no solve, no GPU. That is
+deliberate — a claim about the *readout* should not be derivable only from a
+reconstruction of it.
+
+```yaml
+- LoadEvent:          {input: …, tpc: 0, max_events: 1}
+- ImmediateFraction:  {tau: auto}
+```
+
+The gap is measured from the previous sequence's **last** latch on the same
+pixel, which `HitsView.last_latch` defines as `trigger + nburst *
+adc_hold_delay`:
+
+```
+gap_j = trigger_j - last_latch_{j-1}
+```
+
+**Three populations have been called "immediate" and they differ by up to a
+factor of three.** All of them are reported so that none is the default
+reading by accident:
+
+| key | definition | `mu_a00_nb1` |
+|---|---|---:|
+| `frac_immediate` | `gap < tau`, over **all** sequences | **29.4%** |
+| `frac_immediate_inclusive` | `gap <= tau`, over all sequences | 30.3% |
+| `frac_immediate_of_retriggers` | `gap < tau`, over sequences that *have* a previous latch | 69.7% |
+| `frac_at_rearm` | fired at the earliest instant allowed (`trigger` = previous `rearm`) | 10.1% |
+| `frac_lumped_in_B` | `(gap < tau) OR (c0 < threshold)` — what the split gate leaves lumped | 39.9% |
+
+`frac_immediate` is the published one. Three things about the others are worth
+stating once:
+
+- The gate is **strict** (`>= tau` is threshold-limited), so
+  `frac_immediate_inclusive` is a reading of prose, never of the code.
+- The shortest gap the readout allows is `adc_down_time + one_tick` = 26 ticks,
+  not `tau` = 56, so the immediate band `[26, 56)` is one `adc_hold_delay`
+  wide. "Fires immediately" read *literally* is `frac_at_rearm`, and that is
+  about a third of `frac_immediate` — the gate is deliberately the wider,
+  conservative window.
+- `frac_lumped_in_B` is **not** an immediate fraction. Its second branch is a
+  sub-threshold first window; it survives to `nburst = 64` where the immediate
+  population is exactly zero. `ab_anatomy/ab_rows.py`'s `imm_frac` is this
+  quantity, which is why it disagrees with the table above on every cell —
+  reproduced here on all 12 of its cells.
+
+`tests/test_immediate_fraction.py` pins the distinctions on hand-counted
+synthetic hits, and asserts the gate against `build_latch_rows` rather than
+restating it.
+
 ## Usage
 
 ```yaml

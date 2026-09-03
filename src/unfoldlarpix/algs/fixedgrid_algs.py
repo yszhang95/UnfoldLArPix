@@ -60,6 +60,25 @@ def fit_bin_ticks(store) -> float:
     return float(int(rc.adc_hold_delay)) / S
 
 
+def release_offset_ticks(store) -> float:
+    """Where inside its fit bin the operator releases that bin's charge.
+
+    ``0`` for the shipped delta-at-bin-start kernel; ``B*(S-1)/(2S)`` -- half
+    a bin in the limit -- when the detector service (or ``fwd_subbin``) puts
+    the charge UNIFORMLY across the bin.  Published by ``BuildMeasurement``
+    as ``charge_model``; absent stores are the delta model.
+
+    Two conventions have to follow it or the whole comparison is half a bin
+    out of register: the truth binning (:func:`grid_truth`, which deposits
+    into the bin whose RELEASE POINT is nearest) and the evaluation deposit
+    (``universal_rebin(content_offset_ticks=...)``, which places a
+    reconstructed bin's charge at its physical instant).
+    """
+    if "charge_model" not in store:
+        return 0.0
+    return float(store.get("charge_model").get("release_offset_ticks", 0.0))
+
+
 def grid_truth(store, op, mode: str = "round",
                shift_ticks: float = 0.0) -> np.ndarray:
     """effq summed onto the operator's own charge grid (same frame as ``d``).
@@ -107,7 +126,8 @@ def grid_truth(store, op, mode: str = "round",
     nx, ny, nt = op.q_shape
     ix = el[:, 0].astype(int) - int(boff[0])
     iy = el[:, 1].astype(int) - int(boff[1])
-    f = (el[:, 2] + float(shift_ticks) - boff[2]) / B
+    f = (el[:, 2] + float(shift_ticks) - boff[2]
+         - release_offset_ticks(store)) / B
     it = (np.rint(f) if mode == "round" else np.floor(f)).astype(int)
     ok = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny) & (it >= 0) & (it < nt)
     qg = np.zeros(op.q_shape)
@@ -142,21 +162,17 @@ def smeared_truth(store, sigma_pixel: float = 0.5,
     return cache[key]
 
 
-def score_universal(store, op, q: np.ndarray, sigma_pixel: float = 0.5,
-                    sigma_time: float = 0.005,
-                    corr_threshold: float = 0.5) -> dict:
-    """Score a reconstruction against truth with BOTH SIDES SMEARED.
+def universal_blocks(store, op, q: np.ndarray, sigma_pixel: float = 0.5,
+                     sigma_time: float = 0.005,
+                     eval_offset_ticks: float | None = None):
+    """(truth, reco, origin) on the universal grid -- the adopted eval.
 
-    The adopted eval protocol: universal grid (edges at global multiples of
-    B), gaussian deposit of the sharp charge, no fitted sub-bin offsets,
-    sigma_pxl 0.5 / sigma_time 0.005, corr_threshold 0.5.  Delegates the
-    binning to :func:`~unfoldlarpix.eval.universal.universal_rebin` and the
-    scalars to :func:`~unfoldlarpix.eval.universal.metrics_from_blocks`, so
-    this cannot drift from the production numbers.
-
-    Adds ``transport``: where the charge sits relative to the truth's own
-    voxels on that same grid -- the test for a prior that concentrates a
-    diffuse halo onto a few voxels rather than reconstructing it.
+    The binning half of :func:`score_universal`, split out so a per-voxel
+    consumer (an event display, a residual map) sees exactly the blocks the
+    published scalars are computed from and cannot drift from them.
+    ``origin`` is ``universal_rebin``'s own ``{u_min, p_min, bin_ticks,
+    phi, b_off}``, which is what maps a voxel back onto absolute pixel
+    indices and universal time bins.
     """
     import tempfile
     from pathlib import Path
@@ -172,9 +188,35 @@ def score_universal(store, op, q: np.ndarray, sigma_pixel: float = 0.5,
                  adc_hold_delay=np.array(int(rc.adc_hold_delay) // S),
                  time_convention=np.array("release_point"),
                  smeared_true=sm, smear_offset=off)
-        tru, reco = universal_rebin(f, deposit_shape="gaussian",
-                                    sigma_time=sigma_time,
-                                    sigma_pxl=sigma_pixel)
+        return universal_rebin(f, deposit_shape="gaussian",
+                               sigma_time=sigma_time,
+                               sigma_pxl=sigma_pixel,
+                               content_offset_ticks=(
+                                   release_offset_ticks(store)
+                                   if eval_offset_ticks is None
+                                   else float(eval_offset_ticks)),
+                               return_origin=True)
+
+
+def score_universal(store, op, q: np.ndarray, sigma_pixel: float = 0.5,
+                    sigma_time: float = 0.005,
+                    corr_threshold: float = 0.5,
+                    eval_offset_ticks: float | None = None) -> dict:
+    """Score a reconstruction against truth with BOTH SIDES SMEARED.
+
+    The adopted eval protocol: universal grid (edges at global multiples of
+    B), gaussian deposit of the sharp charge, no fitted sub-bin offsets,
+    sigma_pxl 0.5 / sigma_time 0.005, corr_threshold 0.5.  Delegates the
+    binning to :func:`~unfoldlarpix.eval.universal.universal_rebin` and the
+    scalars to :func:`~unfoldlarpix.eval.universal.metrics_from_blocks`, so
+    this cannot drift from the production numbers.
+
+    Adds ``transport``: where the charge sits relative to the truth's own
+    voxels on that same grid -- the test for a prior that concentrates a
+    diffuse halo onto a few voxels rather than reconstructing it.
+    """
+    tru, reco, _ = universal_blocks(store, op, q, sigma_pixel, sigma_time,
+                                    eval_offset_ticks)
     out = dict(metrics_from_blocks(tru, reco, corr_threshold=corr_threshold))
     out["transport"] = transport_profile(tru, reco, cut=corr_threshold)
     return out
@@ -560,8 +602,27 @@ class EstimatorScan(_JsonRecorder):
             q = solve_arm(op, supp, alpha, pos, nit, seed_cut, soft_len)
             sc = score_universal(store, op, q); tp = sc.pop("transport")
             vs = voxel_stats(q)
+            # Where a reconstructed bin's charge sits INSIDE its bin is a
+            # convention (release_offset_ticks); this records the metrics
+            # over a scan of it, so a ghost/killed pair that is really a
+            # one-voxel registration effect can be told from injection.
+            off_scan = []
+            for ov in self.props.get("eval_offset_scan", []):
+                s2 = score_universal(store, op, q, eval_offset_ticks=float(ov))
+                t2 = s2.pop("transport")
+                off_scan.append({
+                    "eval_offset_ticks": float(ov),
+                    "integral_pct": s2["integral_pct"],
+                    "pearson_r": s2["pearson_r"], "slope": s2["slope"],
+                    "ghost_charge": s2["ghost_charge"],
+                    "ghost_iso_charge": s2["ghost_iso_charge"],
+                    "true_killed": s2["true_killed"],
+                    "resid_rms": s2["resid_rms"],
+                    "q_on_truth": t2["q_on_truth"],
+                    "q_ring1": t2["q_ring1"]})
             rec = {
                 "label": spec.get("label", f"alpha={alpha}"),
+                "eval_offset_scan": off_scan,
                 "alpha": alpha, "positivity": pos, "gain_cut": gcut,
                 "support_spec": spec.get("support"), "iters": nit,
                 "gain_bands": gain_breakdown(q, c, supp),
@@ -1210,6 +1271,13 @@ class SegmentLifetimeFit(_JsonRecorder):
 
     Two independent readings, both with real errors and no capture curve:
 
+    A multi-event input (``{"events": [...]}``, which is what a job with
+    ``max_events > 1`` writes) has every event's segments pooled into one
+    per-depth sample.  On a real muon that is the right move: the spread is
+    then genuine Landau scatter, the segment SEM becomes meaningful, and the
+    SEM-weighted fit is the one to read.  On the fluctuation-free isoline it
+    is not -- see the note on the error definition below.
+
     ``pooled``   per depth take the mean dQ/dx over segments, then a straight
         line through ``ln dQ/dx`` against drift time.  The quoted error is
         from the FIT RESIDUAL, which is the only meaningful one here: this
@@ -1237,17 +1305,26 @@ class SegmentLifetimeFit(_JsonRecorder):
                                  DRIFT_VELOCITY_CM_PER_US))
         drop = {float(x) for x in self.props.get("exclude_depths", [])}
         tau_true = self.props.get("tau_true_ms")
-        per_depth = {}
+        per_depth, n_events = {}, {}
         for item in self.props.get("inputs", []):
             d = float(item["depth_cm"])
             if d in drop:
                 continue
             with open(item["json"]) as fh:
                 res = json.load(fh).get("result", {})
-            row = {"TRUTH": np.asarray(res["truth_dqdx_ke_per_cm"], float)}
-            for a in res.get("arms", []):
-                row[a["label"]] = np.asarray(a["segment_dqdx_ke_per_cm"], float)
+            # a multi-event run dumps {"events": [...]}; pool the segments of
+            # every event into one per-depth sample, so the spread that sets
+            # the error is the real Landau scatter and not a fit residual
+            evs = res.get("events", [res])
+            row = {"TRUTH": np.concatenate(
+                [np.asarray(e["truth_dqdx_ke_per_cm"], float) for e in evs])}
+            for a0 in evs[0].get("arms", []):
+                lab = a0["label"]
+                row[lab] = np.concatenate(
+                    [np.asarray(a["segment_dqdx_ke_per_cm"], float)
+                     for e in evs for a in e["arms"] if a["label"] == lab])
             per_depth[d] = row
+            n_events[d] = len(evs)
         depths = np.array(sorted(per_depth))
         t = (depths / v) * 1e-3
         labels = list(per_depth[depths[0]])
@@ -1268,6 +1345,7 @@ class SegmentLifetimeFit(_JsonRecorder):
 
         rec = {"velocity_cm_per_us": v, "tau_true_ms": tau_true,
                "depths_cm": [float(x) for x in depths],
+               "n_events_per_depth": {str(k): int(n_events[k]) for k in depths},
                "n_segments": int(nseg), "fits": {}}
         hdr = (f"{'estimator':24s} {'pooled lambda':>16s} {'rms lnQ':>8s} "
                f"{'semChi2':>9s} | {'per-seg mean':>13s} {'seg SD':>8s} {'n':>3s}")

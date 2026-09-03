@@ -120,6 +120,67 @@ def integrate_kernel_over_time(kernel: np.ndarray, ticks_per_bin: int,
     return reshaped.sum(axis=-1)
 
 
+def uniform_within_bin_kernel(kernel: np.ndarray, ticks_per_bin: int,
+                              subbin: int, start_tick: int = 0) -> np.ndarray:
+    """Bin-integrated response for charge spread UNIFORMLY over its fit bin.
+
+    :func:`integrate_kernel_over_time` answers a different question: it is
+    the response of a charge released as a DELTA at the bin's lower edge
+    ``t_b = b*B``.  That is the operator's within-bin charge model, and the
+    residual it leaves is the larger of the two terms measured in the
+    technote's sampling decomposition (the other being the window-edge
+    sampling scheme, which a fixed-interval readout already makes exact).
+
+    Here the bin's charge is instead modelled as ``S = subbin`` equal
+    sub-deposits at ``s*b``, ``b = B/S``, ``s = 0..S-1`` -- the discrete
+    approximation of a uniform density, exact at ``S = B`` (one sub-deposit
+    per fine tick).  The predicted FINE bin ``i`` is then
+    ``(1/S) sum_s Kf[i-s]`` with ``Kf`` the response integrated over ``b``,
+    and re-summing ``S`` fine bins into the fit bin gives
+
+        Keff[j] = (1/S) sum_{u,s in [0,S)} Kf[j*S + u - s]
+                = (1/S) sum_m (S - |m|) Kf[j*S + m],   |m| < S,
+
+    a Bartlett (box-times-box) comb through the fine response.  This IS the
+    fine-grained forward model reduced to the fit grid, and it is EXACT
+    whenever every readout window edge lands on a fit-bin boundary -- which
+    is the defining property of the fixed-interval readout (see
+    :class:`~unfoldlarpix.model.subbin_operator.ZSOperatorUniform` for the
+    general case, and the ``validate_uniform`` job that checks the two agree
+    row by row).
+
+    Charge is conserved: ``Keff.sum() == Kf.sum() == K.sum()``.  The support
+    grows by exactly one fit bin (the last sub-deposit's response runs one
+    ``b`` past the delta model's), so ``Keff.shape[-1] == K.shape[-1] + 1``.
+
+    ``subbin = 1`` reproduces :func:`integrate_kernel_over_time` exactly and
+    is the control arm.
+    """
+    S = int(subbin)
+    B = int(ticks_per_bin)
+    if S < 1 or B % S != 0:
+        raise ValueError(f"subbin {S} must be >=1 and divide "
+                         f"ticks_per_bin {B}")
+    fine = integrate_kernel_over_time(kernel, B // S, start_tick=start_tick)
+    if S == 1:
+        return fine
+    kx, ky, ktf = fine.shape
+    # box_S twice: once for the sub-deposit comb, once for re-summing the
+    # S fine bins of a fit bin.  Done as one length-(2S-1) triangular comb.
+    tri = np.minimum(np.arange(1, 2 * S), np.arange(2 * S - 1, 0, -1))
+    padded = np.zeros((kx, ky, ktf + 2 * (S - 1)), dtype=np.float64)
+    for m, wgt in enumerate(tri):          # m = 0..2S-2  <->  offset m-(S-1)
+        padded[:, :, m:m + ktf] += wgt * fine
+    # padded[p] = sum_m tri[m] Kf[p - 2S + 2 + m]; tri is symmetric, so
+    # the wanted C[n] = sum_m tri[m] Kf[n + m - (S-1)] is padded[n + S - 1].
+    # Fit bin j takes n = j*S.
+    tap = padded[:, :, (S - 1)::S] / float(S)
+    ktc = ktf // S
+    out = np.zeros((kx, ky, ktc + 1), dtype=np.float64)
+    out[:, :, :tap.shape[2]] = tap[:, :, :ktc + 1]
+    return out
+
+
 def extract_response_indu(full_response: np.ndarray) -> np.ndarray:
     """Return the mean response in the +/-1-pixel ring around the center pixel."""
     full_response = np.asarray(full_response)

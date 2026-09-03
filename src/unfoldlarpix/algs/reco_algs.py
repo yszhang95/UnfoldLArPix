@@ -112,7 +112,7 @@ class BuildMeasurement(Algorithm):
     """Immutable event measurement: latch windows and the operator A(d)."""
 
     reads = ("event", "readout_config", "block", "block_offset")
-    writes = ("op", "time_subbin", "row_var", "row_meta")
+    writes = ("op", "time_subbin", "row_var", "row_meta", "charge_model")
 
     def execute(self, store):
         ev = store.get("event")
@@ -180,11 +180,59 @@ class BuildMeasurement(Algorithm):
         weights = (None if rw_prop is None
                    else row_weights(metas, rc, mode=str(rw_prop)))
         nx, ny, nt = block.shape
-        op = ZSOperator(prepared.integrated_response, (nx, ny, nt * S), windows,
-                        B // S, device=comp.device, dtype=comp.dtype,
-                        row_weights=weights)
+        # fwd_subbin: refine the FORWARD model without giving the solver any
+        # new freedom.  The unknowns stay on the fit grid; each one is a
+        # charge spread UNIFORMLY over its bin, expanded onto S_f sub-bins,
+        # convolved at B/S_f and sampled by the ordinary overlap weights.
+        # Distinct from time_subbin, which refines the UNKNOWNS themselves.
+        # When every window edge is a fit-bin edge (fixed-interval readout)
+        # this is exactly the detector service's within_bin: uniform kernel,
+        # S_f times cheaper -- validate_uniform checks that row by row.
+        Sf = int(self.props.get("fwd_subbin", 1))
+        if Sf > 1:
+            from ..model.subbin_operator import ZSOperatorUniform
+            if S != 1:
+                raise ValueError("fwd_subbin refines the forward model on the "
+                                 "fit grid; combining it with time_subbin "
+                                 f"(={S}) is not defined")
+            fine = self.services["detector"].prepared_raw(B // Sf)
+            op = ZSOperatorUniform(fine.integrated_response, (nx, ny, nt),
+                                   windows, B, Sf, device=comp.device,
+                                   dtype=comp.dtype, row_weights=weights)
+            print(f"[BuildMeasurement] fwd_subbin={Sf}: fine bin {B // Sf} "
+                  f"ticks, fine kernel {fine.integrated_response.shape}, "
+                  f"coarse q_shape {op.q_shape}")
+        else:
+            op = ZSOperator(prepared.integrated_response,
+                            (nx, ny, nt * S), windows,
+                            B // S, device=comp.device, dtype=comp.dtype,
+                            row_weights=weights)
         self.put(store, "op", op)
         self.put(store, "time_subbin", S)
+        # The WITHIN-BIN CHARGE MODEL, published because two downstream
+        # conventions depend on it and neither can guess it:
+        #   * grid_truth deposits a charge in the bin whose RELEASE POINT is
+        #     nearest -- which is j*B for the delta model but j*B + off for a
+        #     uniform bin;
+        #   * universal_rebin deposits a reconstructed bin's charge at its
+        #     physical instant, same offset.
+        # off is the comb's mean release, B*(S_f-1)/(2*S_f) -> B/2 as the
+        # sub-bin resolution goes to the fine tick.  Getting it wrong costs a
+        # HALF BIN of registration, which on this sample is the difference
+        # between an 87% and an 18% row residual.
+        det = self.services["detector"]
+        Sc = (Sf if Sf > 1 else
+              (int(getattr(det, "subbin", 1))
+               if str(getattr(det, "within_bin", "delta")) == "uniform"
+               else 1))
+        model = "uniform" if Sc > 1 else "delta"
+        off = 0.0 if Sc <= 1 else float(B) * (Sc - 1) / (2.0 * Sc)
+        self.put(store, "charge_model", {
+            "within_bin": model, "subbin": Sc,
+            "route": ("fine" if Sf > 1 else "kernel"),
+            "release_offset_ticks": off})
+        print(f"[BuildMeasurement] charge model: within_bin={model} "
+              f"subbin={Sc} release offset {off:+.1f} fine ticks")
         # Per-row identity, aligned to the operator's own row indexing.  The
         # operator keeps only the sampling triplet, so without this any
         # downstream row-level statistic (kind pairs, per-kind residuals) has

@@ -29,6 +29,10 @@ every stage and knob.
   - `algs/`, `services/` — the pipeline components (LoadEvent,
     FFTWarmStart, BuildMeasurement, BuildSupport, Solve,
     CentroidPositions, WriteCharges; compute/detector/rng services).
+    `readout_algs.py` holds the diagnostics that read the recorded hits
+    and nothing else (`ImmediateFraction`) — they run on a sequence
+    truncated at `LoadEvent`, with no response file, operator or GPU, so
+    a claim about the readout never depends on a reconstruction of it.
   - `model/` — the single (torch) ZS operator, GPU FFT warm start,
     `conventions.py` (every tick/bin/phase convention, one place).
   - `terms/`, `solve/` — objective terms (data, censor + the
@@ -48,6 +52,16 @@ every stage and knob.
 - `tests/` — unit + golden-regression tests (`pytest`; needs torch —
   run under the tred venv).
 - `docs/archive/` — superseded design notes (see its README).
+
+## Reference docs
+
+- `docs/BURST_TAU.md` — the split-trigger pseudo-measurement and its gate;
+  what an immediate re-trigger costs, and how `ImmediateFraction` measures
+  how often one happens (three populations have carried that name and they
+  differ by a factor of three — the doc tabulates all of them).
+- `docs/DECONV_DIAGNOSTICS.md` — the reusable probe toolkit.
+- `model/conventions.py` — every tick/bin/phase convention, one place, each
+  with its measured justification.
 
 ## Results & provenance
 

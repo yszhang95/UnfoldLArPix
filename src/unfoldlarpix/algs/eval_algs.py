@@ -514,3 +514,174 @@ class ProtocolAB(Algorithm):
             ("integral_pct", "pearson_r", "slope", "true_killed")
             if k in rows))
         self.put(store, "protocolab.summary", rec)
+
+
+@algorithm("KilledTruthOrigin")
+class KilledTruthOrigin(Algorithm):
+    """Was the killed truth ever RECORDED, or is it a reconstruction failure?
+
+    ``true_killed`` mixes two unrelated losses and quoting it alone charges the
+    reconstruction for both.  A voxel counts as killed when the truth is above
+    the cut and the reconstruction is not; that happens either because the
+    solver failed on charge it was given, or because the charge never entered
+    the data at all -- zero suppression means a pixel that stayed below
+    threshold produced no hit, and no solver, burst count or debias can
+    recover what was never read out.
+
+    The universal grid's axes 0/1 are ABSOLUTE pixel indices offset by
+    ``origin["p_min"]`` and axis 2 is universal bin ``m = idx + u_min``
+    spanning ticks ``[phi + m*B, phi + (m+1)*B)``.  Hits carry absolute pixel
+    indices and absolute ticks, so the two frames meet through
+    ``eval.origin`` without re-deriving any alignment.
+
+    A firing pixel is covered from the acquisition start to its LAST latch
+    (between sequences the only gap is ``csa_reset_time``), so the three cases
+    below are exhaustive:
+
+    ``no_hit``            the pixel never fired.  Never recorded.
+    ``after_last_latch``  the pixel fired, but the voxel's bin starts at or
+                          after that pixel's last latch.  Never recorded.
+                          (Measured zero on every muon sample -- there is no
+                          post-latch tail loss -- but it is a distinct
+                          mechanism and is reported rather than assumed.)
+    ``covered``           inside the recorded interval: a genuine
+                          reconstruction failure, and the only part that any
+                          solver change can move.
+
+    ``killed_pct_recoverable`` is the ``covered`` part as a percentage of the
+    event's true charge -- the number a claim about reconstruction quality
+    should quote.  Measured at $\\nburst = 4$: 0.49 / 0.51 / 1.05 / 0.92 for
+    the muon series at 0/25/50/75 deg, against a raw ``killed_pct`` of
+    0.98 / 0.70 / 4.44 / 1.16.  The 50 deg outlier is almost entirely
+    acceptance: 76% of its killed charge is on pixels that never fired.
+
+    Also reported, on the same voxels and the same cut, the truth's
+    charge-weighted amplitude spectrum and the kill rate per amplitude bin
+    (``bins``): the kill rate is a RATIO within each bin, not a distribution,
+    and it is what shows the loss is confined to the first bins above the cut.
+
+    Props: ``eval_prefix`` (default ``eval``), ``bins`` (explicit edges in ke;
+    default 24 log-spaced 0.05--50), ``pixel_floor`` (voxels with truth below
+    this are ignored in the spectrum, default 0.0).  The cut is NOT a prop --
+    it is read from the evaluation's own protocol record so there is one
+    definition of it.
+    """
+
+    writes = ("killed.summary",)
+
+    def __init__(self, **props):
+        super().__init__(**props)
+        self.prefix = str(props.get("eval_prefix", "eval"))
+        self.reads = tuple(f"{self.prefix}.{k}" for k in
+                           ("truth", "reco", "origin", "protocol")) + (
+                          "hits_view",)
+
+    def execute(self, store):
+        T = np.asarray(store.get(f"{self.prefix}.truth"), dtype=np.float64)
+        R = np.asarray(store.get(f"{self.prefix}.reco"), dtype=np.float64)
+        org = store.get(f"{self.prefix}.origin")
+        cut = float(store.get(f"{self.prefix}.protocol")["corr_threshold"])
+        hv = store.get("hits_view")
+        edges = np.asarray(self.props.get("bins") or
+                           np.logspace(np.log10(0.05), np.log10(50.0), 25),
+                           dtype=np.float64)
+        floor = float(self.props.get("pixel_floor", 0.0))
+
+        p_min = [int(v) for v in org["p_min"]]
+        u_min = int(org["u_min"])
+        phi = float(org["phi"])
+        Bb = int(org["bin_ticks"])
+
+        # per pixel: did it fire, and when was its last latch (absolute ticks)
+        last: dict[tuple[int, int], float] = {}
+        px_h = np.asarray(hv.pixel_x).astype(int)
+        py_h = np.asarray(hv.pixel_y).astype(int)
+        ll_h = np.asarray(hv.last_latch, dtype=np.float64)
+        for i in range(px_h.size):
+            k = (int(px_h[i]), int(py_h[i]))
+            last[k] = max(last.get(k, -np.inf), float(ll_h[i]))
+
+        Qtot = float(T.sum())
+        killed = (cut < T) & (cut >= R)
+        ix, iy, im = np.nonzero(killed)
+        qk = T[killed]
+        Qk = float(qk.sum())
+        tstart = phi + (im + u_min) * Bb
+        cls = np.empty(qk.size, dtype=np.int8)     # 0 no_hit 1 after 2 covered
+        for i in range(qk.size):
+            ll = last.get((int(ix[i]) + p_min[0], int(iy[i]) + p_min[1]))
+            cls[i] = 0 if ll is None else (1 if tstart[i] >= ll else 2)
+        part = {}
+        for name, code in (("no_hit", 0), ("after_last_latch", 1),
+                           ("covered", 2)):
+            q = float(qk[cls == code].sum())
+            part[name] = {"charge_ke": q, "n_voxels": int((cls == code).sum()),
+                          "frac_of_killed": (q / Qk) if Qk else None,
+                          "pct_of_truth": 100.0 * q / Qtot if Qtot else None}
+
+        # the truth's amplitude spectrum and the kill rate per bin
+        q_all = T.ravel()
+        keep = q_all > max(floor, 0.0)
+        q_all = q_all[keep]
+        k_all = killed.ravel()[keep]
+        ib = np.digitize(q_all, edges) - 1
+        nb = edges.size - 1
+        Qb = np.zeros(nb)
+        Kb = np.zeros(nb)
+        Nb = np.zeros(nb, dtype=np.int64)
+        for b in range(nb):
+            s = ib == b
+            Qb[b] = q_all[s].sum()
+            Kb[b] = q_all[s & k_all].sum()
+            Nb[b] = int(s.sum())
+        with np.errstate(invalid="ignore", divide="ignore"):
+            rate = np.where(Qb > 1e-9, Kb / Qb, np.nan)
+
+        # charge-weighted quantiles: where the event's charge sits in amplitude
+        qs = np.sort(q_all)
+        cw = np.cumsum(qs) / qs.sum() if qs.size else np.array([])
+        def cwq(f):
+            if not qs.size:
+                return None
+            return float(qs[min(int(np.searchsorted(cw, f)), qs.size - 1)])
+
+        # how much of the event never sat on a firing pixel at all
+        fired = np.zeros(T.shape[:2], dtype=bool)
+        for (a, b) in last:
+            i, j = a - p_min[0], b - p_min[1]
+            if 0 <= i < T.shape[0] and 0 <= j < T.shape[1]:
+                fired[i, j] = True
+        Q_nofire = float(T[~fired, :].sum())
+
+        rec = {
+            "corr_threshold": cut, "Q_truth_ke": Qtot,
+            "killed_ke": Qk, "killed_pct": 100.0 * Qk / Qtot if Qtot else None,
+            "n_killed_voxels": int(qk.size),
+            "by_origin": part,
+            "killed_pct_recoverable": part["covered"]["pct_of_truth"],
+            "killed_pct_never_recorded": (
+                part["no_hit"]["pct_of_truth"]
+                + part["after_last_latch"]["pct_of_truth"]),
+            "pixels_fired": int(fired.sum()),
+            "pixels_in_grid": int(fired.size),
+            "Q_on_never_firing_pixels_ke": Q_nofire,
+            "Q_on_never_firing_pixels_pct": (100.0 * Q_nofire / Qtot
+                                             if Qtot else None),
+            "spectrum": {
+                "edges_ke": edges.tolist(), "truth_ke": Qb.tolist(),
+                "killed_ke": Kb.tolist(), "n_voxels": Nb.tolist(),
+                # a RATIO inside each bin, not a normalised distribution
+                "kill_rate": [None if np.isnan(x) else float(x) for x in rate],
+            },
+            "charge_weighted_quantiles_ke": {
+                f"Q{int(100 * f):02d}": cwq(f)
+                for f in (0.10, 0.25, 0.50, 0.75, 0.90)},
+        }
+        print("[KilledTruthOrigin] killed %.2f%% of truth = %.2f%% never "
+              "recorded (%.0f%% of it no-hit) + %.2f%% recoverable; "
+              "%d/%d pixels fired"
+              % (rec["killed_pct"] or 0.0, rec["killed_pct_never_recorded"],
+                 100 * (part["no_hit"]["frac_of_killed"] or 0.0),
+                 rec["killed_pct_recoverable"] or 0.0,
+                 rec["pixels_fired"], rec["pixels_in_grid"]))
+        self.put(store, "killed.summary", rec)

@@ -116,8 +116,19 @@ class WriteCharges(Algorithm):
         # `time_convention`.
         boffset = raw_off.copy()
 
+        # Where inside its bin the operator released that bin's charge: 0
+        # for the shipped delta kernel, ~B/2 under a uniform within-bin
+        # charge model.  Recorded (NOT folded into boffset, which stays the
+        # block's raw corner) so an evaluation reads it as
+        # universal_rebin(content_offset_ticks=...); the charges table below
+        # does carry it, because those are physical instants.
+        rel_off = 0.0
+        if "charge_model" in store:
+            rel_off = float(store.get("charge_model").get(
+                "release_offset_ticks", 0.0))
+
         ci, cj, ck = np.where(q_hat > 0.01)
-        t_centers = raw_off[2] + ck * float(B)
+        t_centers = raw_off[2] + ck * float(B) + rel_off
         if u is not None:
             t_centers = t_centers + u[ci, cj, ck] * float(B)
         charges = np.stack([raw_off[0] + ci, raw_off[1] + cj, t_centers,
@@ -131,6 +142,7 @@ class WriteCharges(Algorithm):
             "boffset_raw": raw_off,
             "time_convention": TIME_CONVENTION,
             "adc_hold_delay": B,
+            "charge_release_offset_ticks": rel_off,
             "readout_nburst": hv.nburst,
             "readout_threshold": float(rc.threshold),
             "lean_output": True,

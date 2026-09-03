@@ -224,6 +224,11 @@ def metrics_from_blocks(smear_summed: np.ndarray, aligned_dq: np.ndarray,
     ghost_adj_frac = float(ghost_adj.sum() / n_sel)
     ghost_iso_frac = float(ghost_iso.sum() / n_sel)
     ghost_iso_charge = float(aligned_dq[ghost_iso].sum())
+    # the charge on ALL ghost voxels, and its adjacent part.  Only the
+    # isolated part was recorded before, which left "ghost charge over truth"
+    # underivable from the archive; ghost_charge = adj + iso by construction.
+    ghost_charge = float(aligned_dq[ghost_mask].sum())
+    ghost_adj_charge = float(aligned_dq[ghost_adj].sum())
 
     # Per-voxel residual reco - truth [ke-] over the SIGNAL REGION: every
     # voxel where either side is above the cut, so the sample contains the
@@ -239,16 +244,41 @@ def metrics_from_blocks(smear_summed: np.ndarray, aligned_dq: np.ndarray,
     else:
         resid_mean = resid_rms = resid_sd = float("nan")
 
+    # Charge that survives the cut on the RECO side, over the event's whole
+    # true charge with no cut anywhere on the truth.  This is the integral a
+    # downstream analysis actually gets: the denominator is fixed by the event
+    # and is invariant under the smearing kernel, and the numerator is what a
+    # 500 e- selection keeps.  It does NOT penalise ghosts -- quote it beside
+    # ghost_charge, never alone (measured: mu_a25 exceeds 100% because it
+    # over-books).
+    recovery_pct = 100.0 * float(aligned_dq[mask].sum()) / sum_truth
+    # Killed truth under both normalisations.  The two differ only by the
+    # significant-truth fraction, which is a property of the truth alone
+    # (measured 93.0-95.1% on the muon series, independent of nburst), so the
+    # ordering is the same; /significant answers "of the truth that is above
+    # the cut, how much was not selected", /all is the more legible denominator.
+    significant_truth = float(smear_summed[smear_summed > corr_threshold].sum())
+
     return {
         "sum_deconv_q": round(sum_dq, 2),
         "sum_truth": round(sum_truth, 2),
+        "significant_truth": round(significant_truth, 2),
+        "significant_truth_frac": round(significant_truth / sum_truth, 5)
+        if sum_truth else None,
         "integral_pct": round(100.0 * (sum_dq / sum_truth - 1.0), 3),
+        "recovery_pct": round(recovery_pct, 4),
+        "killed_pct_all": round(100.0 * true_killed / sum_truth, 4)
+        if sum_truth else None,
+        "killed_pct_significant": round(100.0 * true_killed / significant_truth, 4)
+        if significant_truth else None,
         "pearson_r": round(pearson_r, 5),
         "slope": round(slope, 5),
         "ghost_frac": round(ghost_frac, 5),
         "ghost_adj_frac": round(ghost_adj_frac, 5),
         "ghost_iso_frac": round(ghost_iso_frac, 5),
         "ghost_iso_charge": round(ghost_iso_charge, 2),
+        "ghost_adj_charge": round(ghost_adj_charge, 2),
+        "ghost_charge": round(ghost_charge, 2),
         "true_killed": round(true_killed, 2),
         "resid_mean": round(resid_mean, 5),
         "resid_rms": round(resid_rms, 5),
