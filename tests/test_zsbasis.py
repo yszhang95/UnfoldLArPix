@@ -213,3 +213,27 @@ def test_to_fine_is_the_uniform_prolongation():
     assert row.sum() == pytest.approx(6.0)
     # c = 1 leaves the array alone
     assert np.array_equal(job.to_fine(x, 1), x.reshape(6, 4))
+
+
+def test_trim_mask_excludes_n_pixels_at_each_end():
+    pixel_y = np.arange(-2, 12)          # -2 .. 11
+    m0 = Z.trim_mask(pixel_y, 0, 10, 0)
+    assert pixel_y[m0].tolist() == list(range(0, 11))
+    m3 = Z.trim_mask(pixel_y, 0, 10, 3)
+    assert pixel_y[m3].tolist() == list(range(3, 8))
+    # a trim that meets in the middle keeps nothing
+    assert not Z.trim_mask(pixel_y, 0, 10, 6).any()
+
+
+def test_trim_ratio_applies_the_same_trim_to_both_sides():
+    created = np.zeros((2, 5))
+    created[0, 1:4] = [10.0, 20.0, 30.0]
+    reco = np.zeros((2, 5))
+    reco[0, 1:4] = [5.0, 20.0, 60.0]
+    reco[1, 0] = 100.0                   # outside the kept columns at n = 1
+    pixel_y = np.arange(5)
+    m0 = Z.trim_mask(pixel_y, 1, 3, 0)
+    assert Z.trim_ratio(reco, created, m0) == pytest.approx(85.0 / 60.0)
+    m1 = Z.trim_mask(pixel_y, 1, 3, 1)
+    assert Z.trim_ratio(reco, created, m1) == pytest.approx(20.0 / 20.0)
+    assert np.isnan(Z.trim_ratio(reco, created, np.zeros(5, bool)))

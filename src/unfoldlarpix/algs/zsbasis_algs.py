@@ -515,6 +515,14 @@ class ZSBasisArms(_JsonAlg):
     ``arms`` entries are ``{label, alpha, positivity, iters}``.  ``alpha`` is
     in ke per cell and does NOT scale with ``c`` (column sums are ``sum Kbar``
     at every ``c``; measured in ``STUDIES_isoline_d16p5.md`` Sec. 4.3).
+
+    ``per_pixel`` (default ``False``, so an archived job is unchanged) adds to
+    the NPZ, for every arm, the per-pixel total ``sum_t xhat`` as an
+    ``(nx, ny)`` array ``pixel_<convention>_c<c>_<label>``, together with the
+    per-pixel created charge from ``effq`` (``pixel_created_ke``) and the
+    per-pixel recorded charge ``sum y`` (``pixel_recorded_ke``) on the same
+    grid, plus ``block_offset`` so that ``pixel_x = ix + block_offset[0]`` and
+    ``pixel_y = iy + block_offset[1]``.
     """
 
     reads = ("event", "readout_config", "block", "block_offset", "op",
@@ -549,6 +557,31 @@ class ZSBasisArms(_JsonAlg):
                "n_pads": int(H.n_pads),
                "arms": [], "data": {}}
         store_npz: dict = {}
+        per_pixel = bool(self.props.get("per_pixel", False))
+        if per_pixel:
+            created = np.zeros((J.nx, J.ny))
+            okp = ((J.truth_ix >= 0) & (J.truth_ix < J.nx)
+                   & (J.truth_iy >= 0) & (J.truth_iy < J.ny))
+            np.add.at(created, (J.truth_ix[okp], J.truth_iy[okp]),
+                      J.truth_q[okp])
+            recorded = np.zeros((J.nx, J.ny))
+            hl = np.asarray(store.get("event").hits.location)
+            hd = np.asarray(store.get("event").hits.data, dtype=float)[:, 3:]
+            hx = hl[:, 0].astype(int) - int(J.boff[0])
+            hy = hl[:, 1].astype(int) - int(J.boff[1])
+            okh = (hx >= 0) & (hx < J.nx) & (hy >= 0) & (hy < J.ny)
+            np.add.at(recorded, (hx[okh], hy[okh]), hd[okh].sum(axis=1))
+            store_npz["pixel_created_ke"] = created.astype(np.float64)
+            store_npz["pixel_recorded_ke"] = recorded.astype(np.float64)
+            store_npz["block_offset"] = np.asarray(J.boff, dtype=np.float64)
+            rec["per_pixel"] = {
+                "pixel_created_total_ke": float(created.sum()),
+                "pixel_recorded_total_ke": float(recorded.sum()),
+                "created_pixel_y_min": int(
+                    (np.nonzero(created.sum(axis=0))[0].min() + J.boff[1])),
+                "created_pixel_y_max": int(
+                    (np.nonzero(created.sum(axis=0))[0].max() + J.boff[1])),
+            }
 
         # truth scored the same way, once
         truth_scores = {}
@@ -623,6 +656,9 @@ class ZSBasisArms(_JsonAlg):
                             m["conservation_rel"])
                         entry[f"zero_preservation_{s}"] = m["zero_preservation"]
                     rec["arms"].append(entry)
+                    if per_pixel and out_npz:
+                        store_npz[f"pixel_{conv}_c{c}_{lab}"] = \
+                            x.sum(axis=2).astype(np.float64)
                     print(f"[ZSBasisArms] {conv} c={c} {lab}: "
                           f"sum/truth {entry['sum_xhat_over_truth']:.4f} "
                           f"E_rel(1.5) {entry.get('E_rel_1.5', float('nan')):.4f} "
@@ -931,3 +967,185 @@ class ZSFigures(_JsonAlg):
         print(f"[ZSFigures] wrote {len(made)} figures under {figdir}")
         self.put(store, "zs.figs", rec)
         self._emit(store, rec)
+
+
+def trim_mask(pixel_y: np.ndarray, y_lo: int, y_hi: int, n: int) -> np.ndarray:
+    """The pixel_y columns kept by a trim of ``n`` pixels at EACH end.
+
+    ``pixel_y < y_lo + n`` and ``pixel_y > y_hi - n`` are excluded, on all
+    ``pixel_x``.  ``y_lo`` and ``y_hi`` are the extreme ``pixel_y`` that carry
+    created charge.
+    """
+    py = np.asarray(pixel_y)
+    return (py >= int(y_lo) + int(n)) & (py <= int(y_hi) - int(n))
+
+
+def trim_ratio(numer: np.ndarray, denom: np.ndarray, mask: np.ndarray) -> float:
+    """``sum numer / sum denom`` over the kept columns of two ``(nx, ny)``
+    per-pixel maps.  Both sides carry the SAME trim."""
+    d = float(np.asarray(denom)[:, mask].sum())
+    return float(np.asarray(numer)[:, mask].sum() / d) if d else float("nan")
+
+
+# ---------------------------------------------------------------------------
+@algorithm("ZSTrimFigure")
+class ZSTrimFigure(_JsonAlg):
+    """Z6: the totals as a function of how many pixels are trimmed from each
+    end of the line, and the along-the-line profile.
+
+    ``trim n`` excludes every pixel with ``pixel_y < n`` or
+    ``pixel_y > y_max - n`` on ALL ``pixel_x``, with ``y_max`` the largest
+    ``pixel_y`` that carries created charge.  The ratio quoted at trim ``n`` is
+    ``sum xhat(n) / sum q_truth(n)``: both sides are restricted by the same
+    trim, so the number answers "does the estimator recover the charge of the
+    pixels it is asked about", not "does it recover the whole event".
+    """
+
+    reads = ()
+    writes = ("zs.trim",)
+
+    def execute(self, store):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        figdir = Path(str(self.props["fig_dir"]))
+        figdir.mkdir(parents=True, exist_ok=True)
+        arms = json.load(open(self.props["arms_json"]))["result"]
+        z = np.load(self.props["arms_npz"])
+        boff = np.asarray(z["block_offset"], dtype=float)
+        created = np.asarray(z["pixel_created_ke"])
+        recorded = np.asarray(z["pixel_recorded_ke"])
+        ny = created.shape[1]
+        pixel_y = np.arange(ny) + int(boff[1])
+        pixel_x = np.arange(created.shape[0]) + int(boff[0])
+        occ = np.nonzero(created.sum(axis=0) > 0)[0]
+        y_lo, y_hi = int(pixel_y[occ.min()]), int(pixel_y[occ.max()])
+        n_max = int(self.props.get("n_max", 12))
+        ns = list(range(0, n_max + 1))
+
+        maps = {}
+        for k in z.files:
+            if not k.startswith("pixel_") or k in ("pixel_created_ke",
+                                                   "pixel_recorded_ke"):
+                continue
+            body = k[len("pixel_"):]
+            conv = "acq_edge" if body.startswith("acq_edge") else "acq_t0"
+            rest = body[len(conv) + 1:]
+            cs, lab = rest.split("_", 1)
+            maps[(conv, int(cs[1:]), lab)] = np.asarray(z[k])
+
+        masks = [trim_mask(pixel_y, y_lo, y_hi, n) for n in ns]
+        curves, table = {}, {}
+        rat_y = [trim_ratio(recorded, created, m) for m in masks]
+        for key, arr in sorted(maps.items()):
+            curves[key] = [trim_ratio(arr, created, m) for m in masks]
+            vals = curves[key]
+            table["%s|c%d|%s" % key] = {str(n): vals[n]
+                                        for n in (0, 3, 5, 10) if n <= n_max}
+
+        # ---- Z6 ----------------------------------------------------------
+        from matplotlib.lines import Line2D
+        marker_of = {1: "o", 5: "s", 30: "^"}
+        fig, ax = plt.subplots(1, 3, figsize=(11.5, 3.4))
+        for (conv, c, lab), vals in sorted(curves.items()):
+            col = OKABE.get(lab, "0.5")
+            ax[0].plot(ns, vals, CONV_STYLE[conv], marker=marker_of.get(c, "o"),
+                       ms=3.8, lw=1.0, color=col,
+                       mfc=(col if conv == "acq_edge" else "w"))
+        ax[0].plot(ns, rat_y, "-", color="0.45", lw=1.4)
+        ax[0].axhline(1.0, color="k", lw=0.9)
+        ax[0].set_xlabel("pixels trimmed at each end of the line, $n$")
+        ax[0].set_ylabel(r"$\Sigma\hat{x}\,/\,\Sigma q_{\rm truth}$")
+        # colour = estimator, marker = basis, filled/open = convention
+        handles = [Line2D([], [], color=OKABE[a], lw=1.4,
+                          label=ARM_LABEL[a]) for a in ("ls", "pos_a0",
+                                                        "pos_l1")]
+        handles += [Line2D([], [], color="0.45", lw=1.4,
+                           label=r"$\Sigma y/\Sigma q_{\rm truth}$")]
+        handles += [Line2D([], [], color="0.3", lw=0, marker=marker_of[c],
+                           ms=4.5, label=f"c = {c}") for c in (1, 5, 30)]
+        handles += [Line2D([], [], color="0.3", lw=1.0, ls=CONV_STYLE[cv],
+                           marker="o", ms=4.5,
+                           mfc=("0.3" if cv == "acq_edge" else "w"),
+                           label=CONV_SHORT[cv]) for cv in ("acq_edge",
+                                                            "acq_t0")]
+        lo_y = min(min(v) for v in curves.values())
+        hi_y = max(max(max(v) for v in curves.values()), max(rat_y), 1.0)
+        span = hi_y - lo_y
+        ax[0].set_ylim(lo_y - 0.42 * span, hi_y + 0.04 * span)
+        ax[0].legend(handles=handles, fontsize=5.0, frameon=False, ncol=3,
+                     loc="lower center", handlelength=2.4,
+                     columnspacing=1.0)
+
+        prof_conv = str(self.props.get("profile_convention", "acq_edge"))
+        prof_c = int(self.props.get("profile_cell_ticks", 5))
+        cr_y = created.sum(axis=0)
+        rc_y = recorded.sum(axis=0)
+        sel = (pixel_y >= y_lo - 3) & (pixel_y <= y_hi + 3)
+        ax[1].plot(pixel_y[sel], cr_y[sel], color="k", lw=1.1,
+                   label="created charge")
+        ax[1].plot(pixel_y[sel], rc_y[sel], color="0.55", lw=1.1,
+                   label="recorded charge")
+        for lab in ("ls", "pos_a0", "pos_l1"):
+            arr = maps.get((prof_conv, prof_c, lab))
+            if arr is None:
+                continue
+            ax[1].plot(pixel_y[sel], arr.sum(axis=0)[sel], lw=1.0,
+                       color=OKABE[lab], label=ARM_LABEL[lab])
+            with np.errstate(divide="ignore", invalid="ignore"):
+                r = np.where(cr_y > 0, arr.sum(axis=0) / cr_y, np.nan)
+            ax[2].plot(pixel_y[sel], r[sel], lw=1.0, color=OKABE[lab],
+                       label=ARM_LABEL[lab])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rr = np.where(cr_y > 0, rc_y / cr_y, np.nan)
+        ax[2].plot(pixel_y[sel], rr[sel], color="0.55", lw=1.1,
+                   label="recorded charge")
+        ax[2].axhline(1.0, color="k", lw=0.9)
+        ax[2].set_ylim(0.6, 1.3)
+        for a, ylab in ((ax[1], "charge per pixel_y [ke]"),
+                        (ax[2], "ratio to the created charge")):
+            a.axvline(y_lo, color=OKABE["coarse"], lw=0.9, ls="--")
+            a.text(y_lo, a.get_ylim()[1], " TPC edge", fontsize=6,
+                   color=OKABE["coarse"], va="top", ha="left")
+            a.set_xlabel("pixel_y")
+            a.set_ylabel(ylab)
+        ax[1].set_title(f"c = {prof_c}, {CONV_SHORT[prof_conv]}", fontsize=8)
+        ax[2].set_title(f"c = {prof_c}, {CONV_SHORT[prof_conv]}", fontsize=8)
+        ax[1].legend(fontsize=6, frameon=False)
+        for a in ax:
+            _ieee_axes(a)
+        fig.tight_layout(w_pad=1.6)
+        p = figdir / "Z6_trim_and_profile.png"
+        fig.savefig(p, dpi=200)
+        plt.close(fig)
+
+        out = {
+            "figure": str(p),
+            "created_pixel_y_range": [y_lo, y_hi],
+            "created_pixel_x_range": [int(pixel_x[created.sum(axis=1) > 0].min()),
+                                      int(pixel_x[created.sum(axis=1) > 0].max())],
+            "n_trim": ns,
+            "recorded_over_created_vs_trim": rat_y,
+            "sum_ratio_vs_trim": {"%s|c%d|%s" % k: v
+                                  for k, v in sorted(curves.items())},
+            "table_n_0_3_5_10": table,
+            "created_total_ke": float(created.sum()),
+            "recorded_total_ke": float(recorded.sum()),
+        }
+        # where the induced-only records sit along the line
+        ind = (created == 0) & (recorded != 0)
+        if ind.any():
+            ix, iy = np.nonzero(ind)
+            out["induced_only_pixels"] = {
+                "n": int(ind.sum()),
+                "pixel_x": sorted({int(v + boff[0]) for v in ix}),
+                "pixel_y_min": int(iy.min() + boff[1]),
+                "pixel_y_max": int(iy.max() + boff[1]),
+                "recorded_total_ke": float(recorded[ind].sum()),
+                "recorded_min_ke": float(recorded[ind].min()),
+                "recorded_max_ke": float(recorded[ind].max()),
+            }
+        print(f"[ZSTrimFigure] created pixel_y {y_lo}..{y_hi}; wrote {p}")
+        self.put(store, "zs.trim", out)
+        self._emit(store, out)
