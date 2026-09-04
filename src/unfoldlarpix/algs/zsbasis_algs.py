@@ -294,7 +294,11 @@ class ZSSampleFacts(_JsonAlg):
         el = np.asarray(ev.effq.location)
         eq = np.asarray(ev.effq.data, dtype=float)[:, -1]
         px, py = loc[:, 0].astype(int), loc[:, 1].astype(int)
-        q = dat[:, 3:]
+        # data columns are CUMULATIVE within a trigger sequence, so the
+        # recorded charge of a sequence is the difference across its bursts —
+        # summing the columns would count the first burst nburst times.  With
+        # nburst = 1 this is the identity.
+        q = np.diff(np.asarray(dat[:, 3:], dtype=float), prepend=0.0, axis=1)
         created = {}
         for a, b, v in zip(el[:, 0].astype(int), el[:, 1].astype(int), eq):
             created[(a, b)] = created.get((a, b), 0.0) + float(v)
@@ -307,8 +311,11 @@ class ZSSampleFacts(_JsonAlg):
         for i in range(len(px)):
             per.setdefault((px[i], py[i]), []).append(i)
         hist = {}
+        seq_hist = {}
         for v in per.values():
-            hist[len(v)] = hist.get(len(v), 0) + 1
+            hist[len(v) * int(q.shape[1])] = \
+                hist.get(len(v) * int(q.shape[1]), 0) + 1
+            seq_hist[len(v)] = seq_hist.get(len(v), 0) + 1
         groups = {}
         for p, idx in per.items():
             d = cheb(p)
@@ -327,24 +334,36 @@ class ZSSampleFacts(_JsonAlg):
                                     "recorded_ke": float(q[idx].sum()),
                                     "created_ke": float(created.get(p, 0.0)),
                                     "trigger": [int(t) for t in loc[idx, 2]],
-                                    "hold": [int(t) for t in loc[idx, 3]]})
+                                    "first_hold": [int(t) for t in loc[idx, 3]]})
         probe = [int(v) for v in self.props.get("probe_pixel", [141, 68])]
         pk = (probe[0], probe[1])
         pinfo = {"pixel": probe, "n_records": 0}
         if pk in per:
             idx = per[pk]
-            pinfo = {"pixel": probe, "n_records": len(idx),
+            B = int(rc.adc_hold_delay)
+            nb = int(q.shape[1])
+            pinfo = {"pixel": probe, "n_trigger_sequences": len(idx),
+                     "n_records": len(idx) * nb, "nburst": nb,
                      "trigger_ticks": [int(t) for t in loc[idx, 2]],
-                     "hold_ticks": [int(t) for t in loc[idx, 3]],
-                     "next_start_ticks": [int(t) for t in loc[idx, 4]],
-                     "recorded_ke": [float(v) for v in q[idx].ravel()],
+                     "hold_ticks": [[int(loc[i, 2]) + k * B
+                                     for k in range(1, nb + 1)] for i in idx],
+                     "csa_reset_ticks": [int(loc[i, 2]) + nb * B
+                                         + int(rc.csa_reset_time) for i in idx],
+                     "rearm_ticks": [int(t) for t in loc[idx, 4]],
+                     "recorded_ke": [[float(v) for v in q[i]] for i in idx],
+                     "cumulative_ke": [[float(v) for v in dat[i, 3:]]
+                                       for i in idx],
                      "created_ke": float(created.get(pk, 0.0))}
         rec = {
             "readout_model": str(store.get("event").__class__.__name__),
-            "n_records": int(len(px)),
+            "nburst": int(q.shape[1]),
+            "n_records": int(q.size),
+            "n_trigger_sequences": int(len(px)),
             "n_pixels_with_records": int(len(per)),
             "records_per_pixel_histogram": {str(k): int(v)
                                             for k, v in sorted(hist.items())},
+            "trigger_sequences_per_pixel_histogram":
+                {str(k): int(v) for k, v in sorted(seq_hist.items())},
             "n_ionised_pixels": int(len(created)),
             "sum_effq_ke": float(eq.sum()),
             "sum_recorded_ke": float(q.sum()),
@@ -1552,6 +1571,43 @@ VARIANT_SHORT = {"A": "A\nlumped", "B": "B\nsplit trigger",
                  "D": "D\nsplit trigger\n+ censors"}
 
 
+def waveform_stats(x: np.ndarray, truth: np.ndarray) -> dict:
+    """Charge-weighted first and second moments of one pixel's fine waveform.
+
+    Both arrays are charge per fine tick on the same grid and origin.  With
+    ``w = x`` (signed, no cut) and ``j`` the fine-tick index:
+
+        sum       = SUM_j w_j                                         [ke]
+        centroid  = SUM_j j w_j / SUM_j w_j                           [ticks]
+        rms width = sqrt( SUM_j (j - centroid)^2 w_j / SUM_j w_j )    [ticks]
+
+    ``centroid_shift_ticks`` is the estimate's centroid minus the truth's, so
+    a negative value means the estimate sits EARLIER in release time than the
+    truth.  Undefined (NaN) when the total is not positive.
+    """
+    x = np.asarray(x, dtype=float)
+    t = np.asarray(truth, dtype=float)
+    n = min(len(x), len(t))
+    x, t = x[:n], t[:n]
+    j = np.arange(n, dtype=float)
+
+    def _m(w):
+        tot = float(w.sum())
+        if tot <= 0:
+            return float("nan"), float("nan"), tot
+        c = float((j * w).sum() / tot)
+        r = float(np.sqrt(((j - c) ** 2 * w).sum() / tot))
+        return c, r, tot
+
+    cx, rx, sx = _m(x)
+    ct, rt, st = _m(t)
+    return {"sum_ke": sx, "truth_sum_ke": st,
+            "centroid_ticks": cx, "truth_centroid_ticks": ct,
+            "centroid_shift_ticks": cx - ct,
+            "rms_width_ticks": rx, "truth_rms_width_ticks": rt,
+            "rms_width_difference_ticks": rx - rt}
+
+
 def censor_violation(term, op, q) -> dict:
     """``max over the armed bins of max(0, C - threshold)``, in ke.
 
@@ -1659,6 +1715,22 @@ class ZSCensorArms(_JsonAlg):
                    "one_tick": int(rc.one_tick)},
                "variants": {}, "arms": []}
         store_npz: dict = {}
+        # the probe pixels' fine truth, once: the waveform statistics are
+        # measured against it and the NPZ carries it for the figures.
+        xt_probe_full = np.zeros((J.nx * J.ny, J.nt_fine))
+        okp = ((J.truth_ix >= 0) & (J.truth_ix < J.nx)
+               & (J.truth_iy >= 0) & (J.truth_iy < J.ny))
+        jjp = J.truth_tick[okp] + delta - J.b0
+        okj = (jjp >= 0) & (jjp < J.nt_fine)
+        np.add.at(xt_probe_full,
+                  ((J.truth_ix[okp][okj] * J.ny + J.truth_iy[okp][okj]),
+                   jjp[okj]), J.truth_q[okp][okj])
+        xt_fine_probe = {}
+        for pxy in wave_pixels:
+            ip, iq = pxy[0] - int(J.boff[0]), pxy[1] - int(J.boff[1])
+            if 0 <= ip < J.nx and 0 <= iq < J.ny:
+                xt_fine_probe[f"{pxy[0]}_{pxy[1]}"] = \
+                    xt_probe_full[ip * J.ny + iq]
 
         for conv in convs:
             for V in variants:
@@ -1744,12 +1816,16 @@ class ZSCensorArms(_JsonAlg):
                 for cfg in arms_cfg:
                     if "variants" in cfg and V not in list(cfg["variants"]):
                         continue
+                    if ("conventions" in cfg
+                            and conv not in list(cfg["conventions"])):
+                        continue
                     lab = str(cfg["label"])
                     alpha = float(cfg.get("alpha", 0.0))
                     pos = bool(cfg.get("positivity", True))
+                    n_it = int(cfg.get("iters", iters))
                     prox = (CoordProx(alpha, st) if pos else _SupportProx(st))
                     t0 = time.time()
-                    q = Fista(n_iter=iters).minimize(
+                    q = Fista(n_iter=n_it).minimize(
                         op, [data_term] + terms_extra, prox,
                         op.to_tensor(np.zeros(op.q_shape)))
                     dt = time.time() - t0
@@ -1761,7 +1837,7 @@ class ZSCensorArms(_JsonAlg):
                         "convention": conv, "convention_label": CONV_LABEL[conv],
                         "variant": V, "variant_label": VARIANT_LABEL[V],
                         "arm": lab, "alpha_ke_per_cell": alpha,
-                        "positivity": pos, "iters": iters,
+                        "positivity": pos, "iters": n_it,
                         "wall_time_s": float(dt),
                         "lipschitz_total": L_total,
                         "sum_xhat_ke": float(x.sum()),
@@ -1790,6 +1866,13 @@ class ZSCensorArms(_JsonAlg):
                     for s in sigmas:
                         m = score_rows(H, fine_xhat(H, xf, J.b0, s), s)
                         entry[f"E_rel_{s}"] = float(m["E_rel"])
+                    entry["waveform_stats"] = {
+                        f"{pxy[0]}_{pxy[1]}": waveform_stats(
+                            xf[(pxy[0] - int(J.boff[0])) * J.ny
+                               + (pxy[1] - int(J.boff[1]))],
+                            xt_fine_probe[f"{pxy[0]}_{pxy[1]}"])
+                        for pxy in wave_pixels
+                        if f"{pxy[0]}_{pxy[1]}" in xt_fine_probe}
                     rec["arms"].append(entry)
                     print(f"[ZSCensorArms] {vk} {lab}: sum/truth "
                           f"{entry['sum_xhat_over_truth']:.4f} +1 "
@@ -1809,14 +1892,7 @@ class ZSCensorArms(_JsonAlg):
                         del t
                     torch.cuda.empty_cache()
         if out_npz:
-            xt_fine = np.zeros((J.nx * J.ny, J.nt_fine))
-            ok = ((J.truth_ix >= 0) & (J.truth_ix < J.nx)
-                  & (J.truth_iy >= 0) & (J.truth_iy < J.ny))
-            jj = J.truth_tick[ok] + delta - J.b0
-            okj = (jj >= 0) & (jj < J.nt_fine)
-            np.add.at(xt_fine,
-                      ((J.truth_ix[ok][okj] * J.ny + J.truth_iy[ok][okj]),
-                       jj[okj]), J.truth_q[ok][okj])
+            xt_fine = xt_probe_full
             for pxy in wave_pixels:
                 ip = pxy[0] - int(J.boff[0])
                 iq = pxy[1] - int(J.boff[1])
@@ -2051,3 +2127,295 @@ class ZSCensorFigures(_JsonAlg):
 def _us_of(J, a) -> np.ndarray:
     """Absolute time axis in microseconds for an array on the fine grid."""
     return (J.b0 + np.arange(len(a))) * 0.05
+
+
+# ---------------------------------------------------------------------------
+# the nburst scan
+# ---------------------------------------------------------------------------
+NBURST_COLOR = {1: "#0072B2", 2: "#E69F00", 3: "#009E73"}
+
+
+@algorithm("ZSNburstFigures")
+class ZSNburstFigures(_JsonAlg):
+    """ZN1-ZN4 for the nburst scan, plus the tables behind them.
+
+    ``inputs`` is a list of ``{nburst, arms_json, sample_json, arms_npz}``.
+    The predicted accumulator is the same at every ``nburst`` — the charge is
+    the same and only the sampling changes — so it is computed once here,
+    through the ``c = 1`` operator, and drawn under all three record sets.
+    """
+
+    reads = ("event", "readout_config", "block", "block_offset", "op")
+    writes = ("zs.nburst",)
+
+    def execute(self, store):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        J = _BasisJob(self, store)
+        figdir = Path(str(self.props["fig_dir"]))
+        figdir.mkdir(parents=True, exist_ok=True)
+        conv = str(self.props.get("convention", "acq_edge"))
+        probe = [int(v) for v in self.props.get("probe_pixel", [141, 68])]
+        pk = f"{probe[0]}_{probe[1]}"
+        rows: dict = {}
+        for item in self.props.get("inputs", []):
+            nb = int(item["nburst"])
+            A = json.load(open(item["arms_json"]))["result"]
+            S = json.load(open(item["sample_json"]))["result"]
+            Z = np.load(item["arms_npz"])
+            rows[nb] = {"arms": A, "sample": S, "npz": Z}
+        nbs = sorted(rows)
+
+        truth_total = float(rows[nbs[0]]["arms"]["truth_total_ke"])
+        table = {"convention": CONV_LABEL[conv], "probe_pixel": probe,
+                 "block_origin_tick_by_nburst": {},
+                 "truth_total_ke": truth_total, "by_nburst": {}}
+        for nb in nbs:
+            A, S = rows[nb]["arms"], rows[nb]["sample"]
+            bd = S["by_distance"]
+            ent = {
+                "nburst": nb,
+                "n_records": int(S["n_records"]),
+                "n_trigger_sequences": int(S.get("n_trigger_sequences",
+                                                 S["n_records"])),
+                "n_pixels_with_records": int(S["n_pixels_with_records"]),
+                "sum_recorded_ke": float(S["sum_recorded_ke"]),
+                "recorded_over_created": float(S["recorded_over_created"]),
+                "ionised_recorded_over_created":
+                    float(bd["ionised"]["recorded_ke"]
+                          / bd["ionised"]["created_ke"]),
+                "n_plus1_pixels_with_records":
+                    int(bd.get("plus1", {}).get("n_pixels", 0)),
+                "plus1_recorded_ke":
+                    float(bd.get("plus1", {}).get("recorded_ke", 0.0)),
+                "probe": S.get("probe_pixel", {}),
+                "arms": {},
+            }
+            for a in A["arms"]:
+                if a["convention"] != conv:
+                    continue
+                ent["arms"][f"{a['variant']}_{a['arm']}"] = {
+                    "sum_xhat_over_truth": a["sum_xhat_over_truth"],
+                    "plus1_sum_ke": a["pixels"]["plus1"]["sum_ke"],
+                    "E_rel_1.5": a.get("E_rel_1.5"),
+                    "E_rel_2.0": a.get("E_rel_2.0"),
+                    "rel_residual": a["rel_residual"],
+                    "iters": a["iters"],
+                    "wall_time_s": a["wall_time_s"],
+                    "waveform_stats": a.get("waveform_stats", {}).get(pk, {}),
+                }
+            o = rows[nb]["npz"].get("fine_origin_tick")
+            table["block_origin_tick_by_nburst"][str(nb)] = (
+                int(o[0]) if o is not None else None)
+            table["by_nburst"][str(nb)] = ent
+
+        arm_keys = [k for k in ("A_pos_a0", "A_pos_l1", "A_pos_l1_3000",
+                                "D_pos_a0", "D_pos_l1", "D_pos_l1_3000")
+                    if any(k in table["by_nburst"][str(nb)]["arms"]
+                           for nb in nbs)]
+        style = {"A": "-", "D": "--"}
+        made = []
+
+        # ---- ZN1 ----------------------------------------------------------
+        fig, ax = plt.subplots(figsize=(4.6, 3.2))
+        ax.plot(nbs, [table["by_nburst"][str(nb)]["recorded_over_created"]
+                      for nb in nbs], "s-", color="#666666", ms=5, lw=1.1,
+                label=r"records, $\Sigma y$")
+        for k in arm_keys:
+            V, arm = k.split("_", 1)
+            base = arm.replace("_3000", "")
+            xs = [nb for nb in nbs if k in table["by_nburst"][str(nb)]["arms"]]
+            ys = [table["by_nburst"][str(nb)]["arms"][k]["sum_xhat_over_truth"]
+                  for nb in xs]
+            ax.plot(xs, ys, style[V], marker=("o" if "3000" not in arm else "D"),
+                    ms=4.2, lw=1.0, color=OKABE[base],
+                    mfc=(OKABE[base] if "3000" not in arm else "w"),
+                    label=f"{V}, {ARM_LABEL[base]}"
+                          + (", 3000 it." if "3000" in arm else ""))
+        ax.axhline(1.0, color="k", lw=0.9)
+        ax.set_xticks(nbs)
+        ax.set_xlabel("nburst")
+        ax.set_ylabel(r"$\Sigma\hat{x}\,/\,\Sigma q_{\rm truth}$")
+        ax.set_title(CONV_SHORT[conv], fontsize=8)
+        ax.legend(fontsize=5.5, frameon=False)
+        _ieee_axes(ax)
+        fig.tight_layout()
+        p = figdir / "ZN1_sum_ratio_vs_nburst.png"
+        fig.savefig(p, dpi=200)
+        plt.close(fig)
+        made.append(str(p))
+
+        # ---- the predicted accumulator, once ------------------------------
+        op1 = build_zs_operator(J, 1, zs_windows(store, conv)[0])
+        xt = np.zeros(op1.q_shape)
+        jj = J.truth_tick - 1 - J.b0
+        ok = ((jj >= 0) & (jj < op1.q_shape[2]) & (J.truth_ix >= 0)
+              & (J.truth_ix < J.nx) & (J.truth_iy >= 0) & (J.truth_iy < J.ny))
+        np.add.at(xt, (J.truth_ix[ok], J.truth_iy[ok], jj[ok]), J.truth_q[ok])
+        acc = np.cumsum(op1.conv(op1.to_tensor(xt)).cpu().numpy(), axis=2)
+        us = (J.b0 + np.arange(J.nt_fine)) * 0.05
+        ip, iq = probe[0] - int(J.boff[0]), probe[1] - int(J.boff[1])
+        del op1
+        torch.cuda.empty_cache()
+
+        # ---- ZN2 -----------------------------------------------------------
+        B = int(J.B)
+        rst = int(J.rc.csa_reset_time)
+        fig, ax = plt.subplots(2, 1, figsize=(6.6, 5.6))
+        ax[0].plot(us, acc[ip, iq], color="k", lw=1.0,
+                   label="predicted accumulator from the truth")
+        ax[0].axhline(float(J.rc.threshold), color="0.4", lw=0.8, ls="-.",
+                      label=f"threshold {float(J.rc.threshold):.0f} ke")
+        t_last = 0.0
+        for nb in nbs:
+            Zn = rows[nb]["npz"]
+            rl = Zn.get(f"rec_{pk}_loc")
+            rv = Zn.get(f"rec_{pk}_val")
+            if rl is None or not len(rl):
+                continue
+            hold_us, vals = [], []
+            for i in range(len(rl)):
+                for k in range(1, nb + 1):
+                    hold_us.append((rl[i, 2] + k * B) * 0.05)
+                    vals.append(float(rv[i, k - 1]))
+                lo = (rl[i, 2] + nb * B) * 0.05
+                ax[0].axvspan(lo, lo + rst * 0.05, color=NBURST_COLOR[nb],
+                              alpha=0.35, lw=0)
+            ax[0].plot(hold_us, vals, "o", ms=4.5, color=NBURST_COLOR[nb],
+                       label=f"nburst = {nb}, records at their holds")
+            t_last = max(t_last, max(hold_us))
+        ax[0].set_xlim(-0.5, t_last + 10.0)
+        ax[0].set_ylabel("accumulator [ke]")
+        ax[0].set_xlabel(r"anode time relative to $t_0$ [$\mu$s]")
+        ax[0].set_title(f"pixel ({probe[0]}, {probe[1]}); shaded: the CSA "
+                        f"reset interval of each sequence", fontsize=8)
+        ax[0].legend(fontsize=5.5, frameon=False, loc="upper left")
+        # each nburst sample has its OWN block origin -- the trigger times
+        # differ, so FFTWarmStart chooses a different block -- and the fine
+        # arrays must be placed with the origin stored beside them.
+        def _origin(nb):
+            o = rows[nb]["npz"].get("fine_origin_tick")
+            return int(o[0]) if o is not None else J.b0
+
+        def _abs_us(nb, a):
+            return (_origin(nb) + np.arange(len(a))) * 0.05
+
+        tr = rows[nbs[0]]["npz"].get(f"truth_{pk}")
+        if tr is not None:
+            ax[1].step(_abs_us(nbs[0], tr), tr, where="post", color="k",
+                       lw=1.1, label="truth")
+            nz = np.nonzero(tr)[0]
+            q_lo = (_origin(nbs[0]) + nz[0]) * 0.05 - 5.0
+            q_hi = (_origin(nbs[0]) + nz[-1]) * 0.05 + 5.0
+        else:
+            q_lo, q_hi = us[0], us[-1]
+        for nb in nbs:
+            key = f"wave_{conv}_A_pos_l1_{pk}"
+            v = rows[nb]["npz"].get(key)
+            if v is None:
+                continue
+            ax[1].step(_abs_us(nb, v), v, where="post", lw=1.0,
+                       color=NBURST_COLOR[nb], label=f"nburst = {nb}")
+        ax[1].set_xlim(q_lo, q_hi)
+        ax[1].set_ylabel("charge per fine tick [ke]")
+        ax[1].set_xlabel(r"release time at the response plane, "
+                         r"relative to $t_0$ [$\mu$s]")
+        ax[1].set_title(r"variant A, positivity + $\ell_1$, "
+                        + CONV_SHORT[conv], fontsize=8)
+        ax[1].legend(fontsize=6, frameon=False)
+        for a in ax:
+            _ieee_axes(a)
+        fig.tight_layout()
+        p = figdir / f"ZN2_waveform_{probe[0]}_{probe[1]}.png"
+        fig.savefig(p, dpi=200)
+        plt.close(fig)
+        made.append(str(p))
+
+        # ---- ZN3 -----------------------------------------------------------
+        fig, axs = plt.subplots(1, 3, figsize=(10.5, 3.0))
+        for k in arm_keys:
+            V, arm = k.split("_", 1)
+            base = arm.replace("_3000", "")
+            xs = [nb for nb in nbs
+                  if table["by_nburst"][str(nb)]["arms"].get(k, {}).get(
+                      "waveform_stats")]
+            if not xs:
+                continue
+            ws = [table["by_nburst"][str(nb)]["arms"][k]["waveform_stats"]
+                  for nb in xs]
+            kw = dict(ls=style[V],
+                      marker=("o" if "3000" not in arm else "D"), ms=4.2,
+                      lw=1.0, color=OKABE[base],
+                      mfc=(OKABE[base] if "3000" not in arm else "w"))
+            axs[0].plot(xs, [w["centroid_shift_ticks"] for w in ws], **kw,
+                        label=f"{V}, {ARM_LABEL[base]}"
+                              + (", 3000 it." if "3000" in arm else ""))
+            axs[1].plot(xs, [w["rms_width_ticks"] for w in ws], **kw)
+            axs[2].plot(xs, [w["sum_ke"] for w in ws], **kw)
+        w0 = None
+        for nb in nbs:
+            for k in arm_keys:
+                w = table["by_nburst"][str(nb)]["arms"].get(k, {}).get(
+                    "waveform_stats")
+                if w:
+                    w0 = w
+                    break
+            if w0:
+                break
+        if w0:
+            axs[0].axhline(0.0, color="k", lw=0.8, ls="--")
+            axs[1].axhline(w0["truth_rms_width_ticks"], color="k", lw=0.8,
+                           ls="--")
+            axs[2].axhline(w0["truth_sum_ke"], color="k", lw=0.8, ls="--")
+        axs[0].set_ylabel("centroid shift [fine ticks]")
+        axs[1].set_ylabel("rms width [fine ticks]")
+        axs[2].set_ylabel("waveform sum [ke]")
+        for a in axs:
+            a.set_xticks(nbs)
+            a.set_xlabel("nburst")
+            _ieee_axes(a)
+        axs[0].legend(fontsize=5.5, frameon=False)
+        axs[0].set_title(f"pixel ({probe[0]}, {probe[1]}), "
+                         f"{CONV_SHORT[conv]}", fontsize=8)
+        fig.tight_layout()
+        p = figdir / "ZN3_waveform_moments_vs_nburst.png"
+        fig.savefig(p, dpi=200)
+        plt.close(fig)
+        made.append(str(p))
+
+        # ---- ZN4 -----------------------------------------------------------
+        fig, axs = plt.subplots(1, 3, figsize=(10.5, 3.0))
+        E = [table["by_nburst"][str(nb)] for nb in nbs]
+        axs[0].plot(nbs, [e["recorded_over_created"] for e in E], "o-",
+                    color="#666666", ms=5, lw=1.1, label="all pixels")
+        axs[0].plot(nbs, [e["ionised_recorded_over_created"] for e in E],
+                    "s-", color=OKABE["pos_a0"], ms=5, lw=1.1,
+                    label="ionised pixels")
+        axs[0].axhline(1.0, color="k", lw=0.8, ls="--")
+        axs[0].set_ylabel("recorded / created")
+        axs[0].legend(fontsize=6, frameon=False)
+        axs[1].plot(nbs, [e["plus1_recorded_ke"] for e in E], "o-",
+                    color=OKABE["coarse"], ms=5, lw=1.1)
+        axs[1].set_ylabel("charge recorded on the +1 pixels [ke]")
+        axs[2].plot(nbs, [e["n_records"] for e in E], "o-",
+                    color=OKABE["coarse"], ms=5, lw=1.1, label="records")
+        axs[2].plot(nbs, [e["n_trigger_sequences"] for e in E], "s-",
+                    color=OKABE["ls"], ms=5, lw=1.1, label="trigger sequences")
+        axs[2].set_ylabel("count")
+        axs[2].legend(fontsize=6, frameon=False)
+        for a in axs:
+            a.set_xticks(nbs)
+            a.set_xlabel("nburst")
+            _ieee_axes(a)
+        fig.tight_layout()
+        p = figdir / "ZN4_sample_facts_vs_nburst.png"
+        fig.savefig(p, dpi=200)
+        plt.close(fig)
+        made.append(str(p))
+
+        table["figures"] = made
+        print(f"[ZSNburstFigures] wrote {len(made)} figures under {figdir}")
+        self.put(store, "zs.nburst", table)
+        self._emit(store, table)

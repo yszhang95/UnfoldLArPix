@@ -357,3 +357,31 @@ def test_build_zs_operator_is_uncached_and_matches_the_cached_one():
     assert fine.q_shape[2] == J.nt_fine - 6 + 1
     with pytest.raises(ValueError):
         Z.build_zs_operator(J, 5, w1)               # 24 is not a multiple of 5
+
+
+def test_waveform_stats_moments_and_shift():
+    truth = np.zeros(40)
+    truth[20] = 4.0
+    est = np.zeros(40)
+    est[8] = est[12] = 1.0          # centroid 10, rms 2
+    out = Z.waveform_stats(est, truth)
+    assert out["sum_ke"] == pytest.approx(2.0)
+    assert out["truth_sum_ke"] == pytest.approx(4.0)
+    assert out["centroid_ticks"] == pytest.approx(10.0)
+    assert out["truth_centroid_ticks"] == pytest.approx(20.0)
+    assert out["centroid_shift_ticks"] == pytest.approx(-10.0)
+    assert out["rms_width_ticks"] == pytest.approx(2.0)
+    assert out["truth_rms_width_ticks"] == pytest.approx(0.0)
+    assert out["rms_width_difference_ticks"] == pytest.approx(2.0)
+    # a non-positive total leaves the moments undefined, not zero
+    assert np.isnan(Z.waveform_stats(np.zeros(40), truth)["centroid_ticks"])
+
+
+def test_waveform_stats_ignores_trailing_length_mismatch():
+    truth = np.zeros(30)
+    truth[10] = 1.0
+    est = np.zeros(50)
+    est[10] = 1.0
+    out = Z.waveform_stats(est, truth)
+    assert out["centroid_shift_ticks"] == pytest.approx(0.0)
+    assert out["sum_ke"] == pytest.approx(1.0)
