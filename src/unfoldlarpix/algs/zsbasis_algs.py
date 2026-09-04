@@ -1149,3 +1149,369 @@ class ZSTrimFigure(_JsonAlg):
         print(f"[ZSTrimFigure] created pixel_y {y_lo}..{y_hi}; wrote {p}")
         self.put(store, "zs.trim", out)
         self._emit(store, out)
+
+
+# ---------------------------------------------------------------------------
+# the lifetime ladder under zero suppression
+# ---------------------------------------------------------------------------
+LADDER_ESTIMATES = (
+    ("sum_effq", "created charge, $\\Sigma$ effq", "#000000", "o"),
+    ("sum_y", "records, $\\Sigma y$", "#666666", "s"),
+    ("ls", "least squares", OKABE["ls"], "v"),
+    ("pos_a0", "positivity", OKABE["pos_a0"], "^"),
+    ("pos_l1", r"positivity + $\ell_1$", OKABE["pos_l1"], "D"),
+)
+
+
+@algorithm("ZSLadderFit")
+class ZSLadderFit(_JsonAlg):
+    """The electron-lifetime fit over the zero-suppressed depth ladder.
+
+    A SOURCE algorithm (``reads = ()``): it re-reads only the per-depth JSONs
+    written by :class:`ZSBasisArms` and :class:`ZSSampleFacts`, so changing the
+    minimum depth never re-runs a solve.
+
+    For every estimate ``E`` and every lifetime, ``ln E(d) = a - lambda
+    t_drift(d)`` is fitted by unweighted least squares over the depths
+    ``d >= d_min``, with :func:`~unfoldlarpix.algs.depthladder_algs.ls_line` —
+    the same estimator and the same residual-scatter error
+    ``se(lambda) = sqrt((sum r^2/(n-2)) / sum (t - tbar)^2)`` that
+    ``DepthLadderFit`` uses.  ``DepthLadderFit`` itself is not called: its
+    ``_values`` reads the ``variants``/``tau_cut`` schema of the min-norm
+    kernel-truncation campaign, which a ZS arms record does not carry.
+
+    ``t_drift(d) = d / v``, ``v = 0.159645`` cm/µs, the ladder generator's own
+    drift velocity.
+
+    Props
+    -----
+    inputs : list of ``{depth_cm, tau_ms, arms_json, sample_json}``.
+    arms : list of arm labels to read from the arms record (default
+        ``[ls, pos_a0, pos_l1]``).
+    convention, cell_ticks : which arms record entry to read (default
+        ``acq_edge``, 5).
+    d_min_cm : list, default ``[4.5, 7.5, 10.5, 13.5, 16.5]``.
+    velocity_cm_per_us : float, default 0.159645.
+    """
+
+    reads = ()
+    writes = ("zs.ladder",)
+
+    def execute(self, store):
+        from .depthladder_algs import DRIFT_VELOCITY_CM_PER_US, ls_line
+        v = float(self.props.get("velocity_cm_per_us",
+                                 DRIFT_VELOCITY_CM_PER_US))
+        conv = str(self.props.get("convention", "acq_edge"))
+        c = int(self.props.get("cell_ticks", 5))
+        arm_labels = list(self.props.get("arms", ["ls", "pos_a0", "pos_l1"]))
+        d_mins = [float(x) for x in self.props.get(
+            "d_min_cm", [4.5, 7.5, 10.5, 13.5, 16.5])]
+
+        per: dict = {}
+        facts: dict = {}
+        for item in self.props.get("inputs", []):
+            d, tau = float(item["depth_cm"]), float(item["tau_ms"])
+            A = json.load(open(item["arms_json"]))["result"]
+            vals = {"sum_effq": float(A["truth_total_ke"]),
+                    "sum_y": float(A["data"][f"{conv}_c{c}"]["sum_y_ke"])}
+            wall = {}
+            for a in A["arms"]:
+                if a["convention"] == conv and int(a["cell_ticks"]) == c \
+                        and a["arm"] in arm_labels:
+                    vals[a["arm"]] = float(a["sum_xhat_ke"])
+                    wall[a["arm"]] = float(a["wall_time_s"])
+            per.setdefault(tau, {})[d] = vals
+            S = json.load(open(item["sample_json"]))["result"]
+            bd = S["by_distance"]
+            # ZSSampleFacts classifies a pixel as ionised if it carries ANY
+            # created charge.  Transverse diffusion grows with drift, so past
+            # ~25 cm the neighbouring pixel row carries a sub-ke tail and is
+            # itself counted as ionised, which empties the +1 class.  Redo the
+            # classification from the per-pixel maps with an explicit charge
+            # threshold, and report both.
+            extra = {}
+            if item.get("arms_npz"):
+                thr = float(self.props.get("ionised_min_ke", 0.5))
+                z = np.load(item["arms_npz"])
+                cre = np.asarray(z["pixel_created_ke"])
+                rec_map = np.asarray(z["pixel_recorded_ke"])
+                ion = cre > thr
+                if ion.any():
+                    ii = np.argwhere(ion)
+                    gx, gy = np.meshgrid(np.arange(cre.shape[0]),
+                                         np.arange(cre.shape[1]),
+                                         indexing="ij")
+                    allp = np.stack([gx.reshape(-1), gy.reshape(-1)], axis=1)
+                    ch = np.abs(allp[:, None, :] - ii[None, :, :]
+                                ).max(axis=2).min(axis=1).reshape(cre.shape)
+                    p1 = (ch == 1)
+                    extra = {
+                        "ionised_min_ke": thr,
+                        "n_ionised_pixels_thr": int(ion.sum()),
+                        "created_on_ionised_ke": float(cre[ion].sum()),
+                        "recorded_on_ionised_ke": float(rec_map[ion].sum()),
+                        "recorded_over_created_ionised_thr":
+                            float(rec_map[ion].sum() / cre[ion].sum()),
+                        "n_plus1_pixels_with_records_thr":
+                            int((p1 & (rec_map != 0)).sum()),
+                        "plus1_recorded_ke_thr": float(rec_map[p1].sum()),
+                        "created_on_plus1_ke": float(cre[p1].sum()),
+                        "n_plus2_pixels_with_records_thr":
+                            int(((ch == 2) & (rec_map != 0)).sum()),
+                    }
+            facts.setdefault(str(tau), {})[str(d)] = {
+                "n_records": int(S["n_records"]),
+                "n_pixels_with_records": int(S["n_pixels_with_records"]),
+                "n_ionised_pixels": int(S["n_ionised_pixels"]),
+                "sum_effq_ke": float(S["sum_effq_ke"]),
+                "sum_recorded_ke": float(S["sum_recorded_ke"]),
+                "recorded_over_created": float(S["recorded_over_created"]),
+                "n_plus1_pixels_with_records":
+                    int(bd.get("plus1", {}).get("n_pixels", 0)),
+                "plus1_recorded_ke":
+                    float(bd.get("plus1", {}).get("recorded_ke", 0.0)),
+                "n_plus2_pixels_with_records":
+                    int(bd.get("plus2", {}).get("n_pixels", 0)),
+                "plus2_recorded_ke":
+                    float(bd.get("plus2", {}).get("recorded_ke", 0.0)),
+                "ionised_recorded_ke": float(bd["ionised"]["recorded_ke"]),
+                "ionised_created_ke": float(bd["ionised"]["created_ke"]),
+                "ionised_recorded_over_created":
+                    float(bd["ionised"]["recorded_ke"]
+                          / bd["ionised"]["created_ke"]),
+                "n_ionised_pixels_with_records":
+                    int(bd["ionised"]["n_pixels"]),
+                "wall_time_s": wall,
+                **extra,
+            }
+
+        rec = {"velocity_cm_per_us": v, "convention": CONV_LABEL[conv],
+               "cell_ticks": c, "d_min_cm": d_mins,
+               "lambda_error_definition":
+                   "sqrt( (sum r^2/(n-2)) / sum (t - tbar)^2 ), unweighted "
+                   "straight line ln E = a - lambda t_drift "
+                   "(depthladder_algs.ls_line)",
+               "sample_facts": facts, "fits": {}, "ratios": {}}
+        names = [n for n, _, _, _ in LADDER_ESTIMATES]
+        for tau, byd in sorted(per.items()):
+            depths = np.array(sorted(byd))
+            t_ms = depths / v * 1e-3
+            key = f"{tau:g}ms"
+            rec["fits"][key] = {}
+            rec["ratios"][key] = {"depths_cm": [float(x) for x in depths]}
+            print(f"[{self.name}] tau = {tau} ms, lambda_true = "
+                  f"{1.0 / tau:.4f} /ms")
+            for name in names:
+                if not all(name in byd[d] for d in depths):
+                    continue
+                E = np.array([byd[d][name] for d in depths])
+                if not np.all(E > 0):
+                    print(f"[{self.name}]   {name}: non-positive estimate, "
+                          "not fitted")
+                    continue
+                rec["ratios"][key][name] = [
+                    float(byd[d][name] / byd[d]["sum_effq"]) for d in depths]
+                rec["fits"][key][name] = {
+                    "E_ke": [float(x) for x in E],
+                    "depths_cm": [float(x) for x in depths],
+                    "t_drift_ms": [float(x) for x in t_ms],
+                    "lambda_true_per_ms": 1.0 / tau, "by_d_min": {}}
+                line = f"[{self.name}]   {name:10s}"
+                for dm in d_mins:
+                    sel = depths >= dm - 1e-9
+                    if sel.sum() < 3:
+                        continue
+                    f = ls_line(t_ms[sel], np.log(E[sel]))
+                    f["d_min_cm"] = dm
+                    f["pull"] = ((f["lambda_per_ms"] - 1.0 / tau)
+                                 / max(f["lambda_err"], 1e-12))
+                    rec["fits"][key][name]["by_d_min"][f"{dm:g}"] = f
+                    line += (f"  {dm:g}:{f['lambda_per_ms']:7.4f}"
+                             f"+-{f['lambda_err']:.4f}")
+                print(line)
+
+        # lambda(20 ms) - lambda(1 ms): -0.95 /ms for a lifetime-independent
+        # estimate, since lambda_true is 0.05 and 1.0 /ms.
+        keys = sorted(rec["fits"], key=lambda s: float(s[:-2]))
+        if len(keys) == 2:
+            lo, hi = keys[0], keys[1]
+            diff = {}
+            for name in names:
+                if name not in rec["fits"][lo] or name not in rec["fits"][hi]:
+                    continue
+                per_dm = {}
+                for dm in rec["fits"][lo][name]["by_d_min"]:
+                    if dm not in rec["fits"][hi][name]["by_d_min"]:
+                        continue
+                    a = rec["fits"][hi][name]["by_d_min"][dm]
+                    b = rec["fits"][lo][name]["by_d_min"][dm]
+                    per_dm[dm] = {
+                        "lambda_difference_per_ms":
+                            a["lambda_per_ms"] - b["lambda_per_ms"],
+                        "err": float(np.hypot(a["lambda_err"],
+                                              b["lambda_err"])),
+                        "minus_expected_-0.95":
+                            a["lambda_per_ms"] - b["lambda_per_ms"] + 0.95}
+                diff[name] = per_dm
+            rec["lambda_difference_20ms_minus_1ms"] = {
+                "expected_per_ms": -0.95,
+                "note": "lambda_true is 1.0 /ms at tau = 1 ms and 0.05 /ms at "
+                        "tau = 20 ms; an estimate whose depth acceptance does "
+                        "not depend on the lifetime gives -0.95 exactly",
+                "by_estimate": diff}
+            for name, per_dm in diff.items():
+                s = "  ".join(f"{k}:{e['lambda_difference_per_ms']:+7.4f}"
+                              for k, e in sorted(per_dm.items(),
+                                                 key=lambda kv: float(kv[0])))
+                print(f"[{self.name}] lambda(20ms)-lambda(1ms) {name:10s} {s}")
+        self.put(store, "zs.ladder", rec)
+        self._emit(store, rec)
+
+
+# ---------------------------------------------------------------------------
+@algorithm("ZSLadderFigures")
+class ZSLadderFigures(_JsonAlg):
+    """ZL1-ZL4 from the :class:`ZSLadderFit` record."""
+
+    reads = ()
+    writes = ("zs.ladder_figs",)
+
+    def execute(self, store):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        R = json.load(open(self.props["ladder_json"]))["result"]
+        figdir = Path(str(self.props["fig_dir"]))
+        figdir.mkdir(parents=True, exist_ok=True)
+        keys = sorted(R["ratios"], key=lambda s: float(s[:-2]))
+        depths = np.array(R["ratios"][keys[0]]["depths_cm"])
+        made = []
+
+        # ---- ZL1 sum E / sum effq vs depth --------------------------------
+        fig, ax = plt.subplots(figsize=(4.2, 3.0))
+        for ki, key in enumerate(keys):
+            fill = ki == 0
+            for name, lab, col, mk in LADDER_ESTIMATES:
+                if name == "sum_effq" or name not in R["ratios"][key]:
+                    continue
+                ax.plot(depths, R["ratios"][key][name], mk, ls="-", color=col,
+                        ms=4.0, lw=0.9, mfc=(col if fill else "none"), mew=0.9,
+                        label=(lab if fill else None))
+        ax.axhline(1.0, color="k", lw=0.8, ls="--")
+        ax.set_xlabel("drift depth [cm]")
+        ax.set_ylabel(r"$\Sigma E(d)\,/\,\Sigma\,\mathrm{effq}(d)$")
+        ax.set_title(r"filled: $\tau$ = %s    open: $\tau$ = %s"
+                     % (keys[0], keys[1] if len(keys) > 1 else "-"),
+                     fontsize=8)
+        ax.legend(fontsize=6, frameon=False, loc="best")
+        _ieee_axes(ax)
+        fig.tight_layout()
+        p = figdir / "ZL1_ratio_vs_depth.png"
+        fig.savefig(p, dpi=200)
+        plt.close(fig)
+        made.append(str(p))
+
+        # ---- ZL2 lambda vs d_min ------------------------------------------
+        fig, axs = plt.subplots(1, len(keys), figsize=(4.4 * len(keys), 3.0))
+        axs = np.atleast_1d(axs)
+        for a, key in zip(axs, keys):
+            lam_true = 1.0 / float(key[:-2])
+            for name, lab, col, mk in LADDER_ESTIMATES:
+                f = R["fits"].get(key, {}).get(name)
+                if not f:
+                    continue
+                dms = sorted(f["by_d_min"], key=float)
+                x = [float(k) for k in dms]
+                y = [f["by_d_min"][k]["lambda_per_ms"] for k in dms]
+                e = [f["by_d_min"][k]["lambda_err"] for k in dms]
+                a.errorbar(x, y, yerr=e, fmt=mk, ls="-", color=col, ms=4.0,
+                           lw=0.9, capsize=2.0, elinewidth=0.8, label=lab)
+            a.axhline(lam_true, color="k", lw=0.8, ls="--")
+            a.set_xlabel("minimum depth of the fit, $d_{\\min}$ [cm]")
+            a.set_ylabel(r"$\lambda$ [ms$^{-1}$]")
+            a.set_title(r"$\tau$ = %s, $\lambda_{\rm true}$ = %.3f ms$^{-1}$"
+                        % (key, lam_true), fontsize=8)
+            _ieee_axes(a)
+        axs[0].legend(fontsize=6, frameon=False)
+        fig.tight_layout()
+        p = figdir / "ZL2_lambda_vs_dmin.png"
+        fig.savefig(p, dpi=200)
+        plt.close(fig)
+        made.append(str(p))
+
+        # ---- ZL3 ln E vs t_drift, two d_min -------------------------------
+        key = str(self.props.get("profile_tau_key", keys[0]))
+        dms = [str(x) for x in self.props.get("profile_d_min", [4.5, 16.5])]
+        fig, axs = plt.subplots(1, len(dms), figsize=(4.4 * len(dms), 3.0),
+                                sharey=True)
+        axs = np.atleast_1d(axs)
+        for a, dm in zip(axs, dms):
+            for name, lab, col, mk in LADDER_ESTIMATES:
+                f = R["fits"].get(key, {}).get(name)
+                if not f or dm not in f["by_d_min"]:
+                    continue
+                t = np.array(f["t_drift_ms"])
+                lnE = np.log(np.array(f["E_ke"]))
+                a.plot(t, lnE, mk, color=col, ms=4.0, ls="none", label=lab)
+                g = f["by_d_min"][dm]
+                tf = np.array(g["t_drift_ms"])
+                a.plot(tf, g["intercept"] - g["lambda_per_ms"] * tf, "-",
+                       color=col, lw=0.9)
+            a.set_xlabel(r"$t_{\rm drift}$ [ms]")
+            a.set_title(r"$\tau$ = %s, $d_{\min}$ = %s cm" % (key, dm),
+                        fontsize=8)
+            _ieee_axes(a)
+        axs[0].set_ylabel(r"$\ln E$  [$E$ in ke]")
+        axs[0].legend(fontsize=6, frameon=False)
+        fig.tight_layout()
+        p = figdir / "ZL3_lnE_vs_tdrift.png"
+        fig.savefig(p, dpi=200)
+        plt.close(fig)
+        made.append(str(p))
+
+        # ---- ZL4 sample facts vs depth ------------------------------------
+        F = R["sample_facts"]
+        fig, axs = plt.subplots(1, 3, figsize=(10.5, 3.0))
+        for ki, key in enumerate(keys):
+            tk = str(float(key[:-2]))
+            if tk not in F:
+                continue
+            fill = ki == 0
+            dd = sorted(F[tk], key=float)
+            x = [float(d) for d in dd]
+            def g(d, k):
+                e = F[tk][d]
+                return e.get(k + "_thr", e[k])
+            axs[0].plot(x, [g(d, "n_plus1_pixels_with_records") for d in dd],
+                        "o-", color=OKABE["coarse"], ms=4.0, lw=0.9,
+                        mfc=(OKABE["coarse"] if fill else "none"),
+                        label=(r"$\tau$ = %s" % key))
+            axs[1].plot(x, [g(d, "plus1_recorded_ke") for d in dd],
+                        "o-", color=OKABE["coarse"], ms=4.0, lw=0.9,
+                        mfc=(OKABE["coarse"] if fill else "none"),
+                        label=(r"$\tau$ = %s" % key))
+            axs[2].plot(x, [F[tk][d].get(
+                "recorded_over_created_ionised_thr",
+                F[tk][d]["ionised_recorded_over_created"]) for d in dd],
+                        "o-", color=OKABE["pos_a0"], ms=4.0,
+                        lw=0.9, mfc=(OKABE["pos_a0"] if fill else "none"),
+                        label=(r"$\tau$ = %s" % key))
+        axs[0].set_ylabel("+1 pixels with a record")
+        axs[1].set_ylabel("charge recorded on the +1 pixels [ke]")
+        axs[2].set_ylabel("recorded / created on the ionised pixels")
+        axs[2].axhline(1.0, color="k", lw=0.8, ls="--")
+        for a in axs:
+            a.set_xlabel("drift depth [cm]")
+            a.legend(fontsize=6, frameon=False)
+            _ieee_axes(a)
+        fig.tight_layout()
+        p = figdir / "ZL4_sample_facts_vs_depth.png"
+        fig.savefig(p, dpi=200)
+        plt.close(fig)
+        made.append(str(p))
+
+        print(f"[ZSLadderFigures] wrote {len(made)} figures under {figdir}")
+        out = {"figures": made}
+        self.put(store, "zs.ladder_figs", out)
+        self._emit(store, out)

@@ -237,3 +237,67 @@ def test_trim_ratio_applies_the_same_trim_to_both_sides():
     m1 = Z.trim_mask(pixel_y, 1, 3, 1)
     assert Z.trim_ratio(reco, created, m1) == pytest.approx(20.0 / 20.0)
     assert np.isnan(Z.trim_ratio(reco, created, np.zeros(5, bool)))
+
+
+def _arms_doc(total, sum_y, arms):
+    return {"result": {"truth_total_ke": total,
+                       "data": {"acq_edge_c5": {"sum_y_ke": sum_y}},
+                       "arms": [{"convention": "acq_edge", "cell_ticks": 5,
+                                 "arm": k, "sum_xhat_ke": v,
+                                 "wall_time_s": 1.0}
+                                for k, v in arms.items()]}}
+
+
+def _sample_doc(total, recorded):
+    return {"result": {"n_records": 10, "n_pixels_with_records": 5,
+                       "n_ionised_pixels": 4, "sum_effq_ke": total,
+                       "sum_recorded_ke": recorded,
+                       "recorded_over_created": recorded / total,
+                       "by_distance": {
+                           "ionised": {"n_pixels": 4, "recorded_ke": recorded,
+                                       "created_ke": total},
+                           "plus1": {"n_pixels": 1, "recorded_ke": 5.0}}}}
+
+
+def test_ladder_fit_recovers_a_known_decay_rate(tmp_path):
+    import json
+
+    from unfoldlarpix.fwk.store import EventStore
+
+    v = 0.159645
+    inputs = []
+    for tau, lam in ((1.0, 1.0), (20.0, 0.05)):
+        for d in (4.5, 7.5, 10.5, 13.5, 16.5, 19.5, 22.5, 25.5, 28.5):
+            t = d / v * 1e-3
+            q = 4000.0 * np.exp(-lam * t)
+            aj = tmp_path / f"arms_{d}_{tau}.json"
+            sj = tmp_path / f"sample_{d}_{tau}.json"
+            # every estimate is a fixed FRACTION of the truth, so every fitted
+            # lambda must be the truth's lambda
+            aj.write_text(json.dumps(_arms_doc(
+                q, 1.02 * q, {"ls": 0.76 * q, "pos_a0": 0.93 * q,
+                              "pos_l1": 0.92 * q})))
+            sj.write_text(json.dumps(_sample_doc(q, 1.02 * q)))
+            inputs.append({"depth_cm": d, "tau_ms": tau,
+                           "arms_json": str(aj), "sample_json": str(sj)})
+    alg = Z.ZSLadderFit(inputs=inputs, d_min_cm=[4.5, 16.5],
+                        velocity_cm_per_us=v)
+    alg.initialize({})
+    store = EventStore()
+    alg.execute(store)
+    R = store.get("zs.ladder")
+    for key, lam in (("1ms", 1.0), ("20ms", 0.05)):
+        for name in ("sum_effq", "sum_y", "ls", "pos_a0", "pos_l1"):
+            f = R["fits"][key][name]
+            for dm in ("4.5", "16.5"):
+                assert f["by_d_min"][dm]["lambda_per_ms"] == pytest.approx(
+                    lam, abs=1e-9)
+                assert f["by_d_min"][dm]["rms_resid_lnE"] < 1e-9
+        # a pure fraction leaves the ratio flat with depth
+        assert R["ratios"][key]["pos_l1"] == pytest.approx([0.92] * 9)
+    d = R["lambda_difference_20ms_minus_1ms"]
+    assert d["expected_per_ms"] == -0.95
+    for name, per_dm in d["by_estimate"].items():
+        for dm, e in per_dm.items():
+            assert e["lambda_difference_per_ms"] == pytest.approx(-0.95,
+                                                                  abs=1e-9)
