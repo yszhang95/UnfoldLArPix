@@ -99,6 +99,25 @@ def zs_windows(store, conv: str, acq_start="convention"):
         split_threshold=None, acq_start=acq, burst_tau=None)
 
 
+def build_zs_operator(J, cell_ticks: int, windows):
+    """One ``c``-tick cell operator on the given windows, UNCACHED.
+
+    :meth:`_BasisJob.operator` caches by ``(c, convention)``, which is right
+    when the windows are a function of the convention alone; a study that
+    builds several row sets for one convention needs a fresh operator each
+    time.
+    """
+    c = int(cell_ticks)
+    if c == 1:
+        return ZSOperator(J.K1, (J.nx, J.ny, J.nt_fine), windows, 1,
+                          device=J.comp.device, dtype=J.comp.dtype)
+    if J.nt_fine % c:
+        raise ValueError(f"fine block {J.nt_fine} is not a multiple of the "
+                         f"cell width {c}")
+    return ZSOperatorUniform(J.K1, (J.nx, J.ny, J.nt_fine // c), windows, c, c,
+                             device=J.comp.device, dtype=J.comp.dtype)
+
+
 class _BasisJob:
     """Shared machinery: kernel, operators, truth, support, scoring."""
 
@@ -1515,3 +1534,520 @@ class ZSLadderFigures(_JsonAlg):
         out = {"figures": made}
         self.put(store, "zs.ladder_figs", out)
         self._emit(store, out)
+
+
+# ---------------------------------------------------------------------------
+# threshold pseudo-measurements and censor terms
+# ---------------------------------------------------------------------------
+VARIANT_LABEL = {
+    "A": "lumped rows only",
+    "B": "split trigger (pseudo + remainder rows)",
+    "C": "lumped rows + censor terms",
+    "D": "split trigger + censor terms",
+}
+VARIANT_COLOR = {"A": "#0072B2", "B": "#E69F00", "C": "#009E73",
+                 "D": "#CC79A7"}
+VARIANT_SHORT = {"A": "A\nlumped", "B": "B\nsplit trigger",
+                 "C": "C\nlumped\n+ censors",
+                 "D": "D\nsplit trigger\n+ censors"}
+
+
+def censor_violation(term, op, q) -> dict:
+    """``max over the armed bins of max(0, C - threshold)``, in ke.
+
+    ``C`` is the term's own statistic — the running cumulative referenced at
+    the CSA restart, weighted by the boundary-bin overlap — so this is the
+    quantity the term penalises, read off without the penalty's beta or norm.
+    Also returns how many pixels violate and the total violation.
+    """
+    from ..terms.base import IterCtx
+    qt = q if torch.is_tensor(q) else op.to_tensor(np.ascontiguousarray(q))
+    ctx = IterCtx(qt, op)
+    viol, _ = term._peaks(ctx)
+    v = viol.detach()
+    n_armed = int(term.armed.any(dim=2).sum())
+    return {"n_armed_pixels": n_armed,
+            "threshold_ke": float(term.threshold),
+            "max_violation_ke": float(v.max()) if v.numel() else 0.0,
+            "sum_violation_ke": float(v.sum()),
+            "n_violating_pixels": int((v > 0).sum())}
+
+
+@algorithm("ZSCensorArms")
+class ZSCensorArms(_JsonAlg):
+    """Threshold pseudo-measurements and censor terms against lumped rows.
+
+    Four operator/term variants on one basis and one event:
+
+    ``A``  lumped rows only — ``build_latch_rows(split_threshold=None)``;
+    ``B``  ``split_threshold = threshold``, ``burst_tau = resolve_burst_tau(rc,
+           None)``, so each trigger that the gate calls threshold-limited
+           contributes a ``pseudo`` row asserting the accumulator EQUALLED the
+           threshold at the trigger and a ``remainder`` row carrying the rest
+           of ``(trigger, trigger + B]``;
+    ``C``  the ``A`` rows plus the two censor terms;
+    ``D``  the ``B`` rows plus the same two censor terms.
+
+    The censors are configured as ``reco_algs.build_terms`` configures them,
+    with ``margin = 0`` (the sample is noiseless) and ``norm = "l2"`` on both
+    so that both enter FISTA's curvature bound:
+
+    * ``CensorRunningMax.from_hits`` — silence AFTER a pixel's last burst;
+    * ``pre_trigger_censors`` — silence BEFORE each trigger, with
+      ``acq_start`` equal to the variant's own first-window convention,
+      ``one_tick`` from the readout config and ``close_back`` as shipped.
+
+    ``bin_ticks = 1``: these operators sample on the fine tick, so a block bin
+    IS a fine tick and every censor boundary is in fine ticks.
+    """
+
+    reads = ("event", "readout_config", "block", "block_offset", "op",
+             "support", "hits_view")
+    writes = ("zs.censor",)
+
+    def execute(self, store):
+        from ..model.conventions import resolve_burst_tau
+        from ..solve.engine import Fista
+        from ..terms.base import CoordProx
+        from ..terms.censor import CensorRunningMax, pre_trigger_censors
+        from ..terms.data import DataFidelity
+        from .fixedgrid_algs import _SupportProx
+
+        J = _BasisJob(self, store)
+        rc = J.rc
+        hv = store.get("hits_view")
+        boff = store.get("block_offset")
+        c = int(self.props.get("cell_ticks", 5))
+        convs = list(self.props.get("conventions", ["acq_edge", "acq_t0"]))
+        sigmas = [float(s) for s in self.props.get("sigma_H_us", [1.5, 2.0])]
+        delta = int(self.props.get("registration_delta", -1))
+        iters = int(self.props.get("iters", 1000))
+        margin = float(self.props.get("censor_margin", 0.0))
+        beta = float(self.props.get("censor_beta", 1.0))
+        norm = str(self.props.get("censor_norm", "l2"))
+        npad = int(self.props.get("censor_npad_bins", 30))
+        close_back = float(self.props.get("censor_close_back", 20.0))
+        post_reset = bool(self.props.get("censor_include_post_reset", True))
+        variants = list(self.props.get("variants", ["A", "B", "C", "D"]))
+        arms_cfg = list(self.props.get("arms", []))
+        out_npz = self.props.get("out_npz")
+        wave_pixels = [list(map(int, p)) for p in
+                       self.props.get("waveform_pixels", [[141, 68],
+                                                          [142, 68]])]
+        burst_tau = resolve_burst_tau(rc, None)
+
+        H = EvalHarness(store, store.get("op"),
+                        margin_windows=int(self.props.get("margin_windows", 40)),
+                        line_pixel_y_range=self.props.get(
+                            "line_pixel_y_range", (5, 131)),
+                        segment_pixels=int(self.props.get("segment_pixels", 7)),
+                        segment_edge_exclude=int(
+                            self.props.get("segment_edge_exclude", 3)))
+        rec = {"truth_total_ke": J.truth_total, "cell_ticks": c,
+               "sigma_H_us": sigmas, "registration_delta": delta,
+               "iterations": iters,
+               "burst_tau_ticks": int(burst_tau),
+               "burst_tau_floor_definition":
+                   "adc_hold_delay + adc_down_time + one_tick",
+               "censor_settings": {
+                   "margin_ke": margin, "beta": beta, "norm": norm,
+                   "npad_bins_fine_ticks": npad, "bin_ticks": 1,
+                   "close_back_ticks": close_back,
+                   "include_post_reset": post_reset,
+                   "threshold_ke": float(rc.threshold),
+                   "csa_reset_time_ticks": int(rc.csa_reset_time),
+                   "one_tick": int(rc.one_tick)},
+               "variants": {}, "arms": []}
+        store_npz: dict = {}
+
+        for conv in convs:
+            for V in variants:
+                split = V in ("B", "D")
+                use_censor = V in ("C", "D")
+                windows, metas = zs_windows(store, conv) if not split else \
+                    build_latch_rows(
+                        J.ev.hits.location, J.ev.hits.data, J.B,
+                        np.asarray(boff), csa_reset_time=int(rc.csa_reset_time),
+                        split_threshold=float(rc.threshold),
+                        acq_start=CONVENTIONS[conv], burst_tau=burst_tau)
+                op = build_zs_operator(J, c, windows)
+                kinds = np.array([m.kind for m in metas])
+                y = op.d.cpu().numpy().astype(float)
+                supp = J.support_on_basis(op, c)
+                x_truth = J.truth_on_basis(op, c, delta)
+
+                terms_extra = []
+                censor_info = []
+                if use_censor:
+                    post = CensorRunningMax.from_hits(
+                        op, hv, boff, csa_reset_time=float(rc.csa_reset_time),
+                        threshold=float(rc.threshold), npad_bins=npad,
+                        beta=beta, margin=margin, norm=norm, bin_ticks=1)
+                    pre = pre_trigger_censors(
+                        op, hv, boff, csa_reset_time=float(rc.csa_reset_time),
+                        threshold=float(rc.threshold),
+                        acq_start=CONVENTIONS[conv], npad_bins=npad,
+                        beta=beta, margin=margin, norm=norm, bin_ticks=1,
+                        one_tick=float(rc.one_tick), close_back=close_back,
+                        include_post_reset=post_reset)
+                    terms_extra = [post] + list(pre)
+                    for i, t in enumerate(terms_extra):
+                        censor_info.append({
+                            "term": ("post_latch" if i == 0
+                                     else f"pre_trigger_ordinal{i - 1}"),
+                            "curvature": float(t.curvature()),
+                            "norm": t.norm, "beta": t.beta,
+                            "truth": censor_violation(t, op, x_truth)})
+                data_term = DataFidelity(op)
+                L_data = float(data_term.curvature())
+                L_total = L_data + sum(float(t.curvature())
+                                       for t in terms_extra)
+                vk = f"{conv}_{V}"
+                rec["variants"][vk] = {
+                    "convention": conv, "convention_label": CONV_LABEL[conv],
+                    "variant": V, "variant_label": VARIANT_LABEL[V],
+                    "split_trigger": split, "censor_terms": use_censor,
+                    "n_rows": int(op.n_data),
+                    "rows_by_kind": {k: int((kinds == k).sum())
+                                     for k in sorted(set(kinds))},
+                    "n_sequences": int(len(metas)
+                                       - (kinds == "remainder").sum()),
+                    "sum_y_ke": float(y.sum()),
+                    "sum_y_over_truth": float(y.sum() / J.truth_total),
+                    "lipschitz_data": L_data,
+                    "lipschitz_total": L_total,
+                    "censor": censor_info,
+                    "truth_rel_residual": J.rel_residual(op, x_truth),
+                }
+                if split:
+                    # how many sequences the burst gate refused to split
+                    n_seq = int((kinds != "remainder").sum()
+                                - (kinds == "diff").sum())
+                    rec["variants"][vk]["n_pseudo_rows"] = \
+                        int((kinds == "pseudo").sum())
+                    rec["variants"][vk]["n_lumped_rows"] = \
+                        int((kinds == "lumped").sum())
+                    rec["variants"][vk]["n_sequences_first_window"] = n_seq
+                    rec["variants"][vk]["n_sequences_gate_suppressed"] = \
+                        n_seq - int((kinds == "pseudo").sum())
+                print(f"[ZSCensorArms] {vk}: rows {op.n_data} "
+                      f"{rec['variants'][vk]['rows_by_kind']}, L "
+                      f"{L_data:.4g} -> {L_total:.4g}")
+                for ci in censor_info:
+                    print(f"[ZSCensorArms]   censor {ci['term']}: "
+                          f"{ci['truth']['n_armed_pixels']} armed pixels, "
+                          f"curvature {ci['curvature']:.4g}, TRUTH max "
+                          f"violation {ci['truth']['max_violation_ke']:.4f} ke "
+                          f"on {ci['truth']['n_violating_pixels']} pixels")
+
+                st = op.to_tensor(np.asarray(supp).astype(np.float64))
+                for cfg in arms_cfg:
+                    if "variants" in cfg and V not in list(cfg["variants"]):
+                        continue
+                    lab = str(cfg["label"])
+                    alpha = float(cfg.get("alpha", 0.0))
+                    pos = bool(cfg.get("positivity", True))
+                    prox = (CoordProx(alpha, st) if pos else _SupportProx(st))
+                    t0 = time.time()
+                    q = Fista(n_iter=iters).minimize(
+                        op, [data_term] + terms_extra, prox,
+                        op.to_tensor(np.zeros(op.q_shape)))
+                    dt = time.time() - t0
+                    x = q.detach().cpu().numpy().astype(np.float64)
+                    xf = J.to_fine(x, c)
+                    pred = op.forward(op.to_tensor(x)).cpu().numpy()
+                    res = pred.astype(float) - y
+                    entry = {
+                        "convention": conv, "convention_label": CONV_LABEL[conv],
+                        "variant": V, "variant_label": VARIANT_LABEL[V],
+                        "arm": lab, "alpha_ke_per_cell": alpha,
+                        "positivity": pos, "iters": iters,
+                        "wall_time_s": float(dt),
+                        "lipschitz_total": L_total,
+                        "sum_xhat_ke": float(x.sum()),
+                        "sum_xhat_over_truth": float(x.sum() / J.truth_total),
+                        "nnz": int((x > 0).sum()),
+                        "rel_residual": float(np.linalg.norm(res)
+                                              / np.linalg.norm(y)),
+                        "pixels": ring_sums(H, xf),
+                        "residual_by_row_kind": {
+                            k: {"n_rows": int((kinds == k).sum()),
+                                "sum_y_ke": float(y[kinds == k].sum()),
+                                "sum_residual_ke": float(res[kinds == k].sum()),
+                                "rms_residual_ke": float(np.sqrt(
+                                    (res[kinds == k] ** 2).mean())),
+                                "rel_residual": float(
+                                    np.linalg.norm(res[kinds == k])
+                                    / max(np.linalg.norm(y[kinds == k]),
+                                          1e-30))}
+                            for k in sorted(set(kinds))},
+                        "censor_violation": [
+                            {"term": ci["term"],
+                             "solution": censor_violation(t, op, x),
+                             "truth": ci["truth"]}
+                            for ci, t in zip(censor_info, terms_extra)],
+                    }
+                    for s in sigmas:
+                        m = score_rows(H, fine_xhat(H, xf, J.b0, s), s)
+                        entry[f"E_rel_{s}"] = float(m["E_rel"])
+                    rec["arms"].append(entry)
+                    print(f"[ZSCensorArms] {vk} {lab}: sum/truth "
+                          f"{entry['sum_xhat_over_truth']:.4f} +1 "
+                          f"{entry['pixels']['plus1']['sum_ke']:8.2f} "
+                          f"E_rel(1.5) {entry['E_rel_1.5']:.4f} res "
+                          f"{entry['rel_residual']:.4f} {dt:.1f} s")
+                    if out_npz:
+                        for pxy in wave_pixels:
+                            ip = pxy[0] - int(J.boff[0])
+                            iq = pxy[1] - int(J.boff[1])
+                            if 0 <= ip < J.nx and 0 <= iq < J.ny:
+                                store_npz[f"wave_{conv}_{V}_{lab}_"
+                                          f"{pxy[0]}_{pxy[1]}"] = \
+                                    xf[ip * J.ny + iq].astype(np.float32)
+                if use_censor:
+                    for t in terms_extra:
+                        del t
+                    torch.cuda.empty_cache()
+        if out_npz:
+            xt_fine = np.zeros((J.nx * J.ny, J.nt_fine))
+            ok = ((J.truth_ix >= 0) & (J.truth_ix < J.nx)
+                  & (J.truth_iy >= 0) & (J.truth_iy < J.ny))
+            jj = J.truth_tick[ok] + delta - J.b0
+            okj = (jj >= 0) & (jj < J.nt_fine)
+            np.add.at(xt_fine,
+                      ((J.truth_ix[ok][okj] * J.ny + J.truth_iy[ok][okj]),
+                       jj[okj]), J.truth_q[ok][okj])
+            for pxy in wave_pixels:
+                ip = pxy[0] - int(J.boff[0])
+                iq = pxy[1] - int(J.boff[1])
+                if 0 <= ip < J.nx and 0 <= iq < J.ny:
+                    store_npz[f"truth_{pxy[0]}_{pxy[1]}"] = \
+                        xt_fine[ip * J.ny + iq].astype(np.float32)
+                m = ((J.ev.hits.location[:, 0] == pxy[0])
+                     & (J.ev.hits.location[:, 1] == pxy[1]))
+                store_npz[f"rec_{pxy[0]}_{pxy[1]}_loc"] = \
+                    np.asarray(J.ev.hits.location)[m].astype(np.int64)
+                store_npz[f"rec_{pxy[0]}_{pxy[1]}_val"] = \
+                    np.asarray(J.ev.hits.data, dtype=float)[m][:, 3:]
+            store_npz["fine_origin_tick"] = np.array([J.b0])
+            store_npz["nt_fine"] = np.array([J.nt_fine])
+            Path(out_npz).parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(out_npz, **store_npz)
+            print(f"[ZSCensorArms] wrote {out_npz}")
+        self.put(store, "zs.censor", rec)
+        self._emit(store, rec)
+
+
+# ---------------------------------------------------------------------------
+@algorithm("ZSCensorFigures")
+class ZSCensorFigures(_JsonAlg):
+    """ZC1-ZC4 from the :class:`ZSCensorArms` record and its NPZ."""
+
+    reads = ("event", "readout_config", "block", "block_offset", "op")
+    writes = ("zs.censor_figs",)
+
+    def execute(self, store):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        J = _BasisJob(self, store)
+        R = json.load(open(self.props["censor_json"]))["result"]
+        wav = np.load(self.props["censor_npz"])
+        figdir = Path(str(self.props["fig_dir"]))
+        figdir.mkdir(parents=True, exist_ok=True)
+        truth_total = float(R["truth_total_ke"])
+        cs = R["censor_settings"]
+        convs = [c for c in ("acq_edge", "acq_t0")
+                 if any(a["convention"] == c for a in R["arms"])]
+        variants = [v for v in ("A", "B", "C", "D")
+                    if any(a["variant"] == v for a in R["arms"])]
+        arms = [a for a in ("ls", "pos_a0", "pos_l1")
+                if any(x["arm"] == a for x in R["arms"])]
+        by = {(a["convention"], a["variant"], a["arm"]): a for a in R["arms"]}
+        made = []
+
+        # ---- ZC1 ----------------------------------------------------------
+        fig, axes = plt.subplots(1, len(convs), figsize=(8.0, 3.0), sharey=True)
+        axes = np.atleast_1d(axes)
+        w = 0.8 / max(len(arms), 1)
+        for ax, conv in zip(axes, convs):
+            for i, arm in enumerate(arms):
+                xs, hs = [], []
+                for k, V in enumerate(variants):
+                    e = by.get((conv, V, arm))
+                    if e is None:
+                        continue
+                    xs.append(k - 0.4 + (i + 0.5) * w)
+                    hs.append(e["sum_xhat_over_truth"])
+                ax.bar(xs, hs, width=w * 0.92, color=OKABE[arm],
+                       label=ARM_LABEL[arm], edgecolor="none")
+            ax.axhline(1.0, color="k", lw=0.9)
+            ax.set_xticks(range(len(variants)))
+            ax.set_xticklabels([VARIANT_SHORT[V] for V in variants],
+                               fontsize=6.5)
+            ax.set_title(CONV_SHORT[conv], fontsize=8)
+            ax.set_xlabel("operator / term variant")
+            _ieee_axes(ax)
+        axes[0].set_ylim(0.60, 1.04)
+        axes[0].set_ylabel(r"$\Sigma\hat{x}\,/\,\Sigma q_{\rm truth}$")
+        axes[0].legend(fontsize=6, frameon=False, loc="lower left")
+        fig.tight_layout()
+        p = figdir / "ZC1_sum_ratio_by_variant.png"
+        fig.savefig(p, dpi=200)
+        plt.close(fig)
+        made.append(str(p))
+
+        # ---- the predicted accumulator, for the waveform panels -----------
+        op1 = build_zs_operator(J, 1, zs_windows(store, convs[0])[0])
+        xt = np.zeros(op1.q_shape)
+        jj = J.truth_tick + int(R["registration_delta"]) - J.b0
+        ok = ((jj >= 0) & (jj < op1.q_shape[2]) & (J.truth_ix >= 0)
+              & (J.truth_ix < J.nx) & (J.truth_iy >= 0) & (J.truth_iy < J.ny))
+        np.add.at(xt, (J.truth_ix[ok], J.truth_iy[ok], jj[ok]), J.truth_q[ok])
+        acc = np.cumsum(op1.conv(op1.to_tensor(xt)).cpu().numpy(), axis=2)
+        us = (J.b0 + np.arange(J.nt_fine)) * 0.05
+        del op1
+        torch.cuda.empty_cache()
+
+        conv0 = str(self.props.get("waveform_convention", convs[0]))
+        arm0 = str(self.props.get("waveform_arm", "pos_l1"))
+        pix_a = [int(v) for v in self.props.get("pixel_a", [141, 68])]
+        rl_a = wav.get(f"rec_{pix_a[0]}_{pix_a[1]}_loc")
+        tr_a = wav.get(f"truth_{pix_a[0]}_{pix_a[1]}")
+        t_arr = (float(rl_a[:, 3].max()) * 0.05 if rl_a is not None
+                 and len(rl_a) else us[-1])
+        nzt = np.nonzero(tr_a)[0]
+        q_lo = (J.b0 + nzt[0]) * 0.05 - 5.0
+        q_hi = (J.b0 + nzt[-1]) * 0.05 + 5.0
+        npad_us = float(cs["npad_bins_fine_ticks"]) * 0.05
+        cb_us = (float(cs["close_back_ticks"]) + float(cs["one_tick"])) * 0.05
+
+        for tag, pxy in (("ZC2", pix_a),
+                         ("ZC3", self.props.get("pixel_b", [142, 68]))):
+            pxy = [int(v) for v in pxy]
+            ip, iq = pxy[0] - int(J.boff[0]), pxy[1] - int(J.boff[1])
+            if not (0 <= ip < J.nx and 0 <= iq < J.ny):
+                continue
+            rl = wav.get(f"rec_{pxy[0]}_{pxy[1]}_loc")
+            rv = wav.get(f"rec_{pxy[0]}_{pxy[1]}_val")
+            tr = wav.get(f"truth_{pxy[0]}_{pxy[1]}")
+            has_rec = rl is not None and len(rl) > 0
+            fig, ax = plt.subplots(2, 1, figsize=(6.6, 5.6))
+            ax[0].plot(us, acc[ip, iq], color="k", lw=1.0,
+                       label=r"predicted accumulator from the truth")
+            thr = float(cs["threshold_ke"])
+            ax[0].axhline(thr, color="0.4", lw=0.8, ls="-.",
+                          label=f"threshold {thr:.0f} ke")
+            # censor armed windows, from the same boundaries the terms use
+            lo_pre = (us[0] + npad_us if has_rec else us[0] + npad_us)
+            if has_rec:
+                hi_pre = rl[0, 2] * 0.05 - cb_us
+                if hi_pre > lo_pre:
+                    ax[0].axvspan(lo_pre, hi_pre, color=OKABE["pos_a0"],
+                                  alpha=0.16, lw=0,
+                                  label="censor armed (pre-trigger)")
+                lo_post = rl[:, 4].max() * 0.05
+            else:
+                lo_post = us[0] + npad_us
+            hi_post = us[-1] - npad_us
+            if hi_post > lo_post:
+                ax[0].axvspan(lo_post, hi_post, color=OKABE["coarse"],
+                              alpha=0.16, lw=0,
+                              label="censor armed (post-latch)")
+            if has_rec:
+                ax[0].plot(rl[:, 3] * 0.05, rv.ravel(), "o", ms=5,
+                           color=OKABE["coarse"], label="records at their hold")
+                for k in range(len(rl)):
+                    ax[0].axvline(rl[k, 2] * 0.05, color=OKABE["ls"], lw=0.8,
+                                  ls=":")
+                # the pseudo row asserts the accumulator EQUALLED the threshold
+                # at the FIRST trigger of the pixel (later ones are gated)
+                ax[0].plot([rl[0, 2] * 0.05], [thr], "*", ms=11,
+                           color=OKABE["ls"], mec="k", mew=0.4,
+                           label="pseudo-row constraint at the trigger")
+            ax[0].set_xlim(-0.5, t_arr + 10.0)
+            ax[0].set_ylabel("accumulator [ke]")
+            ax[0].set_xlabel(r"anode time relative to $t_0$ [$\mu$s]")
+            ax[0].set_title(f"pixel ({pxy[0]}, {pxy[1]})", fontsize=9)
+            ax[0].legend(fontsize=5.5, frameon=False, loc="upper left")
+            if tr is not None:
+                ax[1].step(_us_of(J, tr), tr, where="post", color="k", lw=1.1,
+                           label="truth")
+            for V in variants:
+                key = f"wave_{conv0}_{V}_{arm0}_{pxy[0]}_{pxy[1]}"
+                if key not in wav:
+                    continue
+                v = wav[key]
+                ax[1].step(_us_of(J, v), v, where="post", lw=1.0,
+                           color=VARIANT_COLOR[V],
+                           label=f"{V}: {VARIANT_LABEL[V]}")
+            ax[1].set_xlim(q_lo, q_hi)
+            ax[1].set_ylabel("charge per fine tick [ke]")
+            ax[1].set_xlabel(r"release time at the response plane, "
+                             r"relative to $t_0$ [$\mu$s]")
+            ax[1].set_title(f"{ARM_LABEL[arm0]}, {CONV_SHORT[conv0]}",
+                            fontsize=8)
+            ax[1].legend(fontsize=6, frameon=False)
+            for a in ax:
+                _ieee_axes(a)
+            fig.tight_layout()
+            p = figdir / f"{tag}_waveform_{pxy[0]}_{pxy[1]}.png"
+            fig.savefig(p, dpi=200)
+            plt.close(fig)
+            made.append(str(p))
+
+        # ---- ZC4 ----------------------------------------------------------
+        fig, ax = plt.subplots(1, 3, figsize=(10.5, 3.0))
+        for j, key in enumerate(("E_rel_1.5", "E_rel_2.0")):
+            for arm in arms:
+                for conv in convs:
+                    xs, ys = [], []
+                    for k, V in enumerate(variants):
+                        e = by.get((conv, V, arm))
+                        if e is None or key not in e:
+                            continue
+                        xs.append(k)
+                        ys.append(e[key])
+                    ax[j].plot(xs, ys, CONV_STYLE[conv], marker="o", ms=4.5,
+                               lw=1.0, color=OKABE[arm],
+                               mfc=(OKABE[arm] if conv == "acq_edge" else "w"),
+                               label=(f"{ARM_LABEL[arm]}, {CONV_SHORT[conv]}"
+                                      if j == 0 else None))
+            ax[j].set_ylabel(r"$E_{\rm rel}$, $\sigma_H$ = %s $\mu$s"
+                             % key.split("_")[-1])
+        for arm in arms:
+            for conv in convs:
+                xs, ys = [], []
+                for k, V in enumerate(variants):
+                    e = by.get((conv, V, arm))
+                    if e is None:
+                        continue
+                    xs.append(k)
+                    ys.append(e["pixels"]["plus1"]["sum_ke"])
+                ax[2].plot(xs, ys, CONV_STYLE[conv], marker="s", ms=4.5,
+                           lw=1.0, color=OKABE[arm],
+                           mfc=(OKABE[arm] if conv == "acq_edge" else "w"))
+        ax[2].axhline(0.0, color="k", lw=0.8)
+        ax[2].set_ylabel("signed charge on the +1 pixels [ke]")
+        for a in ax:
+            a.set_xticks(range(len(variants)))
+            a.set_xticklabels(variants)
+            a.set_xlabel("operator / term variant")
+            _ieee_axes(a)
+        ax[0].legend(fontsize=5.0, frameon=False)
+        fig.tight_layout()
+        p = figdir / "ZC4_Erel_and_plus1.png"
+        fig.savefig(p, dpi=200)
+        plt.close(fig)
+        made.append(str(p))
+
+        print(f"[ZSCensorFigures] wrote {len(made)} figures under {figdir}")
+        out = {"figures": made, "truth_total_ke": truth_total}
+        self.put(store, "zs.censor_figs", out)
+        self._emit(store, out)
+
+
+def _us_of(J, a) -> np.ndarray:
+    """Absolute time axis in microseconds for an array on the fine grid."""
+    return (J.b0 + np.arange(len(a))) * 0.05

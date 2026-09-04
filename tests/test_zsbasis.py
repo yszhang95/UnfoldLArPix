@@ -301,3 +301,59 @@ def test_ladder_fit_recovers_a_known_decay_rate(tmp_path):
         for dm, e in per_dm.items():
             assert e["lambda_difference_per_ms"] == pytest.approx(-0.95,
                                                                   abs=1e-9)
+
+
+def test_censor_violation_reads_the_terms_own_statistic():
+    """``censor_violation`` must report max(0, C - threshold) over the armed
+    bins, in ke, without the penalty's beta or norm."""
+    from unfoldlarpix.terms.censor import CensorRunningMax
+
+    K = _impulse_kernel(4)
+    windows = [LatchWindow(1, 1, 0.0, 4.0, 0.0)]
+    op = ZSOperator(K, (3, 3, 12), windows, 1, device="cpu",
+                    dtype=torch.float64)
+    nx, ny, nt = op.block_shape
+    reset = np.zeros((nx, ny))
+    arm = np.zeros((nx, ny))
+    term = CensorRunningMax(op, reset, arm, censor_end=nt, threshold=2.0,
+                            beta=3.0, norm="l2")
+    x = np.zeros(op.q_shape)
+    x[1, 1, :3] = 1.0                    # cumulative reaches 3 on pixel (1,1)
+    out = Z.censor_violation(term, op, x)
+    assert out["threshold_ke"] == pytest.approx(2.0)
+    assert out["max_violation_ke"] == pytest.approx(1.0)
+    assert out["n_violating_pixels"] == 1
+    assert out["sum_violation_ke"] == pytest.approx(1.0)
+    assert out["n_armed_pixels"] == nx * ny
+    # below the threshold: no violation, and beta plays no part
+    x2 = np.zeros(op.q_shape)
+    x2[1, 1, 0] = 1.5
+    assert Z.censor_violation(term, op, x2)["max_violation_ke"] == 0.0
+
+
+def test_build_zs_operator_is_uncached_and_matches_the_cached_one():
+    """A study that builds several row sets for one convention needs a fresh
+    operator; ``_BasisJob.operator`` caches by (c, convention)."""
+
+    class _J:
+        pass
+
+    J = _J()
+    J.K1 = _impulse_kernel(6)
+    J.nx, J.ny, J.nt_fine = 3, 3, 24
+
+    class _C:
+        device = "cpu"
+        dtype = torch.float64
+
+    J.comp = _C()
+    w1 = [LatchWindow(1, 1, 0.0, 6.0, 1.0)]
+    w2 = [LatchWindow(1, 1, 0.0, 6.0, 1.0), LatchWindow(1, 1, 7.0, 12.0, 2.0)]
+    a = Z.build_zs_operator(J, 3, w1)
+    b = Z.build_zs_operator(J, 3, w2)
+    assert a.n_data == 1 and b.n_data == 2          # not the same object
+    assert a.q_shape == b.q_shape
+    fine = Z.build_zs_operator(J, 1, w1)
+    assert fine.q_shape[2] == J.nt_fine - 6 + 1
+    with pytest.raises(ValueError):
+        Z.build_zs_operator(J, 5, w1)               # 24 is not a multiple of 5
