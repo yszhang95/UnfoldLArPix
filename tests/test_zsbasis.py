@@ -385,3 +385,158 @@ def test_waveform_stats_ignores_trailing_length_mismatch():
     out = Z.waveform_stats(est, truth)
     assert out["centroid_shift_ticks"] == pytest.approx(0.0)
     assert out["sum_ke"] == pytest.approx(1.0)
+
+
+def _censor_arms_doc(total, sum_y, variant, arms):
+    """A ZSCensorArms-shaped record: the row-set block is keyed by
+    (convention, variant), not by (convention, cell width)."""
+    return {"result": {
+        "truth_total_ke": total,
+        "variants": {f"acq_edge_{variant}": {"sum_y_ke": sum_y}},
+        "arms": [{"convention": "acq_edge", "cell_ticks": 5,
+                  "variant": variant, "arm": k, "sum_xhat_ke": v,
+                  "wall_time_s": 1.0} for k, v in arms.items()]}}
+
+
+def test_ladder_fit_reads_a_censor_arms_record_by_variant(tmp_path):
+    import json
+
+    from unfoldlarpix.fwk.store import EventStore
+
+    v = 0.159645
+    inputs = []
+    for tau, lam in ((1.0, 1.0), (20.0, 0.05)):
+        for d in (4.5, 7.5, 10.5, 13.5, 16.5, 19.5, 22.5, 25.5, 28.5):
+            q = 4000.0 * np.exp(-lam * d / v * 1e-3)
+            aj = tmp_path / f"c_{d}_{tau}.json"
+            sj = tmp_path / f"s_{d}_{tau}.json"
+            # variant A carries a DIFFERENT fraction, so reading the wrong
+            # block would show up in sum_y and in the arm total
+            doc = _censor_arms_doc(q, 1.05 * q, "D", {"pos_l1": 0.95 * q})
+            doc["result"]["variants"]["acq_edge_A"] = {"sum_y_ke": 2.0 * q}
+            doc["result"]["arms"].append(
+                {"convention": "acq_edge", "cell_ticks": 5, "variant": "A",
+                 "arm": "pos_l1", "sum_xhat_ke": 2.0 * q, "wall_time_s": 1.0})
+            aj.write_text(json.dumps(doc))
+            sj.write_text(json.dumps(_sample_doc(q, 1.05 * q)))
+            inputs.append({"depth_cm": d, "tau_ms": tau,
+                           "arms_json": str(aj), "sample_json": str(sj)})
+    alg = Z.ZSLadderFit(inputs=inputs, d_min_cm=[4.5, 16.5],
+                        velocity_cm_per_us=v, variant="D", arms=["pos_l1"])
+    alg.initialize({})
+    store = EventStore()
+    alg.execute(store)
+    R = store.get("zs.ladder")
+    assert R["variant"] == "D"
+    assert R["ratios"]["1ms"]["pos_l1"] == pytest.approx([0.95] * 9)
+    assert R["ratios"]["1ms"]["sum_y"] == pytest.approx([1.05] * 9)
+    for key, lam in (("1ms", 1.0), ("20ms", 0.05)):
+        for name in ("sum_effq", "sum_y", "pos_l1"):
+            for dm in ("4.5", "16.5"):
+                assert R["fits"][key][name]["by_d_min"][dm][
+                    "lambda_per_ms"] == pytest.approx(lam, abs=1e-9)
+    # and the ZSBasisArms schema still works: no variant, "data" block
+    alg2 = Z.ZSLadderFit(inputs=[{**i, "arms_json": i["arms_json"]}
+                                 for i in inputs[:0]], d_min_cm=[4.5])
+    alg2.initialize({})
+    alg2.execute(EventStore())
+
+
+def test_sigma_L_at_16p5_cm():
+    """sqrt(2 D_L t_drift) at 16.5 cm is 4.64 fine ticks, so sigma_p = 2.32."""
+    assert Z.sigma_L_ticks(16.5) == pytest.approx(4.637, abs=0.005)
+    assert 0.5 * Z.sigma_L_ticks(16.5) == pytest.approx(2.318, abs=0.005)
+    # monotone in depth, and zero depth gives zero width
+    assert Z.sigma_L_ticks(4.5) < Z.sigma_L_ticks(28.5)
+    assert Z.sigma_L_ticks(0.0) == 0.0
+
+
+def _gauss_op(c=5, nt_fine=200, sigma=2.3):
+    K = _impulse_kernel(10)
+    windows = [LatchWindow(1, 1, 3.0, 40.0, 0.0),
+               LatchWindow(1, 1, 60.0, 95.0, 0.0)]
+    return Z.ZSOperatorGaussianCells(
+        K, (3, 3, nt_fine // c), windows, c, c, device="cpu",
+        dtype=torch.float64, sigma_p_ticks=sigma)
+
+
+def test_gaussian_cells_column_sums_match_the_box_model():
+    """``1^T E = 1^T`` for both releases, so a unit of cell charge is credited
+    the same total on either model."""
+    c, nt = 5, 200
+    gop = _gauss_op(c, nt)
+    box = ZSOperatorUniform(_impulse_kernel(10), (3, 3, nt // c),
+                            [LatchWindow(1, 1, 3.0, 40.0, 0.0),
+                             LatchWindow(1, 1, 60.0, 95.0, 0.0)],
+                            c, c, device="cpu", dtype=torch.float64)
+    q = np.zeros(gop.q_shape)
+    q[1, 1, :] = 1.0
+    eg = gop.expand(gop.to_tensor(q)).numpy()
+    eb = box.expand(box.to_tensor(q)).numpy()
+    # every cell keeps its mass
+    assert eg[1, 1].sum() == pytest.approx(eb[1, 1].sum(), rel=1e-12)
+    one = np.zeros(gop.q_shape)
+    one[1, 1, 7] = 1.0
+    assert gop.expand(gop.to_tensor(one)).numpy().sum() == pytest.approx(
+        1.0, rel=1e-12)
+    # and the release is centred on the cell centre, not on its lower edge
+    prof = gop.expand(gop.to_tensor(one)).numpy()[1, 1]
+    j = np.arange(len(prof))
+    assert (j * prof).sum() == pytest.approx(7 * c + (c - 1) // 2, abs=1e-9)
+
+
+def test_gaussian_cells_expand_reduce_are_adjoint():
+    gop = _gauss_op()
+    rng = np.random.default_rng(5)
+    q = gop.to_tensor(rng.random(gop.q_shape))
+    g = gop.to_tensor(rng.random((3, 3, gop.n_fine_used)))
+    lhs = float((gop.expand(q) * g).sum())
+    rhs = float((q * gop.reduce(g)).sum())
+    assert lhs == pytest.approx(rhs, rel=1e-12)
+
+
+def test_gaussian_cells_operator_adjoint_and_reports():
+    gop = _gauss_op()
+    rng = np.random.default_rng(6)
+    x = gop.to_tensor(rng.random(gop.q_shape))
+    r = gop.to_tensor(rng.random(gop.n_data))
+    assert float((gop.forward(x) * r).sum()) == pytest.approx(
+        float((x * gop.adjoint(r)).sum()), rel=1e-10)
+    rep = gop.report()
+    assert rep["cell_model"] == "gaussian"
+    assert rep["sigma_p_ticks"] == pytest.approx(2.3)
+    assert rep["n_taps"] == 2 * int(np.ceil(5 * 2.3)) + 1
+    assert rep["tap_weight_sum"] == pytest.approx(1.0)
+    assert rep["min_cell_mass_inside"] <= 1.0
+
+
+def test_gaussian_cells_reject_an_even_cell_width():
+    with pytest.raises(ValueError):
+        Z.ZSOperatorGaussianCells(
+            _impulse_kernel(10), (3, 3, 25), [LatchWindow(1, 1, 3.0, 9.0, 0.0)],
+            4, 4, device="cpu", dtype=torch.float64, sigma_p_ticks=1.0)
+
+
+def test_build_zs_operator_selects_the_cell_model():
+    class _J:
+        pass
+
+    J = _J()
+    J.K1 = _impulse_kernel(6)
+    J.nx, J.ny, J.nt_fine = 3, 3, 100
+
+    class _C:
+        device = "cpu"
+        dtype = torch.float64
+
+    J.comp = _C()
+    w = [LatchWindow(1, 1, 0.0, 20.0, 1.0)]
+    assert type(Z.build_zs_operator(J, 5, w)) is ZSOperatorUniform
+    g = Z.build_zs_operator(J, 5, w, cell_model="gaussian", sigma_p_ticks=2.3)
+    assert isinstance(g, Z.ZSOperatorGaussianCells)
+    with pytest.raises(ValueError):
+        Z.build_zs_operator(J, 5, w, cell_model="gaussian")
+    with pytest.raises(ValueError):
+        Z.build_zs_operator(J, 5, w, cell_model="triangle", sigma_p_ticks=1.0)
+    with pytest.raises(ValueError):
+        Z.build_zs_operator(J, 1, w, cell_model="gaussian", sigma_p_ticks=1.0)

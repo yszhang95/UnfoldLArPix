@@ -99,23 +99,43 @@ def zs_windows(store, conv: str, acq_start="convention"):
         split_threshold=None, acq_start=acq, burst_tau=None)
 
 
-def build_zs_operator(J, cell_ticks: int, windows):
+def build_zs_operator(J, cell_ticks: int, windows, cell_model: str = "uniform",
+                      sigma_p_ticks: float | None = None):
     """One ``c``-tick cell operator on the given windows, UNCACHED.
 
     :meth:`_BasisJob.operator` caches by ``(c, convention)``, which is right
     when the windows are a function of the convention alone; a study that
     builds several row sets for one convention needs a fresh operator each
     time.
+
+    ``cell_model`` is the WITHIN-CELL release: ``uniform`` is the box ``U_c``
+    (``P_0``), ``gaussian`` places the cell's charge at its centre tick and
+    spreads it with a Gaussian of ``sigma_p_ticks`` fine ticks
+    (:class:`ZSOperatorGaussianCells`).
     """
     c = int(cell_ticks)
     if c == 1:
+        if cell_model != "uniform":
+            raise ValueError("the fine basis has no within-cell model to "
+                             f"choose; got cell_model={cell_model!r}")
         return ZSOperator(J.K1, (J.nx, J.ny, J.nt_fine), windows, 1,
                           device=J.comp.device, dtype=J.comp.dtype)
     if J.nt_fine % c:
         raise ValueError(f"fine block {J.nt_fine} is not a multiple of the "
                          f"cell width {c}")
-    return ZSOperatorUniform(J.K1, (J.nx, J.ny, J.nt_fine // c), windows, c, c,
-                             device=J.comp.device, dtype=J.comp.dtype)
+    if cell_model == "uniform":
+        return ZSOperatorUniform(J.K1, (J.nx, J.ny, J.nt_fine // c), windows,
+                                 c, c, device=J.comp.device,
+                                 dtype=J.comp.dtype)
+    if cell_model == "gaussian":
+        if sigma_p_ticks is None:
+            raise ValueError("cell_model 'gaussian' needs sigma_p_ticks")
+        return ZSOperatorGaussianCells(
+            J.K1, (J.nx, J.ny, J.nt_fine // c), windows, c, c,
+            device=J.comp.device, dtype=J.comp.dtype,
+            sigma_p_ticks=float(sigma_p_ticks))
+    raise ValueError(f"unknown cell_model {cell_model!r} "
+                     "(want 'uniform' or 'gaussian')")
 
 
 class _BasisJob:
@@ -1232,6 +1252,9 @@ class ZSLadderFit(_JsonAlg):
         ``[ls, pos_a0, pos_l1]``).
     convention, cell_ticks : which arms record entry to read (default
         ``acq_edge``, 5).
+    variant : str, optional
+        The operator/term variant to read from a :class:`ZSCensorArms` record
+        (``A``..``D``).  Omit for a :class:`ZSBasisArms` record.
     d_min_cm : list, default ``[4.5, 7.5, 10.5, 13.5, 16.5]``.
     velocity_cm_per_us : float, default 0.159645.
     """
@@ -1246,6 +1269,7 @@ class ZSLadderFit(_JsonAlg):
         conv = str(self.props.get("convention", "acq_edge"))
         c = int(self.props.get("cell_ticks", 5))
         arm_labels = list(self.props.get("arms", ["ls", "pos_a0", "pos_l1"]))
+        variant = self.props.get("variant")     # None -> a ZSBasisArms record
         d_mins = [float(x) for x in self.props.get(
             "d_min_cm", [4.5, 7.5, 10.5, 13.5, 16.5])]
 
@@ -1254,12 +1278,25 @@ class ZSLadderFit(_JsonAlg):
         for item in self.props.get("inputs", []):
             d, tau = float(item["depth_cm"]), float(item["tau_ms"])
             A = json.load(open(item["arms_json"]))["result"]
+            # two record schemas: ZSBasisArms keys its row-set block by
+            # (convention, cell width); ZSCensorArms keys it by (convention,
+            # operator/term variant).  ``variant`` selects the second.
+            if variant is not None:
+                blk = A["variants"][f"{conv}_{variant}"]
+            else:
+                blk = A["data"][f"{conv}_c{c}"]
             vals = {"sum_effq": float(A["truth_total_ke"]),
-                    "sum_y": float(A["data"][f"{conv}_c{c}"]["sum_y_ke"])}
+                    "sum_y": float(blk["sum_y_ke"])}
             wall = {}
             for a in A["arms"]:
-                if a["convention"] == conv and int(a["cell_ticks"]) == c \
-                        and a["arm"] in arm_labels:
+                # a ZSCensorArms entry names its variant but not its cell
+                # width (one job is one basis), so the width check is applied
+                # only where the record carries it.
+                if a["convention"] != conv or int(a.get("cell_ticks", c)) != c:
+                    continue
+                if variant is not None and a.get("variant") != variant:
+                    continue
+                if a["arm"] in arm_labels:
                     vals[a["arm"]] = float(a["sum_xhat_ke"])
                     wall[a["arm"]] = float(a["wall_time_s"])
             per.setdefault(tau, {})[d] = vals
@@ -1352,6 +1389,9 @@ class ZSLadderFit(_JsonAlg):
 
         rec = {"velocity_cm_per_us": v, "convention": CONV_LABEL[conv],
                "cell_ticks": c, "d_min_cm": d_mins,
+               "variant": variant,
+               "variant_label": (VARIANT_LABEL[variant] if variant else
+                                 "lumped rows only (ZSBasisArms record)"),
                "lambda_error_definition":
                    "sqrt( (sum r^2/(n-2)) / sum (t - tbar)^2 ), unweighted "
                    "straight line ln E = a - lambda t_drift "
@@ -1712,6 +1752,18 @@ class ZSCensorArms(_JsonAlg):
         close_back = float(self.props.get("censor_close_back", 20.0))
         post_reset = bool(self.props.get("censor_include_post_reset", True))
         variants = list(self.props.get("variants", ["A", "B", "C", "D"]))
+        # the WITHIN-CELL release, and the prolongation the evaluation uses:
+        # both are the operator's own, so they cannot disagree.
+        cell_model = str(self.props.get("cell_model", "uniform"))
+        vel = float(self.props.get("velocity_cm_per_us", 0.159645))
+        sig_p = self.props.get("sigma_p_ticks")
+        depth_cm = self.props.get("depth_cm")
+        if cell_model == "gaussian" and sig_p is None:
+            if depth_cm is None:
+                raise ValueError("cell_model 'gaussian' needs sigma_p_ticks "
+                                 "or depth_cm")
+            sig_p = 0.5 * sigma_L_ticks(float(depth_cm), vel)
+        sig_p = None if sig_p is None else float(sig_p)
         arms_cfg = list(self.props.get("arms", []))
         out_npz = self.props.get("out_npz")
         wave_pixels = [list(map(int, p)) for p in
@@ -1732,6 +1784,16 @@ class ZSCensorArms(_JsonAlg):
                "burst_tau_ticks": int(burst_tau),
                "burst_tau_floor_definition":
                    "adc_hold_delay + adc_down_time + one_tick",
+               "cell_model": cell_model,
+               "sigma_p_ticks": sig_p,
+               "sigma_L_ticks": (None if depth_cm is None else
+                                 sigma_L_ticks(float(depth_cm), vel)),
+               "depth_cm": (None if depth_cm is None else float(depth_cm)),
+               "velocity_cm_per_us": vel,
+               "sigma_p_definition":
+                   "sigma_p = sigma_L / 2, sigma_L = sqrt(2 D_L t_drift) with "
+                   "D_L = 6.6270 cm^2/s and t_drift = depth / velocity, in "
+                   "fine ticks of 0.05 us",
                "censor_settings": {
                    "margin_ke": margin, "beta": beta, "norm": norm,
                    "npad_bins_fine_ticks": npad, "bin_ticks": 1,
@@ -1769,7 +1831,8 @@ class ZSCensorArms(_JsonAlg):
                         np.asarray(boff), csa_reset_time=int(rc.csa_reset_time),
                         split_threshold=float(rc.threshold),
                         acq_start=CONVENTIONS[conv], burst_tau=burst_tau)
-                op = build_zs_operator(J, c, windows)
+                op = build_zs_operator(J, c, windows, cell_model=cell_model,
+                                       sigma_p_ticks=sig_p)
                 kinds = np.array([m.kind for m in metas])
                 y = op.d.cpu().numpy().astype(float)
                 supp = J.support_on_basis(op, c)
@@ -1818,6 +1881,8 @@ class ZSCensorArms(_JsonAlg):
                     "censor": censor_info,
                     "truth_rel_residual": J.rel_residual(op, x_truth),
                 }
+                if hasattr(op, "report"):
+                    rec["variants"][vk]["cell_model_report"] = op.report()
                 if split:
                     # how many sequences the burst gate refused to split
                     n_seq = int((kinds != "remainder").sum()
@@ -1857,13 +1922,23 @@ class ZSCensorArms(_JsonAlg):
                         op.to_tensor(np.zeros(op.q_shape)))
                     dt = time.time() - t0
                     x = q.detach().cpu().numpy().astype(np.float64)
-                    xf = J.to_fine(x, c)
+                    if cell_model == "uniform":
+                        xf = J.to_fine(x, c)
+                    else:
+                        # P = the operator's own prolongation, evaluated on the
+                        # fine grid, padded to the block length so that
+                        # fine_xhat's absolute origin still applies
+                        e = op.expand(q.detach()).cpu().numpy().astype(
+                            np.float64).reshape(-1, op.n_fine_used)
+                        xf = np.zeros((e.shape[0], J.nt_fine))
+                        xf[:, :e.shape[1]] = e
                     pred = op.forward(op.to_tensor(x)).cpu().numpy()
                     res = pred.astype(float) - y
                     entry = {
                         "convention": conv, "convention_label": CONV_LABEL[conv],
                         "variant": V, "variant_label": VARIANT_LABEL[V],
                         "arm": lab, "alpha_ke_per_cell": alpha,
+                        "cell_ticks": c, "cell_model": cell_model,
                         "positivity": pos, "iters": n_it,
                         "wall_time_s": float(dt),
                         "lipschitz_total": L_total,
@@ -2238,11 +2313,23 @@ class ZSNburstFigures(_JsonAlg):
                 int(o[0]) if o is not None else None)
             table["by_nburst"][str(nb)] = ent
 
-        arm_keys = [k for k in ("A_pos_a0", "A_pos_l1", "A_pos_l1_3000",
-                                "D_pos_a0", "D_pos_l1", "D_pos_l1_3000")
-                    if any(k in table["by_nburst"][str(nb)]["arms"]
-                           for nb in nbs)]
-        style = {"A": "-", "D": "--"}
+        # The DEFAULT configuration is variant D (split trigger + both censor
+        # terms); variant A (lumped rows only) is a reference and is drawn as a
+        # thin faint dashed line.  Within a variant the 3000-iteration solve is
+        # preferred wherever it is archived, because the censor terms raise the
+        # curvature bound about ninefold and 1000 iterations do not converge
+        # variant D.
+        def _key(nb, V, base):
+            arms = table["by_nburst"][str(nb)]["arms"]
+            for cand in (f"{V}_{base}_3000", f"{V}_{base}"):
+                if cand in arms:
+                    return cand
+            return None
+
+        bases = [b for b in ("pos_a0", "pos_l1")
+                 if any(_key(nb, V, b) for nb in nbs for V in ("A", "D"))]
+        VSTYLE = {"D": dict(ls="-", lw=1.3, alpha=1.0, ms=5.0, zorder=3),
+                  "A": dict(ls="--", lw=0.7, alpha=0.45, ms=3.4, zorder=2)}
         made = []
 
         # ---- ZN1 ----------------------------------------------------------
@@ -2250,17 +2337,21 @@ class ZSNburstFigures(_JsonAlg):
         ax.plot(nbs, [table["by_nburst"][str(nb)]["recorded_over_created"]
                       for nb in nbs], "s-", color="#666666", ms=5, lw=1.1,
                 label=r"records, $\Sigma y$")
-        for k in arm_keys:
-            V, arm = k.split("_", 1)
-            base = arm.replace("_3000", "")
-            xs = [nb for nb in nbs if k in table["by_nburst"][str(nb)]["arms"]]
-            ys = [table["by_nburst"][str(nb)]["arms"][k]["sum_xhat_over_truth"]
-                  for nb in xs]
-            ax.plot(xs, ys, style[V], marker=("o" if "3000" not in arm else "D"),
-                    ms=4.2, lw=1.0, color=OKABE[base],
-                    mfc=(OKABE[base] if "3000" not in arm else "w"),
-                    label=f"{V}, {ARM_LABEL[base]}"
-                          + (", 3000 it." if "3000" in arm else ""))
+        for V in ("A", "D"):
+            for base in bases:
+                xs = [nb for nb in nbs if _key(nb, V, base)]
+                if not xs:
+                    continue
+                ks = [_key(nb, V, base) for nb in xs]
+                ys = [table["by_nburst"][str(nb)]["arms"][k][
+                    "sum_xhat_over_truth"] for nb, k in zip(xs, ks)]
+                it = table["by_nburst"][str(xs[0])]["arms"][ks[0]]["iters"]
+                ax.plot(xs, ys, marker="o", color=OKABE[base],
+                        mfc=OKABE[base] if V == "D" else "w",
+                        label=(f"{V}"
+                               + (" (default)" if V == "D" else " (reference)")
+                               + f", {ARM_LABEL[base]}, {it} it."),
+                        **VSTYLE[V])
         ax.axhline(1.0, color="k", lw=0.9)
         ax.set_xticks(nbs)
         ax.set_xlabel("nburst")
@@ -2338,19 +2429,33 @@ class ZSNburstFigures(_JsonAlg):
             q_hi = (_origin(nbs[0]) + nz[-1]) * 0.05 + 5.0
         else:
             q_lo, q_hi = us[0], us[-1]
-        for nb in nbs:
-            key = f"wave_{conv}_A_pos_l1_{pk}"
-            v = rows[nb]["npz"].get(key)
-            if v is None:
-                continue
-            ax[1].step(_abs_us(nb, v), v, where="post", lw=1.0,
-                       color=NBURST_COLOR[nb], label=f"nburst = {nb}")
+        wave_it = {}
+        for V in ("A", "D"):
+            for nb in nbs:
+                k = _key(nb, V, "pos_l1")
+                if k is None:
+                    continue
+                arm = k[len(V) + 1:]
+                v = rows[nb]["npz"].get(f"wave_{conv}_{V}_{arm}_{pk}")
+                if v is None:
+                    continue
+                it = table["by_nburst"][str(nb)]["arms"][k]["iters"]
+                wave_it[(V, nb)] = it
+                ax[1].step(_abs_us(nb, v), v, where="post",
+                           color=NBURST_COLOR[nb],
+                           label=(f"nburst = {nb}, {V}"
+                                  + (" (default)" if V == "D"
+                                     else " (reference)")
+                                  + f", {it} it."),
+                           **{kk: vv for kk, vv in VSTYLE[V].items()
+                              if kk in ("ls", "lw", "alpha", "zorder")})
         ax[1].set_xlim(q_lo, q_hi)
         ax[1].set_ylabel("charge per fine tick [ke]")
         ax[1].set_xlabel(r"release time at the response plane, "
                          r"relative to $t_0$ [$\mu$s]")
-        ax[1].set_title(r"variant A, positivity + $\ell_1$, "
-                        + CONV_SHORT[conv], fontsize=8)
+        ax[1].set_title(r"positivity + $\ell_1$; variant D solid (default), "
+                        r"variant A thin dashed;  " + CONV_SHORT[conv],
+                        fontsize=8)
         ax[1].legend(fontsize=6, frameon=False)
         for a in ax:
             _ieee_axes(a)
@@ -2362,35 +2467,31 @@ class ZSNburstFigures(_JsonAlg):
 
         # ---- ZN3 -----------------------------------------------------------
         fig, axs = plt.subplots(1, 3, figsize=(10.5, 3.0))
-        for k in arm_keys:
-            V, arm = k.split("_", 1)
-            base = arm.replace("_3000", "")
-            xs = [nb for nb in nbs
-                  if table["by_nburst"][str(nb)]["arms"].get(k, {}).get(
-                      "waveform_stats")]
-            if not xs:
-                continue
-            ws = [table["by_nburst"][str(nb)]["arms"][k]["waveform_stats"]
-                  for nb in xs]
-            kw = dict(ls=style[V],
-                      marker=("o" if "3000" not in arm else "D"), ms=4.2,
-                      lw=1.0, color=OKABE[base],
-                      mfc=(OKABE[base] if "3000" not in arm else "w"))
-            axs[0].plot(xs, [w["centroid_shift_ticks"] for w in ws], **kw,
-                        label=f"{V}, {ARM_LABEL[base]}"
-                              + (", 3000 it." if "3000" in arm else ""))
-            axs[1].plot(xs, [w["rms_width_ticks"] for w in ws], **kw)
-            axs[2].plot(xs, [w["sum_ke"] for w in ws], **kw)
         w0 = None
-        for nb in nbs:
-            for k in arm_keys:
-                w = table["by_nburst"][str(nb)]["arms"].get(k, {}).get(
-                    "waveform_stats")
-                if w:
-                    w0 = w
-                    break
-            if w0:
-                break
+        for V in ("A", "D"):
+            for base in bases:
+                xs, ws = [], []
+                for nb in nbs:
+                    k = _key(nb, V, base)
+                    w = (table["by_nburst"][str(nb)]["arms"].get(k, {})
+                         .get("waveform_stats") if k else None)
+                    if w:
+                        xs.append(nb)
+                        ws.append(w)
+                        w0 = w0 or w
+                if not xs:
+                    continue
+                k0 = _key(xs[0], V, base)
+                it = table["by_nburst"][str(xs[0])]["arms"][k0]["iters"]
+                kw = dict(marker="o", color=OKABE[base],
+                          mfc=OKABE[base] if V == "D" else "w", **VSTYLE[V])
+                axs[0].plot(xs, [w["centroid_shift_ticks"] for w in ws], **kw,
+                            label=(f"{V}"
+                                   + (" (default)" if V == "D"
+                                      else " (reference)")
+                                   + f", {ARM_LABEL[base]}, {it} it."))
+                axs[1].plot(xs, [w["rms_width_ticks"] for w in ws], **kw)
+                axs[2].plot(xs, [w["sum_ke"] for w in ws], **kw)
         if w0:
             axs[0].axhline(0.0, color="k", lw=0.8, ls="--")
             axs[1].axhline(w0["truth_rms_width_ticks"], color="k", lw=0.8,
@@ -2442,6 +2543,10 @@ class ZSNburstFigures(_JsonAlg):
         plt.close(fig)
         made.append(str(p))
 
+        table["default_variant"] = "D"
+        table["reference_variant"] = "A"
+        table["waveform_iterations"] = {f"{V}_nb{nb}": it
+                                        for (V, nb), it in wave_it.items()}
         table["figures"] = made
         print(f"[ZSNburstFigures] wrote {len(made)} figures under {figdir}")
         self.put(store, "zs.nburst", table)
@@ -2600,3 +2705,281 @@ class ZSLadderCompareFigures(_JsonAlg):
               f"{figdir}")
         self.put(store, "zs.ladder_compare", out)
         self._emit(store, out)
+
+
+# ---------------------------------------------------------------------------
+# the Gaussian within-cell release
+# ---------------------------------------------------------------------------
+D_L_CM2_PER_S = 6.6270          # longitudinal diffusion, tred's own constant
+TICK_US_FINE = 0.05
+
+
+def sigma_L_ticks(depth_cm: float,
+                  velocity_cm_per_us: float = 0.159645) -> float:
+    """Longitudinal diffusion width at the event's drift time, in fine ticks.
+
+    ``t_drift = d / v``; ``sigma_L = sqrt(2 D_L t_drift)`` with
+    ``D_L = 6.6270 cm^2/s`` (tred's constant), converted to time by the same
+    drift velocity and to fine ticks by ``0.05 us`` per tick.  At 16.5 cm this
+    is 4.637 ticks.
+    """
+    t_us = float(depth_cm) / float(velocity_cm_per_us)
+    sig_cm = float(np.sqrt(2.0 * D_L_CM2_PER_S * t_us * 1e-6))
+    return sig_cm / float(velocity_cm_per_us) / TICK_US_FINE
+
+
+class ZSOperatorGaussianCells(ZSOperatorUniform):
+    """Coarse cells released as a GAUSSIAN instead of a box.
+
+    :class:`~unfoldlarpix.model.subbin_operator.ZSOperatorUniform` spreads a
+    cell's charge uniformly over its ``c`` fine ticks (``P_0``, the box
+    ``U_c``).  Here the charge is placed at the cell's CENTRE tick
+    ``c m + (c-1)/2`` and convolved along time with a unit-mass Gaussian of
+    standard deviation ``sigma_p`` fine ticks, truncated at ``5 sigma_p``.
+
+    The taps are normalised twice: once so the truncated kernel has unit mass,
+    and then per cell by the mass that lands inside the fine window, so
+    ``1^T E = 1^T`` exactly — every column keeps the same total as the box
+    model's.  Both normalisations are diagonal, so :meth:`reduce` applying the
+    same factors is the exact adjoint of :meth:`expand`.
+
+    Only ``expand`` and ``reduce`` change; the convolution, the sampling, the
+    unknown grid and the Lipschitz bound are inherited.
+    """
+
+    def __init__(self, *args, sigma_p_ticks: float, **kwargs):
+        super().__init__(*args, **kwargs)
+        c = int(self.subbin)
+        if c % 2 == 0:
+            raise ValueError(
+                f"the Gaussian release puts a cell's charge at its centre "
+                f"tick, which is an integer only for an odd cell width; got "
+                f"c = {c}")
+        self.sigma_p_ticks = float(sigma_p_ticks)
+        if self.sigma_p_ticks <= 0:
+            raise ValueError("sigma_p_ticks must be positive")
+        half = int(np.ceil(5.0 * self.sigma_p_ticks))
+        off = np.arange(-half, half + 1, dtype=np.int64)
+        w = np.exp(-0.5 * (off / self.sigma_p_ticks) ** 2)
+        w = w / w.sum()                       # unit mass after truncation
+        self.taps_offsets = off
+        self.taps_weights = w
+        self.n_fine_used = int(self._qt_fine_used)
+        qt = int(self.q_shape[2])
+        centre = c * np.arange(qt, dtype=np.int64) + (c - 1) // 2
+        # per-cell mass that lands inside the fine window
+        keep = ((centre[:, None] + off[None, :]) >= 0) & \
+               ((centre[:, None] + off[None, :]) < self.n_fine_used)
+        mass = (keep * w[None, :]).sum(axis=1)
+        self.cell_mass_inside = mass
+        scale = np.where(mass > 0, 1.0 / mass, 0.0)
+        self._centre = torch.as_tensor(centre, device=self.device)
+        self._w = torch.as_tensor(w, dtype=self.dtype, device=self.device)
+        self._scale = torch.as_tensor(scale, dtype=self.dtype,
+                                      device=self.device)
+        self._keep = torch.as_tensor(keep, device=self.device)
+        self._off = torch.as_tensor(off, device=self.device)
+
+    def report(self) -> dict:
+        return {"cell_model": "gaussian",
+                "sigma_p_ticks": self.sigma_p_ticks,
+                "n_taps": int(len(self.taps_offsets)),
+                "tap_truncation_sigma": 5.0,
+                "tap_weight_sum": float(self.taps_weights.sum()),
+                "min_cell_mass_inside": float(self.cell_mass_inside.min()),
+                "n_cells_renormalised": int(
+                    (self.cell_mass_inside < 1.0 - 1e-12).sum())}
+
+    def expand(self, q: torch.Tensor) -> torch.Tensor:
+        """``E q``: each cell's charge at its centre tick, Gaussian-spread."""
+        nx, ny, qt = self.q_shape
+        out = torch.zeros((nx, ny, self.n_fine_used), dtype=self.dtype,
+                          device=self.device)
+        qs = q * self._scale[None, None, :]
+        for k in range(len(self._off)):
+            idx = self._centre + int(self._off[k])
+            m = self._keep[:, k]
+            if not bool(m.any()):
+                continue
+            out.index_add_(2, idx[m], self._w[k] * qs[:, :, m])
+        return out
+
+    def reduce(self, g: torch.Tensor) -> torch.Tensor:
+        """``E^T g``: correlate with the same taps, read the centre ticks."""
+        nx, ny, qt = self.q_shape
+        gg = g[:, :, :self.n_fine_used]
+        out = torch.zeros((nx, ny, qt), dtype=self.dtype, device=self.device)
+        for k in range(len(self._off)):
+            idx = self._centre + int(self._off[k])
+            m = self._keep[:, k]
+            if not bool(m.any()):
+                continue
+            out[:, :, m] += self._w[k] * gg.index_select(2, idx[m])
+        return out * self._scale[None, None, :]
+
+
+# ---------------------------------------------------------------------------
+MODEL_COLOR = {"uniform": "#0072B2", "gaussian": "#CC79A7"}
+MODEL_LABEL = {"uniform": r"box ($U_5$)", "gaussian": "Gaussian"}
+
+
+@algorithm("ZSGaussFigures")
+class ZSGaussFigures(_JsonAlg):
+    """ZG1 / ZG2: the box against the Gaussian within-cell release.
+
+    ``inputs`` is a list of ``{nburst, cell_model, arms_json, arms_npz}``.
+    """
+
+    reads = ()
+    writes = ("zs.gauss",)
+
+    def execute(self, store):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        figdir = Path(str(self.props["fig_dir"]))
+        figdir.mkdir(parents=True, exist_ok=True)
+        conv = str(self.props.get("convention", "acq_edge"))
+        probe = [int(v) for v in self.props.get("probe_pixel", [141, 68])]
+        pk = f"{probe[0]}_{probe[1]}"
+        rows: dict = {}
+        for item in self.props.get("inputs", []):
+            nb = int(item["nburst"])
+            cm = str(item["cell_model"])
+            R = json.load(open(item["arms_json"]))["result"]
+            Z_ = np.load(item["arms_npz"])
+            rows[(nb, cm)] = {"rec": R, "npz": Z_}
+        nbs = sorted({k[0] for k in rows})
+        models = [m for m in ("uniform", "gaussian")
+                  if any(k[1] == m for k in rows)]
+        made = []
+
+        table = {"convention": CONV_LABEL[conv], "probe_pixel": probe,
+                 "by_case": {}}
+        for (nb, cm), e in sorted(rows.items()):
+            R = e["rec"]
+            for a in R["arms"]:
+                key = f"nb{nb}_{cm}_{a['convention']}_{a['variant']}_{a['arm']}"
+                table["by_case"][key] = {
+                    "nburst": nb, "cell_model": cm,
+                    "sigma_p_ticks": R.get("sigma_p_ticks"),
+                    "sigma_L_ticks": R.get("sigma_L_ticks"),
+                    "convention": a["convention"], "variant": a["variant"],
+                    "arm": a["arm"], "iters": a["iters"],
+                    "sum_xhat_over_truth": a["sum_xhat_over_truth"],
+                    "plus1_sum_ke": a["pixels"]["plus1"]["sum_ke"],
+                    "plus2_sum_ke": a["pixels"]["plus2"]["sum_ke"],
+                    "E_rel_1.5": a.get("E_rel_1.5"),
+                    "E_rel_2.0": a.get("E_rel_2.0"),
+                    "rel_residual": a["rel_residual"],
+                    "residual_by_row_kind": a["residual_by_row_kind"],
+                    "censor_violation": a["censor_violation"],
+                    "waveform_stats": a.get("waveform_stats", {}).get(pk, {}),
+                    "wall_time_s": a["wall_time_s"],
+                }
+
+        # ---- ZG1: the probe pixel's charge per fine tick ------------------
+        fig, axs = plt.subplots(1, len(nbs), figsize=(5.2 * len(nbs), 3.2))
+        axs = np.atleast_1d(axs)
+        for a, nb in zip(axs, nbs):
+            ref = rows.get((nb, models[0]))
+            org = ref["npz"].get("fine_origin_tick")
+            b0 = int(org[0]) if org is not None else 0
+
+            def _us(arr):
+                return (b0 + np.arange(len(arr))) * 0.05
+
+            tr = ref["npz"].get(f"truth_{pk}")
+            if tr is not None:
+                a.step(_us(tr), tr, where="post", color="k", lw=1.2,
+                       label="truth")
+                nz = np.nonzero(tr)[0]
+                a.set_xlim((b0 + nz[0]) * 0.05 - 3.0,
+                           (b0 + nz[-1]) * 0.05 + 3.0)
+            for cm in models:
+                e = rows.get((nb, cm))
+                if e is None:
+                    continue
+                v = e["npz"].get(f"wave_{conv}_D_pos_l1_{pk}")
+                if v is None:
+                    continue
+                sp = e["rec"].get("sigma_p_ticks")
+                a.step(_us(v), v, where="post", lw=1.1,
+                       color=MODEL_COLOR[cm],
+                       label=(MODEL_LABEL[cm]
+                              + (r", $\sigma_p$ = %.2f ticks" % sp
+                                 if sp else "")))
+            a.set_title(f"pixel ({probe[0]}, {probe[1]}), nburst = {nb}",
+                        fontsize=8)
+            a.set_xlabel(r"release time at the response plane, "
+                         r"relative to $t_0$ [$\mu$s]")
+            a.set_ylabel("charge per fine tick [ke]")
+            a.legend(fontsize=6, frameon=False)
+            _ieee_axes(a)
+        fig.tight_layout()
+        p = figdir / f"ZG1_waveform_{probe[0]}_{probe[1]}.png"
+        fig.savefig(p, dpi=200)
+        plt.close(fig)
+        made.append(str(p))
+
+        # ---- ZG2: the three summary numbers, box against Gaussian ---------
+        cases = [(nb, cv) for nb in nbs
+                 for cv in ("acq_edge", "acq_t0")
+                 if any(k.startswith(f"nb{nb}_{m}_{cv}_D_")
+                        for m in models for k in table["by_case"])]
+        panels = (("sum_xhat_over_truth",
+                   r"$\Sigma\hat{x}\,/\,\Sigma q_{\rm truth}$", 1.0),
+                  ("E_rel_1.5", r"$E_{\rm rel}$, $\sigma_H$ = 1.5 $\mu$s",
+                   None),
+                  ("rms", "waveform rms width [fine ticks]", None))
+        fig, axs = plt.subplots(1, 3, figsize=(11.0, 3.2))
+        w = 0.8 / max(len(models), 1)
+        truth_rms = None
+        for j, (fld, ylab, ref_line) in enumerate(panels):
+            for i, cm in enumerate(models):
+                xs, hs = [], []
+                for k, (nb, cv) in enumerate(cases):
+                    key = f"nb{nb}_{cm}_{cv}_D_pos_l1"
+                    e = table["by_case"].get(key)
+                    if e is None:
+                        continue
+                    if fld == "rms":
+                        v = e["waveform_stats"].get("rms_width_ticks")
+                        truth_rms = truth_rms or e["waveform_stats"].get(
+                            "truth_rms_width_ticks")
+                    else:
+                        v = e[fld]
+                    if v is None:
+                        continue
+                    xs.append(k - 0.4 + (i + 0.5) * w)
+                    hs.append(v)
+                axs[j].bar(xs, hs, width=w * 0.92, color=MODEL_COLOR[cm],
+                           label=MODEL_LABEL[cm], edgecolor="none")
+            if ref_line is not None:
+                axs[j].axhline(ref_line, color="k", lw=0.9)
+            if fld == "rms" and truth_rms:
+                axs[j].axhline(truth_rms, color="k", lw=0.9, ls="--")
+                axs[j].text(0.02, truth_rms, " truth", fontsize=6,
+                            va="bottom", ha="left",
+                            transform=axs[j].get_yaxis_transform())
+            axs[j].set_xticks(range(len(cases)))
+            axs[j].set_xticklabels(
+                [f"nb {nb}\n{'acq. start' if cv == 'acq_edge' else 'event t0'}"
+                 for nb, cv in cases], fontsize=6.5)
+            axs[j].set_ylabel(ylab)
+            axs[j].set_xlabel("sample and first-window convention")
+            _ieee_axes(axs[j])
+        axs[0].legend(fontsize=6, frameon=False, loc="lower right")
+        fig.suptitle(r"variant D, positivity + $\ell_1$, 5-tick cells, "
+                     r"3000 iterations", fontsize=8)
+        fig.tight_layout(rect=(0, 0, 1, 0.94))
+        p = figdir / "ZG2_box_vs_gaussian.png"
+        fig.savefig(p, dpi=200)
+        plt.close(fig)
+        made.append(str(p))
+
+        table["figures"] = made
+        print(f"[ZSGaussFigures] wrote {len(made)} figures under {figdir}")
+        self.put(store, "zs.gauss", table)
+        self._emit(store, table)
