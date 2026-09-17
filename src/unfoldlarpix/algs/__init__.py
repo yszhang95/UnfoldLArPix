@@ -12,6 +12,7 @@ from . import (  # noqa: F401
     finebasis_algs,
     finebasis_nonlinear_algs,
     fixedgrid_algs,
+    frvariant_algs,
     io_algs,
     readout_algs,
     reco_algs,
@@ -22,4 +23,7 @@ from . import (  # noqa: F401
     survival_algs,
     truth_algs,
     zsbasis_algs,
+    zscalib_algs,
+    zsgradflow_algs,
+    zsgradflow_figs,
 )
